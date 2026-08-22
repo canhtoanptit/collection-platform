@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/guardrail-config.v1.json",
+  "title": "guardrail-config.v1",
+  "description": "Global execution guardrails: when a channel may be contacted and how often (plan §7 DEC-4/DEC-16). Published and versioned exactly like a rule set — immutable once PUBLISHED, `GuardrailConfigPublished` on activation — because \"who changed the SMS window?\" is an audit question. These guardrails are re-evaluated by treatment-service immediately BEFORE dispatch, not only at decision time: a decision taken at 20:59 that reaches the dispatcher at 21:01 is window-blocked and rescheduled, and a customer who has just been contacted by another process is capped. Violations produce SUPPRESSED with `CONTACT_WINDOW_BLOCKED` / `FREQUENCY_CAP_EXCEEDED`, never a dispatch, and the guardrail check fails closed: if the caps cannot be evaluated the treatment is suppressed (`POLICY_RECHECK_UNAVAILABLE`), never sent on the assumption that it was probably fine.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "configId",
+    "version",
+    "contactWindows",
+    "frequencyCaps"
+  ],
+  "properties": {
+    "configId": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+      "description": "Stable identifier of the guardrail configuration family, e.g. `GLOBAL_GUARDRAILS`."
+    },
+    "version": {
+      "type": "integer",
+      "description": "Major version, starting at 1 and incremented on every publish. Decisions and treatments record the version they were checked against.",
+      "minimum": 1,
+      "examples": [
+        3
+      ]
+    },
+    "contactWindows": {
+      "type": "array",
+      "description": "Permitted local contact window per channel — at most one entry per channel (DEC-4 rejects duplicates; the schema cannot compare siblings). A channel with NO entry is unrestricted by time, so an omission is permissive: DEC-4 requires an explicit entry for every channel a published strategy can dispatch on, which turns a forgotten channel into a publish-time 400 instead of an out-of-hours SMS.",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/contactWindow"
+      }
+    },
+    "frequencyCaps": {
+      "type": "array",
+      "description": "Contact frequency caps. Every applicable cap is enforced and the most restrictive wins — an `ALL`-channel cap and a channel-specific cap coexist deliberately (e.g. at most 6 contacts in 30 days overall, at most 2 SMS in 7 days).",
+      "minItems": 1,
+      "maxItems": 30,
+      "items": {
+        "$ref": "#/$defs/frequencyCap"
+      }
+    }
+  },
+  "$defs": {
+    "contactWindow": {
+      "title": "ContactWindow",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "startLocal",
+        "endLocal",
+        "timezone"
+      ],
+      "properties": {
+        "channel": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/channel",
+          "description": "Channel this window applies to."
+        },
+        "startLocal": {
+          "type": "string",
+          "description": "Inclusive start of the window as a local wall-clock time `HH:MM` in `timezone`. Wall-clock rather than UTC because the rule being encoded is a regulatory/courtesy one about the customer's day, and it must not drift by an hour when daylight saving changes.",
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "examples": [
+            "08:00"
+          ]
+        },
+        "endLocal": {
+          "type": "string",
+          "description": "Exclusive end of the window, `HH:MM` local. `endLocal` > `startLocal` is required (validated by DEC-4): windows do not wrap past midnight, so a night-time window is expressed as two entries rather than one that silently inverts.",
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "examples": [
+            "21:00"
+          ]
+        },
+        "timezone": {
+          "type": "string",
+          "description": "IANA time zone name the local times are interpreted in, e.g. `Europe/Dublin`. Defaults to `UTC`, which is also what the platform stores and logs everywhere else (CLAUDE.md §3) — this field is the one place a local offset legitimately enters a contract, and it is a zone name rather than an offset so that DST is resolved from tzdata rather than assumed.",
+          "pattern": "^(UTC|[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){1,2})$",
+          "default": "UTC",
+          "maxLength": 64,
+          "examples": [
+            "Europe/Dublin",
+            "UTC"
+          ]
+        }
+      }
+    },
+    "frequencyCap": {
+      "title": "FrequencyCap",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "windowDays",
+        "maxContacts"
+      ],
+      "properties": {
+        "channel": {
+          "description": "Channel the cap counts, or `ALL` for a cross-channel cap counting every channel together.",
+          "enum": [
+            "SMS",
+            "EMAIL",
+            "LETTER",
+            "CALL",
+            "DIGITAL",
+            "ALL"
+          ]
+        },
+        "windowDays": {
+          "type": "integer",
+          "description": "Rolling window in whole days, counted back from the dispatch instant (not a calendar week): a 7-day cap on Monday morning counts the previous Monday morning onwards.",
+          "minimum": 1,
+          "maximum": 365,
+          "examples": [
+            7
+          ]
+        },
+        "maxContacts": {
+          "type": "integer",
+          "description": "Maximum contact attempts permitted in the window. 0 means the channel is effectively disabled by guardrail — legal, and clearer than deleting the entry, because a deleted entry means \"unrestricted\".",
+          "minimum": 0,
+          "maximum": 1000,
+          "examples": [
+            2
+          ]
+        }
+      }
+    }
+  }
+}

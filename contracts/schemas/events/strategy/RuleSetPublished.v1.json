@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/strategy/RuleSetPublished.v1.json",
+  "title": "RuleSetPublished.v1",
+  "description": "A rule set version was published and is now immutable (plan §6.5 catalogue extension, §7 DEC-4). Emitted by strategy-service on `collections.strategy` keyed by `ruleSetId`. Publishing is the point of no return: the definition can no longer be edited (a mutation attempt is 409) and only a new `version` can change behaviour, which is what lets a strategy pin a rule-set version and trust it. Validation happens before publish, not here — schema, every `field` in the context field catalogue, every `reasonCode` in the reason-code registry, and FORBID_CHANNEL only in a POLICY set. decision-service consumes this to refresh its cache of PUBLISHED rule and policy sets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ruleSetId",
+    "version",
+    "kind",
+    "contentHash"
+  ],
+  "properties": {
+    "ruleSetId": {
+      "type": "string",
+      "description": "Identifier of the rule set family, e.g. `EARLY_COLLECTION_RULES`. Also the partition key.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "EARLY_COLLECTION_RULES"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "description": "Published version. A strategy references exactly this pair (`ruleSetId`, `version`), never \"latest\".",
+      "minimum": 1,
+      "examples": [
+        42
+      ]
+    },
+    "kind": {
+      "description": "`RULES` = business decision logic referenced by strategies. `POLICY` = a global policy set that applies to every decision and is never pinned per strategy (A§54) — a consumer refreshing its cache must treat a new POLICY publication as immediately relevant to all traffic, which is the whole point of policy being global.",
+      "enum": [
+        "RULES",
+        "POLICY"
+      ]
+    },
+    "contentHash": {
+      "type": "string",
+      "description": "SHA-256 (lowercase hex) of the canonical JSON of the published `rule-set.v1.json` document. Recorded per decision alongside the rule-set version so an audit can prove which bytes were evaluated.",
+      "pattern": "^[a-f0-9]{64}$",
+      "examples": [
+        "3b1f0d9c8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c"
+      ]
+    }
+  }
+}

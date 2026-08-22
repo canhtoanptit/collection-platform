@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/strategy/StrategyRetired.v1.json",
+  "title": "StrategyRetired.v1",
+  "description": "A strategy version left ACTIVE and no longer decides (A§60, plan §6.5 catalogue extension). Emitted by strategy-service on `collections.strategy` keyed by `strategyId`. The usual cause is a newer version being activated in the same transaction (`SUPERSEDED`), which is why consumers must handle this event and `StrategyActivated` as one atomic pair rather than assuming a gap with no active version. Retirement is terminal: a retired version is never re-activated — a clone becomes a new version and walks the governance lifecycle again.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategyId",
+    "version"
+  ],
+  "properties": {
+    "strategyId": {
+      "type": "string",
+      "description": "Identifier of the strategy family, e.g. `EARLY_COLLECTION`. Also the partition key.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "EARLY_COLLECTION"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "description": "Version that was retired.",
+      "minimum": 1,
+      "examples": [
+        16
+      ]
+    },
+    "reason": {
+      "description": "OPTIONAL — why it was retired, as a stable code: `SUPERSEDED` (a newer version was activated in the same transaction), `EFFECTIVE_TO_REACHED` (the auto-retire tick passed its `effectiveTo`), `MANUAL` (an operator retired it with no replacement). Omitted, never null, when the producer has no better answer than \"a retirement happened\". A code and not free text: any commentary belongs on the append-only `strategy_transition` row, which is the audit record, while the event carries only vocabulary consumers can branch on.",
+      "enum": [
+        "SUPERSEDED",
+        "EFFECTIVE_TO_REACHED",
+        "MANUAL"
+      ]
+    }
+  }
+}

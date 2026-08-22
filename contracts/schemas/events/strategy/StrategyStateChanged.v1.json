@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/strategy/StrategyStateChanged.v1.json",
+  "title": "StrategyStateChanged.v1",
+  "description": "A strategy version moved through the governance lifecycle (A§60, plan §6.5 catalogue extension). Emitted by strategy-service on EVERY transition — including the ones that never reach production, such as SIMULATED→REJECTED — on `collections.strategy` keyed by `strategyId`, in the same transaction as the append-only `strategy_transition` row. The lifecycle is exactly A§60: DRAFT → TEST → SIMULATED → BUSINESS_APPROVED → RISK_APPROVED → SCHEDULED → ACTIVE → RETIRED, with SIMULATED and BUSINESS_APPROVED also able to go to REJECTED. The invariants the transitions enforce (DEC-3) are: TEST requires every ref to resolve; SIMULATED is system-only and requires a completed simulation for the current `contentHash`; the definition is frozen at TEST→SIMULATED; BUSINESS_APPROVED requires an approver who is not the author; SCHEDULED requires `effectiveFrom` today or later. This event is the notification, not the record — the record is the transition row.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategyId",
+    "version",
+    "fromState",
+    "toState",
+    "actor",
+    "contentHash"
+  ],
+  "properties": {
+    "strategyId": {
+      "type": "string",
+      "description": "Identifier of the strategy family, e.g. `EARLY_COLLECTION`. Also the partition key, so one strategy's transitions arrive in order and a consumer never sees ACTIVE before RISK_APPROVED.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "EARLY_COLLECTION"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "description": "Version that changed state.",
+      "minimum": 1,
+      "examples": [
+        17
+      ]
+    },
+    "fromState": {
+      "description": "State the version was in, or NULL for the creation of version 1 of a new strategy (which has no prior state). Required and nullable rather than omitted: \"created\" and \"transitioned from somewhere\" must be distinguishable without inferring meaning from an absent key.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/state"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "examples": [
+        null,
+        "RISK_APPROVED"
+      ]
+    },
+    "toState": {
+      "$ref": "#/$defs/state",
+      "description": "State the version is now in."
+    },
+    "actor": {
+      "type": "string",
+      "description": "Who caused the transition: the identity provider `sub` of the human, or `system:<component>` for machine transitions (`system:strategy-scheduler` for a scheduled activation, `system:simulation` for TEST→SIMULATED). Four-eyes rules are checked against this identity — DEC-3 rejects an approval whose actor is the author with 403 — so it is a stable id, never a display name.",
+      "minLength": 1,
+      "maxLength": 128,
+      "examples": [
+        "a1b2c3d4-5e6f-4071-8293-a4b5c6d7e8f9",
+        "system:strategy-scheduler"
+      ]
+    },
+    "contentHash": {
+      "type": "string",
+      "description": "SHA-256 (lowercase hex) of the canonical JSON of the version's definition at the moment of the transition. Frozen from TEST→SIMULATED onward, so comparing the hash on the SIMULATED event with the hash on the ACTIVE event proves that nothing was edited between simulation, approval and activation. A mismatch against a recorded simulation is what makes TEST→SIMULATED fail after a definition edit.",
+      "pattern": "^[a-f0-9]{64}$",
+      "examples": [
+        "9f2c4d1b6a3e8f705c1d2e3b4a596877e0f1a2b3c4d5e6f708192a3b4c5d6e7f"
+      ]
+    }
+  },
+  "$defs": {
+    "state": {
+      "title": "StrategyState",
+      "description": "The nine governance states of A§60, exactly. REJECTED is terminal for that version (clone it to try again) and so is RETIRED.",
+      "enum": [
+        "DRAFT",
+        "TEST",
+        "SIMULATED",
+        "BUSINESS_APPROVED",
+        "RISK_APPROVED",
+        "REJECTED",
+        "SCHEDULED",
+        "ACTIVE",
+        "RETIRED"
+      ]
+    }
+  }
+}

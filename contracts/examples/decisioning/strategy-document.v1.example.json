@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "id": "EARLY_COLLECTION",
+  "name": "Early collection — 1 to 60 DPD",
+  "description": "A§53 worked strategy. Light-touch digital and messaging treatments for early-stage delinquency, escalating to a collector call task on repeated broken promises. This version runs a 90/10 champion/challenger split against version 18, which raises the SMS threshold.",
+  "effectiveFrom": "2026-08-01",
+  "effectiveTo": null,
+  "priority": 100,
+  "eligibility": {
+    "all": [
+      {
+        "field": "delinquency.dpd",
+        "op": "BETWEEN",
+        "value": [
+          1,
+          60
+        ]
+      },
+      {
+        "field": "account.status",
+        "op": "EQ",
+        "value": "OPEN"
+      }
+    ]
+  },
+  "segments": [
+    {
+      "name": "EARLY_LOW_RISK",
+      "when": {
+        "all": [
+          {
+            "field": "arrangement.brokenPromises90d",
+            "op": "EQ",
+            "value": 0
+          },
+          {
+            "field": "customer.contactability",
+            "op": "IN",
+            "value": [
+              "HIGH",
+              "MEDIUM"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "EARLY_HIGH_RISK",
+      "when": {
+        "any": [
+          {
+            "field": "arrangement.brokenPromises90d",
+            "op": "GTE",
+            "value": 1
+          },
+          {
+            "field": "customer.contactability",
+            "op": "IN",
+            "value": [
+              "LOW",
+              "UNCONTACTABLE"
+            ]
+          },
+          {
+            "field": "account.currentBalance",
+            "op": "GT",
+            "value": "10000.00"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DEFAULT",
+      "when": {
+        "all": []
+      }
+    }
+  ],
+  "ruleSetRef": {
+    "ruleSetId": "EARLY_COLLECTION_RULES",
+    "version": 42
+  },
+  "modelRefs": [
+    {
+      "modelId": "PAYMENT_PROPENSITY",
+      "version": 8,
+      "required": true,
+      "timeoutMs": 200,
+      "onError": "DEFAULT",
+      "defaultScore": "0.5"
+    },
+    {
+      "modelId": "CHANNEL_RESPONSE",
+      "version": 3,
+      "required": false,
+      "timeoutMs": 150,
+      "onError": "DEFAULT",
+      "defaultScore": "0.25"
+    }
+  ],
+  "treatments": [
+    {
+      "treatmentCode": "CALL_TASK_COLLECTOR",
+      "type": "CALL_TASK",
+      "channel": "CALL",
+      "priority": 120,
+      "params": {}
+    },
+    {
+      "treatmentCode": "SMS_EARLY_REMINDER",
+      "type": "SMS",
+      "channel": "SMS",
+      "priority": 100,
+      "params": {
+        "templateId": "SMS_EARLY_1",
+        "locale": "en-IE"
+      }
+    },
+    {
+      "treatmentCode": "EMAIL_EARLY_REMINDER",
+      "type": "EMAIL",
+      "channel": "EMAIL",
+      "priority": 90,
+      "params": {
+        "templateId": "EMAIL_EARLY_1",
+        "locale": "en-IE"
+      }
+    },
+    {
+      "treatmentCode": "DIGITAL_SELF_SERVE",
+      "type": "DIGITAL",
+      "channel": "DIGITAL",
+      "priority": 80,
+      "params": {
+        "templateId": "APP_SELF_SERVE_1",
+        "deepLink": "/collections/pay"
+      }
+    },
+    {
+      "treatmentCode": "LETTER_FORMAL_NOTICE",
+      "type": "LETTER",
+      "channel": "LETTER",
+      "priority": 60,
+      "params": {
+        "templateId": "LETTER_NOTICE_1",
+        "printQueue": "STANDARD"
+      }
+    }
+  ],
+  "experiment": {
+    "enabled": true,
+    "salt": "EARLY_COLLECTION_V17",
+    "arms": [
+      {
+        "name": "CHAMPION",
+        "version": null,
+        "percentBps": 9000
+      },
+      {
+        "name": "CHALLENGER",
+        "version": 18,
+        "percentBps": 1000
+      }
+    ]
+  }
+}

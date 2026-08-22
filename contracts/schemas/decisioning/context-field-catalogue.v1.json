@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/context-field-catalogue.v1.json",
+  "title": "context-field-catalogue.v1",
+  "description": "The closed, typed catalogue of every decision-context path a rule may address (A§55, plan §7 DEC-1). It is the vocabulary of the rule DSL: `rule-set.v1.json` leaf conditions carry a `field`, and DEC-4 rejects a rule whose `field` is not in the catalogue — naming the offending path — so a typo is a publish-time 400 rather than a silently-false condition in production. It also declares the comparison type and unit per path, which is how `platform/ruledsl` (LIB-9) knows to compare `delinquency.amountOverdue` as a decimal rather than as text. This file is the *shape*; the v1 catalogue *content* is `examples/decisioning/context-field-catalogue.v1.example.json`, which enumerates every addressable leaf of `context-document.v1.json` and is the artefact services load. Paths whose value is an array (`provenance[]`) are deliberately not addressable: the DSL has no quantifiers, which is what keeps it non-Turing-complete, deterministic and parity-testable (A§88).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalogueVersion",
+    "fields"
+  ],
+  "properties": {
+    "catalogueVersion": {
+      "type": "integer",
+      "description": "Version of the catalogue *content*, starting at 1 and incremented whenever a field is added, removed or re-typed. Recorded alongside every published rule set so an audit can replay a decision against the vocabulary that was in force. A removal or a type change is breaking for rules that reference the path, so it ships with the corresponding rule-set major version.",
+      "minimum": 1,
+      "examples": [
+        1
+      ]
+    },
+    "fields": {
+      "type": "array",
+      "description": "Every addressable context path, in document order (subject, delinquency, account, customer, arrangement, contactHistory). `path` is unique across the array — DEC-4 rejects a catalogue with duplicates, because two entries for one path make the comparison type ambiguous.",
+      "minItems": 1,
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/field"
+      }
+    }
+  },
+  "$defs": {
+    "field": {
+      "title": "CatalogueField",
+      "description": "One addressable context path with the comparison semantics the rule engine applies to it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "type",
+        "description"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Dot path of the value inside a `context-document.v1.json` instance, e.g. `delinquency.dpd`. Always at least two segments deep: the top level of a context document holds sections only, never scalars. Matches the `field` value of a rule-set leaf condition byte for byte.",
+          "pattern": "^[a-z][A-Za-z0-9]*(\\.[A-Za-z0-9][A-Za-z0-9_]*)+$",
+          "minLength": 3,
+          "maxLength": 128,
+          "examples": [
+            "delinquency.dpd",
+            "customer.doNotContact",
+            "contactHistory.byChannel7d.SMS"
+          ]
+        },
+        "type": {
+          "description": "Comparison type, not JSON encoding. `number` values are compared as arbitrary-precision decimals (LIB-9 uses shopspring/decimal), which is why `delinquency.amountOverdue` — a decimal *string* on the wire — is catalogued as `number`: rules read `\"500.00\"` and compare it exactly. `date` covers both calendar dates (`YYYY-MM-DD`) and RFC3339 UTC timestamps and compares chronologically. `string` compares by exact equality and set membership only (no substring, no regex, no case folding). `boolean` compares only to `true`/`false`.",
+          "enum": [
+            "number",
+            "string",
+            "boolean",
+            "date"
+          ]
+        },
+        "unit": {
+          "description": "Unit of a `number` field, mandatory reading for anyone writing a threshold. `majorUnits` is a currency amount in major units (EUR 500.00 = `\"500.00\"`), the one deliberate departure from the platform's minor-unit rule and only inside context documents (contracts/README.md §4). `days` is a whole number of days. `count` is a whole number of occurrences. Omitted for `string`, `boolean` and `date` fields, which have no unit.",
+          "enum": [
+            "majorUnits",
+            "days",
+            "count"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "description": "What the field means, who produces it, and any nullability — written for the business analyst authoring a rule and the auditor reading a decision explanation, not for a developer.",
+          "minLength": 8,
+          "maxLength": 512
+        }
+      },
+      "allOf": [
+        {
+          "title": "unit is meaningful only for numbers",
+          "description": "A unit on a string, boolean or date field would be dead metadata that a rule author could mistake for a conversion instruction, so it is rejected.",
+          "if": {
+            "required": [
+              "unit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "number"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

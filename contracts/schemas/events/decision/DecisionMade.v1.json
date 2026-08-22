@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/decision/DecisionMade.v1.json",
+  "title": "DecisionMade.v1",
+  "description": "A decision was taken for one subject (A§23, D§39). Emitted by decision-service on `collections.decision` keyed by `decisionId`, in the SAME transaction as the append-only `decision_audit` row and, when the outcome is TREAT, alongside `TreatmentSelected` — so a decision can never be published without being audited, and a treatment can never be dispatched without a published decision. Every outcome is emitted, not only the ones that lead to contact: NO_ACTION, SUPPRESSED and INELIGIBLE are decisions with reasons, and the analytical marts count them. This payload is the summary; the full stage trace and the input snapshot live in S3 and are reachable through `GET /v1/decisions/{decisionId}/explanation` (A§58). Consumers must be idempotent on `eventId` — delivery is at-least-once (D§3.5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decisionId",
+    "customerId",
+    "accountId",
+    "caseId",
+    "mode",
+    "decision",
+    "strategyId",
+    "strategyVersion",
+    "treatmentCode",
+    "channel",
+    "reasonCodes",
+    "experimentArm",
+    "batchId"
+  ],
+  "properties": {
+    "decisionId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Identity of the decision and the primary key of its immutable audit row. Also the event's `aggregateId` and partition key. A retried command with the same `Idempotency-Key` returns — and re-publishes nothing for — the original `decisionId`."
+    },
+    "customerId": {
+      "type": "string",
+      "description": "Customer the decision is about. No pattern imposed: platform ULIDs in production, source-system keys such as `C123` in fixtures and migration populations (D§8), and an audit event must be able to state exactly what it decided on.",
+      "minLength": 1,
+      "maxLength": 64,
+      "examples": [
+        "C123"
+      ]
+    },
+    "accountId": {
+      "type": "string",
+      "description": "Account the decision is about, and the champion/challenger allocation key.",
+      "minLength": 1,
+      "maxLength": 64,
+      "examples": [
+        "A123"
+      ]
+    },
+    "caseId": {
+      "description": "Collection case this decision belongs to, or NULL for a decision taken before a case exists (and for TEST/SIMULATION runs over historical populations). Required and nullable: \"no case\" is a fact about the decision, not a missing field.",
+      "oneOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "examples": [
+        null,
+        "01M0MEKD80CYJMPJVS094NGMXE"
+      ]
+    },
+    "mode": {
+      "description": "How the decision was taken, and therefore what may act on it. ONLINE = a live request. BATCH = the daily decisioning run (DEC-10). TEST = a dry run against a non-ACTIVE version, role-gated. SIMULATION = a strategy comparison run, which produces NO treatment events (D§40). SHADOW = a parallel-run comparison, likewise no treatments (A§87–88). A consumer that dispatches must act on ONLINE and BATCH only — this field is the guard that stops a simulation from contacting a real customer.",
+      "enum": [
+        "ONLINE",
+        "BATCH",
+        "TEST",
+        "SIMULATION",
+        "SHADOW"
+      ]
+    },
+    "decision": {
+      "description": "The outcome. TREAT = a treatment was selected. NO_ACTION = the pipeline deliberately chose nothing, including a post-selection policy guard rejection (`POLICY_VIOLATION_GUARD`). SUPPRESSED = policy or a business rule suppressed contact. INELIGIBLE = no strategy applied.",
+      "enum": [
+        "TREAT",
+        "NO_ACTION",
+        "SUPPRESSED",
+        "INELIGIBLE"
+      ]
+    },
+    "strategyId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Strategy that decided, or NULL when no strategy matched — the INELIGIBLE / `NO_STRATEGY_MATCH` case (plan §7 DEC-7). The `if/then` below permits NULL only for INELIGIBLE, so every decided outcome names the strategy that produced it.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "EARLY_COLLECTION"
+      ]
+    },
+    "strategyVersion": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Version of that strategy, NULL under the same condition as `strategyId`. Pinned at decision time: activating a new version later never changes what this event means.",
+      "minimum": 1,
+      "examples": [
+        17
+      ]
+    },
+    "treatmentCode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Selected treatment code, or NULL when nothing was selected. Non-null for TREAT (enforced below). The channel-level detail a dispatcher needs travels on `TreatmentSelected`; this field exists so analytics and support can read an outcome without joining.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        null,
+        "SMS_EARLY_REMINDER"
+      ]
+    },
+    "channel": {
+      "description": "Channel of the selected treatment, or NULL when nothing was selected. Non-null for TREAT.",
+      "oneOf": [
+        {
+          "enum": [
+            "SMS",
+            "EMAIL",
+            "LETTER",
+            "CALL",
+            "DIGITAL"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "examples": [
+        null,
+        "SMS"
+      ]
+    },
+    "reasonCodes": {
+      "type": "array",
+      "description": "Ordered reason codes explaining the outcome, in the deterministic stage order the pipeline emits them (policy, eligibility, segment, rule, model, constraint) — deterministic so that a replay produces a byte-identical event and a diff means a real behaviour change. Never empty: an unexplainable decision is not shippable (A§58). Every code exists in registries/reason-codes.v1.json, which is what makes `GET /v1/decisions/{id}/explanation` able to render a description for each one.",
+      "minItems": 1,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+      },
+      "examples": [
+        [
+          "DPD_31_60",
+          "CHANNEL_ELIGIBLE"
+        ]
+      ]
+    },
+    "experimentArm": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Champion/challenger arm this subject was allocated to, or NULL when the deciding strategy runs no experiment (D§41). The allocation is a pure function of `accountId` and the experiment salt, so the same account carries the same arm on every decision — which is what makes an arm comparison a comparison of strategies rather than of populations.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        null,
+        "CHALLENGER"
+      ]
+    },
+    "batchId": {
+      "description": "Batch run that produced this decision, or NULL for a decision that was not part of a batch. Present for BATCH, SIMULATION and SHADOW modes, which is how an outcome file, a report and the audit rows for one run are tied together.",
+      "oneOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "examples": [
+        null,
+        "01M0MEKD80JYKGX9XGC2M0KFSW"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "title": "a TREAT names its treatment and channel",
+      "description": "A TREAT with a null treatment is a decision nothing can act on; treatment-service would have to guess, and guessing is how a customer gets contacted on the wrong channel.",
+      "if": {
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "const": "TREAT"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "treatmentCode": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "title": "only an INELIGIBLE decision may have no strategy",
+      "description": "TREAT, NO_ACTION and SUPPRESSED are produced BY a strategy, so a null strategy on any of them is a lost attribution rather than a legitimate absence. Modelling this as an `if/then` rather than as two unconditionally-nullable fields keeps the audit trail honest without inventing a sentinel strategy id.",
+      "if": {
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "enum": [
+              "TREAT",
+              "NO_ACTION",
+              "SUPPRESSED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "strategyId": {
+            "type": "string"
+          },
+          "strategyVersion": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  ]
+}

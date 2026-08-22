@@ -1,0 +1,17 @@
+{
+  "eventId": "01M0MEKD802JC7P1HQ39CSN8XA",
+  "eventType": "RuleSetPublished",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-20T11:12:00Z",
+  "producer": "strategy-service",
+  "aggregateType": "RuleSet",
+  "aggregateId": "EARLY_COLLECTION_RULES",
+  "correlationId": "01M0MEKD805STC303K81D2TP4X",
+  "causationId": "01M0MEKD80S5SBZAHNQYF4FQYR",
+  "payload": {
+    "ruleSetId": "EARLY_COLLECTION_RULES",
+    "version": 42,
+    "kind": "RULES",
+    "contentHash": "e767477bb06cb5aac8a8e1d325098356d88df9b296cda469f423bf74030fb386"
+  }
+}

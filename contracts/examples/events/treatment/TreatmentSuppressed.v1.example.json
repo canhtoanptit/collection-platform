@@ -1,0 +1,20 @@
+{
+  "eventId": "01M0MEKD802T3BDKQMRKRZGW1X",
+  "eventType": "TreatmentSuppressed",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-22T20:58:00Z",
+  "producer": "treatment-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0MEKD80WFAJZ4N26QSDVM6E",
+  "correlationId": "01M0MEKD80TSP211BT1CGYCKY7",
+  "causationId": "01M0MEKD80F7RWYZSCKYB4P7FC",
+  "payload": {
+    "treatmentId": "01M0MEKD80F1YV2MR800S0CNVA",
+    "decisionId": "01M0MEKD805WWWR0ZKGBSS2B2D",
+    "caseId": "01M0MEKD80WFAJZ4N26QSDVM6E",
+    "suppressionReasons": [
+      "CONTACT_WINDOW_BLOCKED",
+      "FREQUENCY_CAP_EXCEEDED"
+    ]
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/population-line.v1.json",
+  "title": "population-line.v1",
+  "description": "ONE LINE of a batch decisioning population file — `s3://colx-dev-batch/population/date=<D>/run=<runId>/population.jsonl`, one JSON object per line, no wrapping array, so a million-row population streams without ever being held in memory (plan §7 DEC-10, ANA-10). Each line is self-contained: the whole context travels with the subject, so a batch decision is reproducible from the population file alone, months later, with no upstream call. The population is built by dbt/Snowflake (`int_collection_eligibility`, A§46) shaped to exactly these fields; the context-parity test asserts that the Snowflake-built context equals the online context builder's output for sampled accounts, which is the guard against the top project risk — a simulation that disagrees with production because the two read different data. `legacyDecision` is present only in migration and parity populations (A§87–88).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subject",
+    "context"
+  ],
+  "properties": {
+    "subject": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/context-document.v1.json#/$defs/subject",
+      "description": "Batch key for the line, duplicated at line level so a worker can dedupe on `(batch_id, account_id)` and report an error line without parsing the whole context. The worker asserts it equals `context.subject` field for field and rejects the line otherwise — two disagreeing subjects on one line make the decision unattributable."
+    },
+    "context": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/context-document.v1.json",
+      "description": "The full decision context for this subject, as of the population's business date. Referenced by absolute `$id` rather than copied, so a batch line and an online decision are validated by the same schema and cannot drift."
+    },
+    "legacyDecision": {
+      "$ref": "#/$defs/legacyDecision",
+      "description": "OPTIONAL — what the legacy engine decided for this subject on this data. Omitted (never null) outside migration work. Its only consumer is the shadow-run comparator with `strategyB: \"LEGACY\"` (DEC-13), which diffs the new engine against it and categorises every difference per A§88 — the point being that 100% agreement is not the goal, but every disagreement must have an explanation."
+    }
+  },
+  "$defs": {
+    "legacyDecision": {
+      "title": "LegacyDecision",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "reasonCodes"
+      ],
+      "properties": {
+        "decision": {
+          "description": "Legacy outcome normalised into the platform's four-value vocabulary by the migration mapper, so the two engines are comparable at all. The mapping itself is part of the migration work (A§87) and is recorded there, not here.",
+          "enum": [
+            "TREAT",
+            "NO_ACTION",
+            "SUPPRESSED",
+            "INELIGIBLE"
+          ]
+        },
+        "treatmentCode": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+          "description": "OPTIONAL — mapped legacy treatment code; present when `decision` is TREAT."
+        },
+        "channel": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/channel",
+          "description": "OPTIONAL — mapped legacy channel; present when `decision` is TREAT."
+        },
+        "reasonCodes": {
+          "type": "array",
+          "description": "Legacy reason codes, mapped where a mapping exists and carried verbatim where none does. Shape is enforced (SCREAMING_SNAKE) but registry membership is NOT required for this field alone: the legacy vocabulary is not ours to close, and dropping an unmapped code would hide exactly the differences a parity run exists to find. Every reason code the PLATFORM emits must be in registries/reason-codes.v1.json (CON-7 cross-checks it).",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "title": "a legacy TREAT names a treatment and a channel",
+          "description": "A legacy \"contact this customer\" with no channel cannot be compared against a new-engine decision, so it is rejected at population-build time rather than counted as a mystery diff.",
+          "if": {
+            "required": [
+              "decision"
+            ],
+            "properties": {
+              "decision": {
+                "const": "TREAT"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "treatmentCode",
+              "channel"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "eventId": "01M0MEKD801P40XY4MYA79NAEJ",
+  "eventType": "StrategyStateChanged",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-21T16:30:00Z",
+  "producer": "strategy-service",
+  "aggregateType": "Strategy",
+  "aggregateId": "EARLY_COLLECTION",
+  "correlationId": "01M0MEKD80RH6C9S2SR39KT31P",
+  "causationId": "01M0MEKD80CBT9V54RNWG3J60R",
+  "payload": {
+    "strategyId": "EARLY_COLLECTION",
+    "version": 17,
+    "fromState": "RISK_APPROVED",
+    "toState": "SCHEDULED",
+    "actor": "a1b2c3d4-5e6f-4071-8293-a4b5c6d7e8f9",
+    "contentHash": "db620635c1165a53c68152006b8ab45d3a25d02bca1fec0277553d374c4173c7"
+  }
+}

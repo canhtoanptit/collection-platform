@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/treatment/TreatmentSuppressed.v1.json",
+  "title": "TreatmentSuppressed.v1",
+  "description": "A selected treatment was NOT executed because an execution guardrail blocked it (plan §6.5 catalogue extension, §7 DEC-14/DEC-16). Emitted by treatment-service on `collections.treatment` keyed by `caseId` when the state machine goes to SUPPRESSED. The guardrails re-evaluated immediately before dispatch are: a fresh customer-policy fetch (unavailable ⇒ `POLICY_RECHECK_UNAVAILABLE`, fail closed), the channel's contact window, and the frequency caps — so a customer who set do-not-contact between the decision and the dispatch is not contacted, which is the entire reason the re-check exists. Suppression is a first-class outcome with reasons, not a silent drop: it is counted in dashboards and is the evidence for \"why did the strategy decide to contact but nothing was sent?\".",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "treatmentId",
+    "decisionId",
+    "caseId",
+    "suppressionReasons"
+  ],
+  "properties": {
+    "treatmentId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Identity of the treatment that was suppressed — the aggregate this event is about. The treatment row survives in SUPPRESSED state; it is never deleted, because the fact that a contact was intended and blocked is itself auditable."
+    },
+    "decisionId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "The decision that selected the suppressed treatment, so a suppression can be traced back to the strategy that intended it."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Collection case the treatment belonged to, and the partition key."
+    },
+    "suppressionReasons": {
+      "type": "array",
+      "description": "Every guardrail that blocked the dispatch, as registry reason codes — ALL of them, not just the first: a treatment blocked by both a contact window and a frequency cap must show both, or the operator who fixes the window will not understand why nothing changed. Codes come from registries/reason-codes.v1.json (category EXECUTION for guardrail blocks, POLICY for a customer-policy block found at re-check). Never empty.",
+      "minItems": 1,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+      },
+      "examples": [
+        [
+          "DO_NOT_CONTACT"
+        ],
+        [
+          "CONTACT_WINDOW_BLOCKED",
+          "FREQUENCY_CAP_EXCEEDED"
+        ]
+      ]
+    }
+  }
+}

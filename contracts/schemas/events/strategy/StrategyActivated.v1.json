@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/strategy/StrategyActivated.v1.json",
+  "title": "StrategyActivated.v1",
+  "description": "A strategy version became ACTIVE and is now deciding (A§23, A§60). Emitted by strategy-service on `collections.strategy` keyed by `strategyId`, in the same transaction as the activation, which atomically retires the previously ACTIVE version — so an activation always appears as this event plus a `StrategyRetired` for the version it replaced, never one without the other. decision-service consumes it to refresh its configuration cache (with a 60s poll as a fallback, so a missed event delays a strategy by a minute rather than stranding it). Activation must be auditable (A§60): the append-only `strategy_transition` row is the record, this event is the notification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategyId",
+    "version",
+    "contentHash",
+    "effectiveFrom",
+    "activatedBy"
+  ],
+  "properties": {
+    "strategyId": {
+      "type": "string",
+      "description": "Identifier of the strategy family that was activated, e.g. `EARLY_COLLECTION`. Also the partition key of the event, so activations and retirements of one strategy are strictly ordered.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "EARLY_COLLECTION"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "description": "Version of the strategy that is now ACTIVE. At most one version of a strategy is ACTIVE at a time, enforced in the database by a partial unique index (DEC-2), not merely by application logic.",
+      "minimum": 1,
+      "examples": [
+        17
+      ]
+    },
+    "contentHash": {
+      "type": "string",
+      "description": "SHA-256 (lowercase hex) of the canonical JSON of the activated `strategy-document.v1.json`. Frozen at the TEST→SIMULATED transition and unchanged through the approvals, so a consumer — or an auditor years later — can prove that what was approved is what went live. A definition edit changes the hash and invalidates the simulation and the approvals.",
+      "pattern": "^[a-f0-9]{64}$",
+      "examples": [
+        "9f2c4d1b6a3e8f705c1d2e3b4a596877e0f1a2b3c4d5e6f708192a3b4c5d6e7f"
+      ]
+    },
+    "effectiveFrom": {
+      "type": "string",
+      "description": "First business date (UTC calendar date) on which this version decides, copied from the activated definition. Activation may happen before this date — SCHEDULED then ACTIVE — so a consumer must honour the date rather than assume \"active now means deciding now\".",
+      "format": "date",
+      "examples": [
+        "2026-08-24"
+      ]
+    },
+    "activatedBy": {
+      "type": "string",
+      "description": "Who activated it: the identity provider `sub` of the human who pressed activate, or `system:strategy-scheduler` when the scheduler tick promoted a SCHEDULED version on its effective date. Never a display name — the audit needs a stable identifier.",
+      "minLength": 1,
+      "maxLength": 128,
+      "examples": [
+        "system:strategy-scheduler",
+        "a1b2c3d4-5e6f-4071-8293-a4b5c6d7e8f9"
+      ]
+    }
+  }
+}

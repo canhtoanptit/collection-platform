@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/treatment/TreatmentExecuted.v1.json",
+  "title": "TreatmentExecuted.v1",
+  "description": "A treatment was dispatched to its channel provider (plan §6.5 catalogue extension, §7 DEC-14/DEC-15). Emitted by treatment-service on `collections.treatment` keyed by `caseId`, when the execution state machine reaches DISPATCHED — i.e. the provider accepted the request. It is NOT a delivery confirmation: delivery arrives later as an HMAC-signed provider webhook and moves the treatment to DELIVERED or FAILED. Note the ownership boundary (plan §6.4): treatment-service records the contact by CALLING contact-service (`POST /v1/contacts`), and contact-service alone emits `ContactAttempted`/`ContactCompleted` — this event is about the treatment, never a substitute for a contact event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "treatmentId",
+    "decisionId",
+    "caseId",
+    "channel",
+    "provider",
+    "providerRef",
+    "dispatchedAt"
+  ],
+  "properties": {
+    "treatmentId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Identity of the treatment row whose state changed — the aggregate this event is about, and the id whose transitions are audited append-only."
+    },
+    "decisionId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "The decision that selected this treatment, carried through so that a dispatch can always be traced back to the strategy, rules and models that chose it."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Collection case the treatment belongs to, and the partition key — so a case's dispatches and suppressions are strictly ordered."
+    },
+    "channel": {
+      "description": "Channel the treatment was dispatched on. Matches the `TreatmentSelected` channel: the guardrails can suppress or delay a treatment but never re-route it to another channel.",
+      "enum": [
+        "SMS",
+        "EMAIL",
+        "LETTER",
+        "CALL",
+        "DIGITAL"
+      ]
+    },
+    "provider": {
+      "type": "string",
+      "description": "Which adapter/provider accepted the dispatch, as a kebab-case deployable or service name (`mock-comms-provider` in dev, `aws-ses` for sandbox email). Recorded because \"which provider was this sent through?\" is the first question in any delivery incident, and because the adapter SPI means the answer can differ per channel and per environment.",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 64,
+      "examples": [
+        "mock-comms-provider",
+        "aws-ses"
+      ]
+    },
+    "providerRef": {
+      "type": "string",
+      "description": "The provider's own reference for the dispatched message — the value a delivery webhook is correlated on. Dispatch is made idempotent by sending `provider_ref = treatmentId` as the provider's idempotency key (DEC-15), so a retried dispatch produces one message and this field normally equals `treatmentId`; a provider that mints its own id has it recorded here instead.",
+      "minLength": 1,
+      "maxLength": 256,
+      "examples": [
+        "01M0MEKD801YSF9NG4YJVNAFH1"
+      ]
+    },
+    "dispatchedAt": {
+      "type": "string",
+      "description": "When the provider accepted the dispatch, RFC3339 UTC with `Z`. This is the instant the contact-frequency window is counted from, and the instant the contact window was evaluated at — so a treatment held overnight by a window block carries the morning's timestamp, not the decision's.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T10:05:00Z"
+      ]
+    }
+  }
+}

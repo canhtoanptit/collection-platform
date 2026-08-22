@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/treatment/TreatmentSelected.v1.json",
+  "title": "TreatmentSelected.v1",
+  "description": "A decision selected a treatment to execute (A§23). Emitted by decision-service — not by treatment-service — on `collections.treatment` keyed by `caseId`, in the same transaction as the `decision_audit` row and the `DecisionMade` event, so the intent to contact is durable before anything is dispatched. treatment-service consumes it, dedupes on the inbox key AND on a business `UNIQUE(decision_id)`, and runs the execution state machine (DEC-14); the two layers of dedupe are deliberate, because a topic-slice replay must produce zero duplicate dispatches (D§49). Emitted ONLY for ONLINE and BATCH decisions: SIMULATION and SHADOW runs never produce treatment events (D§40, A§87–88) — that is the boundary that keeps a strategy comparison from contacting real customers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decisionId",
+    "caseId",
+    "accountId",
+    "customerId",
+    "treatmentCode",
+    "type",
+    "channel",
+    "params"
+  ],
+  "properties": {
+    "decisionId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "The decision that selected this treatment. Also treatment-service's business idempotency key — `UNIQUE(decision_id)` on the treatment table means one decision can never produce two treatments, whatever the delivery semantics do."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Collection case the treatment belongs to, and the partition key of the event — treatments for one case are therefore strictly ordered, which is what stops two treatments racing on the same case. A treatment always has a case: a TREAT decision taken without one creates the case first."
+    },
+    "accountId": {
+      "type": "string",
+      "description": "Account being treated. Carried on the event so treatment-service never has to call back for it (A§7.3: no service reads another service's store).",
+      "minLength": 1,
+      "maxLength": 64,
+      "examples": [
+        "A123"
+      ]
+    },
+    "customerId": {
+      "type": "string",
+      "description": "Customer being contacted — the subject of the guardrail re-checks (do-not-contact, contact window, frequency caps) that treatment-service performs immediately before dispatch.",
+      "minLength": 1,
+      "maxLength": 64,
+      "examples": [
+        "C123"
+      ]
+    },
+    "treatmentCode": {
+      "type": "string",
+      "description": "The strategy's treatment code, e.g. `SMS_EARLY_REMINDER`. Identifies which `treatments[]` entry of the deciding strategy version was chosen.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "SMS_EARLY_REMINDER"
+      ]
+    },
+    "type": {
+      "description": "Treatment kind. `CALL_TASK` is a work item for a human collector — dispatched as a case activity through the case API, not to a comms provider; the other four are automated sends handled by a channel adapter.",
+      "enum": [
+        "SMS",
+        "EMAIL",
+        "LETTER",
+        "CALL_TASK",
+        "DIGITAL"
+      ]
+    },
+    "channel": {
+      "description": "Delivery channel, and the channel the execution guardrails (contact window, frequency cap, policy `FORBID_CHANNEL`) are evaluated against.",
+      "enum": [
+        "SMS",
+        "EMAIL",
+        "LETTER",
+        "CALL",
+        "DIGITAL"
+      ]
+    },
+    "params": {
+      "type": "object",
+      "description": "Channel/template parameters copied verbatim from the selected treatment in the strategy document, e.g. `{\"templateId\": \"SMS_EARLY_1\", \"locale\": \"en-IE\"}`. DELIBERATELY OPEN (`additionalProperties: true`), for the same reason as in strategy-document.v1.json: the key set belongs to the channel adapter and its message templates (DEC-15), which change on a provider's release schedule and must not force an event version. The adapter validates the parameters it requires at dispatch and fails the treatment with a reason code if one is missing. Never carries PII and never carries a decision input. May be an empty object.",
+      "additionalProperties": true,
+      "examples": [
+        {
+          "templateId": "SMS_EARLY_1",
+          "locale": "en-IE"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "title": "treatment type ↔ channel mapping",
+      "description": "The same closed 1:1 mapping as strategy-document.v1.json (SMS→SMS, EMAIL→EMAIL, LETTER→LETTER, CALL_TASK→CALL, DIGITAL→DIGITAL), enforced here too because this is the message a dispatcher acts on: an `SMS` treatment arriving on the `LETTER` channel must fail validation in the outbox, before the broker, rather than at a provider.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "SMS"
+            },
+            "channel": {
+              "const": "SMS"
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "EMAIL"
+            },
+            "channel": {
+              "const": "EMAIL"
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "LETTER"
+            },
+            "channel": {
+              "const": "LETTER"
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "CALL_TASK"
+            },
+            "channel": {
+              "const": "CALL"
+            }
+          }
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "DIGITAL"
+            },
+            "channel": {
+              "const": "DIGITAL"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

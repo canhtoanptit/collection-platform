@@ -1,0 +1,20 @@
+{
+  "eventId": "01M0MEKD80MCDG338WWVTGG23W",
+  "eventType": "TreatmentExecuted",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-22T10:05:00Z",
+  "producer": "treatment-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0MEKD80CYJMPJVS094NGMXE",
+  "correlationId": "01M0MEKD80Z6KZY56P3NDSRZWE",
+  "causationId": "01M0MEKD807CHF1SNJV1QY3T8V",
+  "payload": {
+    "treatmentId": "01M0MEKD801YSF9NG4YJVNAFH1",
+    "decisionId": "01M0MEKD808FEZ4EZFREDCA5PS",
+    "caseId": "01M0MEKD80CYJMPJVS094NGMXE",
+    "channel": "SMS",
+    "provider": "mock-comms-provider",
+    "providerRef": "01M0MEKD801YSF9NG4YJVNAFH1",
+    "dispatchedAt": "2026-08-22T10:05:00Z"
+  }
+}

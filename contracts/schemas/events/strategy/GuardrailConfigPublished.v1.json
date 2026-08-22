@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/strategy/GuardrailConfigPublished.v1.json",
+  "title": "GuardrailConfigPublished.v1",
+  "description": "A guardrail configuration version was published and is now immutable (plan §6.5 catalogue extension, §7 DEC-4). Emitted by strategy-service on `collections.strategy` keyed by `configId`. treatment-service consumes it to refresh the contact windows and frequency caps it enforces immediately before every dispatch (DEC-16); a stale cache is a real risk here, which is why the refresh has a poll fallback and the guardrail check fails closed rather than assuming the previous configuration still holds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "configId",
+    "version",
+    "contentHash"
+  ],
+  "properties": {
+    "configId": {
+      "type": "string",
+      "description": "Identifier of the guardrail configuration family, e.g. `GLOBAL_GUARDRAILS`. Also the partition key.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "GLOBAL_GUARDRAILS"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "description": "Published version. Recorded on every treatment that was checked against it.",
+      "minimum": 1,
+      "examples": [
+        3
+      ]
+    },
+    "contentHash": {
+      "type": "string",
+      "description": "SHA-256 (lowercase hex) of the canonical JSON of the published `guardrail-config.v1.json` document — the evidence for \"which windows and caps were in force when this message went out at 20:58?\".",
+      "pattern": "^[a-f0-9]{64}$",
+      "examples": [
+        "c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"
+      ]
+    }
+  }
+}

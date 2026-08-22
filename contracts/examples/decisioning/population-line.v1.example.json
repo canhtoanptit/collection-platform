@@ -1,0 +1,85 @@
+{
+  "subject": {
+    "customerId": "C123",
+    "accountId": "A123"
+  },
+  "context": {
+    "subject": {
+      "customerId": "C123",
+      "accountId": "A123"
+    },
+    "delinquency": {
+      "dpd": 35,
+      "bucket": "31-60",
+      "amountOverdue": "500.00",
+      "currency": "EUR"
+    },
+    "account": {
+      "productCode": "CARD_STD",
+      "currentBalance": "3250.75",
+      "status": "OPEN"
+    },
+    "customer": {
+      "contactability": "HIGH",
+      "preferredChannel": "SMS",
+      "doNotContact": false,
+      "vulnerabilityFlag": false,
+      "segment": "RETAIL_MASS"
+    },
+    "arrangement": {
+      "hasActiveArrangement": false,
+      "hasOpenPromise": false,
+      "brokenPromises90d": 0
+    },
+    "contactHistory": {
+      "contacts7d": 2,
+      "contacts30d": 5,
+      "byChannel7d": {
+        "SMS": 1,
+        "EMAIL": 1
+      },
+      "lastContactAt": "2026-08-19T09:15:00Z"
+    },
+    "provenance": [
+      {
+        "path": "subject",
+        "source": "snowflake-population",
+        "asOf": "2026-08-22T00:00:00Z"
+      },
+      {
+        "path": "delinquency",
+        "source": "snowflake-population",
+        "asOf": "2026-08-22T00:00:00Z"
+      },
+      {
+        "path": "account",
+        "source": "snowflake-population",
+        "asOf": "2026-08-22T00:00:00Z"
+      },
+      {
+        "path": "customer",
+        "source": "snowflake-population",
+        "asOf": "2026-08-22T00:00:00Z"
+      },
+      {
+        "path": "arrangement",
+        "source": "snowflake-population",
+        "asOf": "2026-08-22T00:00:00Z"
+      },
+      {
+        "path": "contactHistory",
+        "source": "snowflake-population",
+        "asOf": "2026-08-22T00:00:00Z"
+      }
+    ]
+  },
+  "legacyDecision": {
+    "decision": "TREAT",
+    "treatmentCode": "SMS_EARLY_REMINDER",
+    "channel": "SMS",
+    "reasonCodes": [
+      "DPD_31_60",
+      "SMS_ALLOWED"
+    ]
+  }
+}

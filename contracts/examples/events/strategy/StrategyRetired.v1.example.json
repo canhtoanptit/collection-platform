@@ -1,0 +1,16 @@
+{
+  "eventId": "01M0MEKD80YBR97152JK8MGA0B",
+  "eventType": "StrategyRetired",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-22T10:00:00Z",
+  "producer": "strategy-service",
+  "aggregateType": "Strategy",
+  "aggregateId": "EARLY_COLLECTION",
+  "correlationId": "01M0MEKD80JN0N5M6J1M5EEPBD",
+  "causationId": "01M0MEKD80RN05Y9AXWJN6N3RD",
+  "payload": {
+    "strategyId": "EARLY_COLLECTION",
+    "version": 16,
+    "reason": "SUPERSEDED"
+  }
+}

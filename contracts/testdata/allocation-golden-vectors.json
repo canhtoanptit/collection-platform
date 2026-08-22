@@ -1,0 +1,1248 @@
+{
+  "vectorSetVersion": 1,
+  "algorithm": "bucket = the first 8 bytes of SHA-256(accountId + \":\" + salt) read as a big-endian uint64, modulo 10000; the arm is then found by walking arms[] in declaration order accumulating percentBps and taking the first arm whose cumulative total is STRICTLY GREATER than the bucket. Arms therefore partition the buckets [0, 9999] into contiguous ranges of width percentBps: a 90/10 split puts buckets 0-8999 in the champion and 9000-9999 in the challenger, and a zero-width (0 bps) arm can never be selected. Sigma percentBps must equal 10000 - JSON Schema cannot sum, so strategy-service validates it (plan \u00a77 DEC-2) - which guarantees exactly one arm matches every bucket. Allocation is a pure function of accountId and salt with no counters and no stored assignment, so the same account lands in the same arm on every decision, in batch exactly as online, and on a replay years later; changing the salt re-randomises every assignment, which is why a salt is fixed for the life of an experiment. accountId is the allocation key (never customerId): experiments are run on accounts, and an account must not switch arm because a customer relationship changed.",
+  "generator": "contracts/testdata/allocation-golden-vectors.gen.py",
+  "vectorCount": 74,
+  "vectors": [
+    {
+      "accountId": "A123",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 2972,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A456",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 5285,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A789",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 4777,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 3990,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 6158,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "000123456789",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 5463,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "ACCT-0001",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 5156,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "acct-0001",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 3547,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "9",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 3483,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "Z",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 69,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "CARD_STD_00042",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 2962,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "LOAN_PERS_00007",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 547,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A123",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 671,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "A456",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 3683,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "A789",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 9057,
+      "expectedArm": "ARM_B"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 2369,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 996,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "000123456789",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 218,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "ACCT-0001",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 5301,
+      "expectedArm": "ARM_B"
+    },
+    {
+      "accountId": "acct-0001",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 1834,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "A123",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 0
+        }
+      ],
+      "expectedBucket": 2972,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A456",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 0
+        }
+      ],
+      "expectedBucket": 5285,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A789",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 0
+        }
+      ],
+      "expectedBucket": 4777,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 0
+        }
+      ],
+      "expectedBucket": 3990,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 0
+        }
+      ],
+      "expectedBucket": 6158,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "000123456789",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 0
+        }
+      ],
+      "expectedBucket": 5463,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A123",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 0
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 2972,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "A456",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 0
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 5285,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "A789",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 0
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 4777,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 0
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 3990,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 0
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 6158,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "000123456789",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 0
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 5463,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "A123",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 8194,
+      "expectedArm": "ARM_C"
+    },
+    {
+      "accountId": "A456",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 4888,
+      "expectedArm": "ARM_B"
+    },
+    {
+      "accountId": "A789",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 9788,
+      "expectedArm": "ARM_C"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 8709,
+      "expectedArm": "ARM_C"
+    },
+    {
+      "accountId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 9972,
+      "expectedArm": "ARM_C"
+    },
+    {
+      "accountId": "000123456789",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 1407,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "ACCT-0001",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 983,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "acct-0001",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 9848,
+      "expectedArm": "ARM_C"
+    },
+    {
+      "accountId": "A123",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 5000
+        },
+        {
+          "name": "CHALLENGER_A",
+          "percentBps": 3000
+        },
+        {
+          "name": "CHALLENGER_B",
+          "percentBps": 2000
+        }
+      ],
+      "expectedBucket": 5059,
+      "expectedArm": "CHALLENGER_A"
+    },
+    {
+      "accountId": "A456",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 5000
+        },
+        {
+          "name": "CHALLENGER_A",
+          "percentBps": 3000
+        },
+        {
+          "name": "CHALLENGER_B",
+          "percentBps": 2000
+        }
+      ],
+      "expectedBucket": 712,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A789",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 5000
+        },
+        {
+          "name": "CHALLENGER_A",
+          "percentBps": 3000
+        },
+        {
+          "name": "CHALLENGER_B",
+          "percentBps": 2000
+        }
+      ],
+      "expectedBucket": 116,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 5000
+        },
+        {
+          "name": "CHALLENGER_A",
+          "percentBps": 3000
+        },
+        {
+          "name": "CHALLENGER_B",
+          "percentBps": 2000
+        }
+      ],
+      "expectedBucket": 4830,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 5000
+        },
+        {
+          "name": "CHALLENGER_A",
+          "percentBps": 3000
+        },
+        {
+          "name": "CHALLENGER_B",
+          "percentBps": 2000
+        }
+      ],
+      "expectedBucket": 8611,
+      "expectedArm": "CHALLENGER_B"
+    },
+    {
+      "accountId": "000123456789",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 5000
+        },
+        {
+          "name": "CHALLENGER_A",
+          "percentBps": 3000
+        },
+        {
+          "name": "CHALLENGER_B",
+          "percentBps": 2000
+        }
+      ],
+      "expectedBucket": 7366,
+      "expectedArm": "CHALLENGER_A"
+    },
+    {
+      "accountId": "A123",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 5059,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A456",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 712,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A789",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 116,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "GUARDRAIL_PILOT_01",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 10000
+        }
+      ],
+      "expectedBucket": 4830,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0006869",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 0,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0002891",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 1,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0014067",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 4999,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0013481",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 5000,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0008090",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 8998,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0011041",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 8999,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "HUNT0017104",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 9000,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "HUNT0024967",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 9001,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "HUNT0012321",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 9998,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "HUNT0003327",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 9999,
+      "expectedArm": "CHALLENGER"
+    },
+    {
+      "accountId": "HUNT0014067",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 4999,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "HUNT0013481",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 5000
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 5000
+        }
+      ],
+      "expectedBucket": 5000,
+      "expectedArm": "ARM_B"
+    },
+    {
+      "accountId": "HUNT0006843",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 3399,
+      "expectedArm": "ARM_A"
+    },
+    {
+      "accountId": "HUNT0003048",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 3400,
+      "expectedArm": "ARM_B"
+    },
+    {
+      "accountId": "HUNT0005112",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 6699,
+      "expectedArm": "ARM_B"
+    },
+    {
+      "accountId": "HUNT0023222",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "ARM_A",
+          "percentBps": 3400
+        },
+        {
+          "name": "ARM_B",
+          "percentBps": 3300
+        },
+        {
+          "name": "ARM_C",
+          "percentBps": 3300
+        }
+      ],
+      "expectedBucket": 6700,
+      "expectedArm": "ARM_C"
+    },
+    {
+      "accountId": "A123",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 2972,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A123",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 8194,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A123",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 671,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "A123",
+      "salt": "AB_TEST_SALT_B",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 5970,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "EARLY_COLLECTION_V17",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 3990,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "LATE_STAGE_2026Q3",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 8709,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "AB_TEST_SALT_A",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 2369,
+      "expectedArm": "CHAMPION"
+    },
+    {
+      "accountId": "01K3D0FZ8YQ2W7XN4M6VJ5RTHB",
+      "salt": "AB_TEST_SALT_B",
+      "arms": [
+        {
+          "name": "CHAMPION",
+          "percentBps": 9000
+        },
+        {
+          "name": "CHALLENGER",
+          "percentBps": 1000
+        }
+      ],
+      "expectedBucket": 3916,
+      "expectedArm": "CHAMPION"
+    }
+  ]
+}

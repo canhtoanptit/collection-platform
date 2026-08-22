@@ -1,0 +1,16 @@
+{
+  "eventId": "01M0MEKD80TWRB16SHTM54VAHA",
+  "eventType": "GuardrailConfigPublished",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-20T11:20:00Z",
+  "producer": "strategy-service",
+  "aggregateType": "GuardrailConfig",
+  "aggregateId": "GLOBAL_GUARDRAILS",
+  "correlationId": "01M0MEKD80V1TXWS3WZ9H5W00Z",
+  "causationId": "01M0MEKD80SZFQX76RK1FQVMX6",
+  "payload": {
+    "configId": "GLOBAL_GUARDRAILS",
+    "version": 3,
+    "contentHash": "fca3af8940c5886191cdde63696eca71b9911e21990e7bac31ee17eb1d2ff5c5"
+  }
+}

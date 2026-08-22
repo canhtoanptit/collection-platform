@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/decision-outcome-line.v1.json",
+  "title": "decision-outcome-line.v1",
+  "description": "ONE LINE of a batch decisioning outcome file — `decisions.jsonl` alongside `errors.jsonl` and `summary.json` under `s3://colx-dev-batch/outcomes/...` (plan §7 DEC-10), one JSON object per line. It is the batch counterpart of the `DecisionMade` event and the analytical input to `fct_decision`: Airflow loads it into RAW and the reconciliation task asserts the control-total identity `populationRows == decided + suppressed + ineligible + errored` against it, because a pipeline that merely succeeded is not evidence that the data is right (D§37–38, CLAUDE.md hard rule 5). Every line names the exact strategy version that produced it, so an outcome file is self-describing after the strategy has moved on.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decisionId",
+    "subject",
+    "decision",
+    "strategyId",
+    "strategyVersion",
+    "reasonCodes"
+  ],
+  "properties": {
+    "decisionId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Identity of the decision, matching the `decision_audit.decision_id` row and the `DecisionMade` event. It is what joins an analytical outcome row back to its immutable audit record, its input snapshot and its stage trace."
+    },
+    "subject": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/context-document.v1.json#/$defs/subject",
+      "description": "Who the decision was about — the same shape as the population line's subject, so population and outcomes join on it directly."
+    },
+    "decision": {
+      "description": "The outcome. TREAT = a treatment was selected and will be executed. NO_ACTION = the pipeline ran and deliberately chose nothing (including the post-selection policy guard rejecting a candidate — `POLICY_VIOLATION_GUARD`). SUPPRESSED = a policy or business rule suppressed contact. INELIGIBLE = no strategy applied to this subject. All four are decisions and all four are audited: \"nothing happened\" is a decision that has to be explainable too.",
+      "enum": [
+        "TREAT",
+        "NO_ACTION",
+        "SUPPRESSED",
+        "INELIGIBLE"
+      ]
+    },
+    "strategyId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Strategy that decided, or NULL when no strategy matched at all — the INELIGIBLE / `NO_STRATEGY_MATCH` case (plan §7 DEC-7). Required and nullable rather than omitted, so a loader can map it to a nullable column without special-casing, and so \"no strategy\" is stated rather than inferred from an absent key. The `if/then` below permits NULL only for INELIGIBLE: any decided outcome must name its strategy.",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "examples": [
+        "EARLY_COLLECTION"
+      ]
+    },
+    "strategyVersion": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Version of that strategy, NULL under the same condition as `strategyId`. Pinned per decision: a strategy activated later never rewrites the meaning of an outcome file.",
+      "minimum": 1,
+      "examples": [
+        17
+      ]
+    },
+    "treatmentCode": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+      "description": "OPTIONAL — the selected treatment; present exactly when `decision` is TREAT (required by the `if/then` below), omitted otherwise."
+    },
+    "channel": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/channel",
+      "description": "OPTIONAL — channel of the selected treatment; present exactly when `decision` is TREAT."
+    },
+    "reasonCodes": {
+      "type": "array",
+      "description": "Ordered reason codes explaining the outcome, in the deterministic order the pipeline emits them (policy, eligibility, segment, rule, model, constraint) — deterministic so that two runs over the same data produce byte-identical outcome files and a diff means a real change. Never empty: every outcome, including NO_ACTION, carries at least one code, and every code is in registries/reason-codes.v1.json.",
+      "minItems": 1,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code"
+      }
+    },
+    "experimentArm": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+      "description": "OPTIONAL — champion/challenger arm this subject was allocated to; omitted when the strategy runs no experiment. The dimension every challenger comparison groups by (D§41)."
+    },
+    "allocationBucket": {
+      "type": "integer",
+      "description": "OPTIONAL — the allocation bucket (0–9999) the subject hashed into, present whenever `experimentArm` is. Recording the bucket and not only the arm is what makes an allocation independently verifiable after the fact: re-hash `accountId` + salt and the bucket must match, whatever the arm boundaries have since become.",
+      "minimum": 0,
+      "maximum": 9999,
+      "examples": [
+        4212
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "title": "a TREAT names its treatment and channel",
+      "description": "An outcome file row that says TREAT without saying what would be sent cannot be reconciled against the treatments that were actually dispatched.",
+      "if": {
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "const": "TREAT"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "treatmentCode",
+          "channel"
+        ]
+      }
+    },
+    {
+      "title": "only an INELIGIBLE outcome may have no strategy",
+      "description": "TREAT, NO_ACTION and SUPPRESSED are all produced BY a strategy, so a null strategy on any of them is a lost attribution rather than a legitimate absence.",
+      "if": {
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "enum": [
+              "TREAT",
+              "NO_ACTION",
+              "SUPPRESSED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "strategyId": {
+            "type": "string"
+          },
+          "strategyVersion": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "title": "an allocation bucket implies an arm",
+      "description": "The bucket is only meaningful next to the arm it selected; a bucket alone would look like an experiment nobody can name.",
+      "if": {
+        "required": [
+          "allocationBucket"
+        ]
+      },
+      "then": {
+        "required": [
+          "experimentArm"
+        ]
+      }
+    }
+  ]
+}

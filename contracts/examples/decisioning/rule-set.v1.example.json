@@ -1,0 +1,243 @@
+{
+  "ruleSetId": "EARLY_COLLECTION_RULES",
+  "kind": "RULES",
+  "version": 42,
+  "effectiveFrom": "2026-08-01",
+  "effectiveTo": null,
+  "rules": [
+    {
+      "ruleId": "SUPPRESS_ACTIVE_ARRANGEMENT",
+      "priority": 900,
+      "when": {
+        "all": [
+          {
+            "field": "arrangement.hasActiveArrangement",
+            "op": "EQ",
+            "value": true
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SUPPRESS",
+        "reasonCode": "ACTIVE_ARRANGEMENT_PRESENT"
+      }
+    },
+    {
+      "ruleId": "SUPPRESS_OPEN_PROMISE",
+      "priority": 800,
+      "when": {
+        "all": [
+          {
+            "field": "arrangement.hasOpenPromise",
+            "op": "EQ",
+            "value": true
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SUPPRESS",
+        "reasonCode": "OPEN_PROMISE_PENDING"
+      }
+    },
+    {
+      "ruleId": "ESCALATE_BROKEN_PROMISES",
+      "priority": 700,
+      "when": {
+        "all": [
+          {
+            "field": "arrangement.brokenPromises90d",
+            "op": "GTE",
+            "value": 2
+          },
+          {
+            "field": "delinquency.dpd",
+            "op": "GTE",
+            "value": 31
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SELECT_TREATMENT",
+        "treatmentCode": "CALL_TASK_COLLECTOR",
+        "reasonCode": "BROKEN_PROMISE_HISTORY"
+      }
+    },
+    {
+      "ruleId": "EARLY_SMS_31_60",
+      "priority": 600,
+      "when": {
+        "all": [
+          {
+            "field": "delinquency.dpd",
+            "op": "BETWEEN",
+            "value": [
+              31,
+              60
+            ]
+          },
+          {
+            "field": "customer.contactability",
+            "op": "IN",
+            "value": [
+              "HIGH",
+              "MEDIUM"
+            ]
+          },
+          {
+            "field": "customer.doNotContact",
+            "op": "EQ",
+            "value": false
+          },
+          {
+            "field": "arrangement.hasActiveArrangement",
+            "op": "EQ",
+            "value": false
+          },
+          {
+            "any": [
+              {
+                "field": "customer.preferredChannel",
+                "op": "EQ",
+                "value": "SMS"
+              },
+              {
+                "all": [
+                  {
+                    "field": "contactHistory.byChannel7d.SMS",
+                    "op": "LT",
+                    "value": 2
+                  },
+                  {
+                    "field": "contactHistory.contacts7d",
+                    "op": "LTE",
+                    "value": 3
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SELECT_TREATMENT",
+        "treatmentCode": "SMS_EARLY_REMINDER",
+        "reasonCode": "DPD_31_60"
+      }
+    },
+    {
+      "ruleId": "EARLY_EMAIL_1_30",
+      "priority": 500,
+      "when": {
+        "all": [
+          {
+            "field": "delinquency.dpd",
+            "op": "BETWEEN",
+            "value": [
+              1,
+              30
+            ]
+          },
+          {
+            "field": "customer.contactability",
+            "op": "NE",
+            "value": "UNCONTACTABLE"
+          },
+          {
+            "field": "delinquency.amountOverdue",
+            "op": "GT",
+            "value": "50.00"
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SELECT_TREATMENT",
+        "treatmentCode": "EMAIL_EARLY_REMINDER",
+        "reasonCode": "DPD_1_30"
+      }
+    },
+    {
+      "ruleId": "LATE_FORMAL_NOTICE",
+      "priority": 400,
+      "when": {
+        "all": [
+          {
+            "field": "delinquency.dpd",
+            "op": "GTE",
+            "value": 61
+          },
+          {
+            "field": "account.status",
+            "op": "NOT_IN",
+            "value": [
+              "CLOSED",
+              "WRITTEN_OFF"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SELECT_TREATMENT",
+        "treatmentCode": "LETTER_FORMAL_NOTICE",
+        "reasonCode": "DPD_61_90"
+      }
+    },
+    {
+      "ruleId": "NEVER_CONTACTED_DIGITAL",
+      "priority": 300,
+      "when": {
+        "all": [
+          {
+            "field": "contactHistory.lastContactAt",
+            "op": "IS_NULL"
+          },
+          {
+            "field": "customer.contactability",
+            "op": "EQ",
+            "value": "HIGH"
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SELECT_TREATMENT",
+        "treatmentCode": "DIGITAL_SELF_SERVE",
+        "reasonCode": "HIGH_CONTACTABILITY"
+      }
+    },
+    {
+      "ruleId": "HARD_TO_REACH_LETTER",
+      "priority": 200,
+      "when": {
+        "all": [
+          {
+            "field": "customer.contactability",
+            "op": "IN",
+            "value": [
+              "LOW",
+              "UNCONTACTABLE"
+            ]
+          },
+          {
+            "field": "contactHistory.lastContactAt",
+            "op": "NOT_NULL"
+          }
+        ]
+      },
+      "then": {
+        "outcome": "SELECT_TREATMENT",
+        "treatmentCode": "LETTER_FORMAL_NOTICE",
+        "reasonCode": "LOW_CONTACTABILITY"
+      }
+    },
+    {
+      "ruleId": "CATCH_ALL_NO_TREATMENT",
+      "priority": 0,
+      "when": {
+        "all": []
+      },
+      "then": {
+        "outcome": "SUPPRESS",
+        "reasonCode": "NO_TREATMENT_AVAILABLE"
+      }
+    }
+  ]
+}

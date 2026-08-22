@@ -1,0 +1,445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/strategy-document.v1.json",
+  "title": "strategy-document.v1",
+  "description": "The declarative definition of one collections strategy version (A§53 expanded, plan §7 DEC-1). It is the `definition JSONB` column of `strategy_version` (DEC-2) and it is what the governance lifecycle approves, content-hashes and activates (A§60): everything a decision needs, in one reviewable document, with no code. NOTE WHAT IS ABSENT: there is no `version` and no `status` field. The version is the `strategy_version.version` row that stores this document and the status is that row's governance state — putting either inside the document would let an editor rename a version or self-approve a strategy, and would break the content hash that freezes a definition at TEST→SIMULATED. Policy sets are equally absent: they are global and always apply, never pinned per strategy (A§54), so a strategy cannot opt out of policy. Strategy selection at decision time: among ACTIVE strategies whose `effectiveFrom`/`effectiveTo` window contains the business date and whose `eligibility` matches the context, the highest `priority` wins, ties broken by lexicographic `id`; none matching is INELIGIBLE with reason `NO_STRATEGY_MATCH`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "effectiveFrom",
+    "effectiveTo",
+    "priority",
+    "eligibility",
+    "segments",
+    "ruleSetRef",
+    "modelRefs",
+    "treatments"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Version of this document *shape* — always 1 for a document validated by strategy-document.v1.json. A `const` rather than a range: a v2 shape ships as a new schema file and every stored definition states which shape it was written against, so a mixed-version table is unambiguous.",
+      "examples": [
+        1
+      ]
+    },
+    "id": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+      "description": "Stable identifier of the strategy family, shared by every version of it, e.g. `EARLY_COLLECTION`. Also the tie-break (lexicographic ASC) when two eligible strategies share a `priority`."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name shown in the strategy workbench and in decision explanations.",
+      "minLength": 3,
+      "maxLength": 128,
+      "examples": [
+        "Early collection — 1 to 60 DPD"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "description": "OPTIONAL — what this strategy is for and what changed in this version. Omitted, never null. Business owners read this in the approval screen, so it is the right place for \"raised the SMS threshold to reduce contact volume\".",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "effectiveFrom": {
+      "type": "string",
+      "description": "First business date (UTC calendar date) on which this version may decide. SCHEDULED activation requires it to be today or later (DEC-3).",
+      "format": "date",
+      "examples": [
+        "2026-08-01"
+      ]
+    },
+    "effectiveTo": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Last business date on which this version may decide, inclusive, or NULL for open-ended. Required and nullable: an open-ended strategy is a deliberate choice, and an auto-retire job reads this field.",
+      "format": "date",
+      "examples": [
+        null
+      ]
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Strategy-selection priority; HIGHER wins among eligible strategies, ties broken by lexicographic `id`. A total order, so two engines (and a simulation versus production) cannot pick different strategies for the same context.",
+      "minimum": 0,
+      "maximum": 1000000,
+      "examples": [
+        100
+      ]
+    },
+    "eligibility": {
+      "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/conditionGroup",
+      "description": "Condition tree deciding whether this strategy applies to a context at all — the same DSL as rules, with the same 5-level depth cap and the same catalogue-checked field paths, referenced across files by absolute `$id` so there is exactly one grammar on the platform. `{\"all\": []}` means unconditionally eligible (a catch-all strategy, normally with the lowest priority)."
+    },
+    "segments": {
+      "type": "array",
+      "description": "Ordered segments, evaluated FIRST-MATCH-WINS top to bottom: the first segment whose `when` matches names the subject's segment for the rest of the pipeline and for the reason codes. Order is therefore load-bearing and must be preserved by every store and serializer. CONVENTION: the last entry is the catch-all — by convention named `DEFAULT` with `when: {\"all\": []}` (vacuously true) — so that every subject lands in exactly one segment and \"unsegmented\" is never a silent state. DEC-2 validates the DEFAULT-last convention (the schema cannot address the last array element).",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "ruleSetRef": {
+      "$ref": "#/$defs/ruleSetRef",
+      "description": "The exact rule set version this strategy decides with. Pinned, never \"latest\": a rule-set publish must not silently change the behaviour of an approved strategy."
+    },
+    "modelRefs": {
+      "type": "array",
+      "description": "Models to score before the optimization stage, in call order. May be empty — a rules-only strategy is a legitimate and common starting point (and the first thing a migration ships). Each entry pins a model version, so a re-trained model reaches production only through a strategy change that governance approves (D§42).",
+      "minItems": 0,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/modelRef"
+      }
+    },
+    "treatments": {
+      "type": "array",
+      "description": "The treatments this strategy may select, and the only ones its rule set may name. `treatmentCode` is unique within the array (validated by DEC-2). Optimization ranks the candidates that survive policy and constraints by `priority` DESC — it can only choose among these, which is why a channel that policy forbids can never be dispatched.",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/treatment"
+      }
+    },
+    "experiment": {
+      "$ref": "#/$defs/experiment",
+      "description": "OPTIONAL — champion/challenger configuration (D§41). Omitted entirely (never null) for a single-arm strategy, which is the normal case."
+    }
+  },
+  "$defs": {
+    "segment": {
+      "title": "Segment",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "when"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+          "description": "Segment name, recorded in the decision trace and in the simulation segment breakdown, e.g. `EARLY_LOW_RISK` or `DEFAULT`."
+        },
+        "when": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/conditionGroup",
+          "description": "Condition tree for membership. `{\"all\": []}` is the catch-all used by the final DEFAULT segment."
+        }
+      }
+    },
+    "ruleSetRef": {
+      "title": "RuleSetRef",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ruleSetId",
+        "version"
+      ],
+      "properties": {
+        "ruleSetId": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+          "description": "Identifier of a `kind: RULES` rule set. A POLICY set is never referenced here — policy is global (A§54)."
+        },
+        "version": {
+          "type": "integer",
+          "description": "Exact rule-set version. The referenced version must exist and be PUBLISHED before the strategy may leave DRAFT (validated at the TEST transition, DEC-3/DEC-4).",
+          "minimum": 1,
+          "examples": [
+            42
+          ]
+        }
+      }
+    },
+    "modelRef": {
+      "title": "ModelRef",
+      "description": "One pinned model, called through the `model.v1.yaml` contract (`POST /v1/models/{modelId}/versions/{version}:score` with the context document as the body). The decision service never learns whether the implementation is Python, XGBoost or an external provider (A§56): swapping to a real model server is a base-URL change and zero decision-service code (D§42).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelId",
+        "version",
+        "required",
+        "timeoutMs",
+        "onError"
+      ],
+      "properties": {
+        "modelId": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+          "description": "Model identifier, e.g. `PAYMENT_PROPENSITY`."
+        },
+        "version": {
+          "type": "integer",
+          "description": "Exact model version to score with. Recorded in the decision audit's `model_versions`, so a score can always be traced to the artefact that produced it.",
+          "minimum": 1,
+          "examples": [
+            8
+          ]
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether this score is required for the decision to be meaningful. `true` + `onError: FAIL` is the fail-closed pairing for a model the strategy genuinely depends on; `true` + `onError: DEFAULT` means \"substitute `defaultScore` and carry on, but record it\". `false` marks a score that is only observed (e.g. a shadow model being evaluated).",
+          "examples": [
+            true
+          ]
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "description": "Per-call timeout in milliseconds. A decision is an online request on a customer-facing path: an unbounded model call is an outage, so the timeout is part of the approved strategy rather than a deployment setting. Exceeding it is an error and is handled by `onError`.",
+          "minimum": 10,
+          "maximum": 5000,
+          "examples": [
+            200
+          ]
+        },
+        "onError": {
+          "description": "What to do when the call fails or times out. `DEFAULT` substitutes `defaultScore` and adds `MODEL_SCORE_UNAVAILABLE` to the reason codes, so the substitution is visible in the explanation and countable in a dashboard. `FAIL` aborts the decision — chosen when deciding without a real score would be worse than not deciding.",
+          "enum": [
+            "DEFAULT",
+            "FAIL"
+          ]
+        },
+        "defaultScore": {
+          "type": "string",
+          "description": "Score to substitute when `onError: DEFAULT` — a decimal string in [0, 1] with up to 6 fraction digits, matching the model contract's score encoding (a string, so probabilities never round-trip through a float). Required exactly when `onError` is `DEFAULT` and forbidden otherwise, enforced below: a default score on a FAIL model is dead configuration that reads like a fallback.",
+          "pattern": "^(0(\\.\\d{1,6})?|1(\\.0{1,6})?)$",
+          "examples": [
+            "0.5",
+            "0.723456"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "title": "onError DEFAULT requires a defaultScore",
+          "if": {
+            "required": [
+              "onError"
+            ],
+            "properties": {
+              "onError": {
+                "const": "DEFAULT"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "defaultScore"
+            ]
+          }
+        },
+        {
+          "title": "onError FAIL forbids a defaultScore",
+          "if": {
+            "required": [
+              "onError"
+            ],
+            "properties": {
+              "onError": {
+                "const": "FAIL"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "defaultScore"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "treatment": {
+      "title": "Treatment",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "treatmentCode",
+        "type",
+        "channel",
+        "priority",
+        "params"
+      ],
+      "properties": {
+        "treatmentCode": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+          "description": "Code a rule selects and a `TreatmentSelected` event carries, e.g. `SMS_EARLY_REMINDER`."
+        },
+        "type": {
+          "description": "Kind of treatment. `CALL_TASK` is a work item for a human collector (dispatched as a case activity, not a message send); the other four are automated sends.",
+          "enum": [
+            "SMS",
+            "EMAIL",
+            "LETTER",
+            "CALL_TASK",
+            "DIGITAL"
+          ]
+        },
+        "channel": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/channel",
+          "description": "Channel the treatment is delivered on, and the channel that policy `FORBID_CHANNEL`, contact windows and frequency caps are matched against."
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Ranking priority within this strategy; HIGHER is preferred. The v1 optimizer filters candidates by policy and constraints, then picks the highest priority (ties broken by `treatmentCode` ASC) — a deterministic stand-in that the real optimizer replaces without changing this contract.",
+          "minimum": 0,
+          "maximum": 1000000,
+          "examples": [
+            100
+          ]
+        },
+        "params": {
+          "type": "object",
+          "description": "Channel/template parameters passed through to the treatment, e.g. `{\"templateId\": \"SMS_EARLY_1\", \"locale\": \"en-IE\"}`. DELIBERATELY OPEN (`additionalProperties: true`) — the second and last documented exception in contracts/schemas/decisioning: the key set belongs to the channel adapter and its message templates (DEC-15), which change on a provider's release schedule and must not force a decisioning contract version. It is validated where it is understood: the adapter checks required template parameters at dispatch and fails the treatment with a reason code if any is missing. Never put a decision input here — anything a rule may read belongs in the context document and the field catalogue. May be an empty object.",
+          "additionalProperties": true,
+          "examples": [
+            {
+              "templateId": "SMS_EARLY_1",
+              "locale": "en-IE"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "title": "treatment type ↔ channel mapping",
+          "description": "The two enums are closed and map 1:1 (SMS→SMS, EMAIL→EMAIL, LETTER→LETTER, CALL_TASK→CALL, DIGITAL→DIGITAL), so the pairing is enforced here rather than described: an `SMS` treatment routed to the `LETTER` channel is a typo that would otherwise reach a provider. Exactly one branch matches because `type` and `channel` are both required above.",
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "SMS"
+                },
+                "channel": {
+                  "const": "SMS"
+                }
+              }
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "EMAIL"
+                },
+                "channel": {
+                  "const": "EMAIL"
+                }
+              }
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "LETTER"
+                },
+                "channel": {
+                  "const": "LETTER"
+                }
+              }
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "CALL_TASK"
+                },
+                "channel": {
+                  "const": "CALL"
+                }
+              }
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "DIGITAL"
+                },
+                "channel": {
+                  "const": "DIGITAL"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "experiment": {
+      "title": "Experiment",
+      "description": "Champion/challenger split (D§41). Allocation is `platform/allocation.Allocate(accountId, salt, arms)`: bucket = first 8 bytes of SHA-256(`accountId` + \":\" + `salt`) as a big-endian uint64, mod 10000; the arm is the first whose cumulative `percentBps` exceeds the bucket. It is a pure function of the account and the salt — no state, no counters — so the same account lands in the same arm on every decision, in batch as in online, and in a re-run months later. The normative vectors are contracts/testdata/allocation-golden-vectors.json.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "salt",
+        "arms"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the split is live. `false` keeps the configuration visible (and reviewable) while every subject decides on the champion — the way an experiment is paused without losing its definition.",
+          "examples": [
+            true
+          ]
+        },
+        "salt": {
+          "type": "string",
+          "description": "Allocation salt, fixed for the life of the experiment. CHANGING IT RE-RANDOMISES EVERY ASSIGNMENT: customers move between arms mid-experiment and the results become unreadable, so a new salt means a new experiment. Include the strategy and period in it to make accidental reuse obvious.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_:.-]{7,63}$",
+          "examples": [
+            "EARLY_COLLECTION_V17"
+          ]
+        },
+        "arms": {
+          "type": "array",
+          "description": "Arms in allocation order — order is load-bearing, since arms are walked in sequence accumulating `percentBps`. Σ `percentBps` MUST equal 10000 (100.00%); JSON Schema cannot sum, so DEC-2 rejects a strategy whose arms do not total 10000 with a 400 (plan §7 DEC-2 acceptance). A zero-width arm is legal and useful: it keeps a challenger defined at 0% before ramping it up.",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/arm"
+          }
+        }
+      }
+    },
+    "arm": {
+      "title": "ExperimentArm",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "percentBps"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json#/$defs/code",
+          "description": "Arm name recorded on every decision (`experiment_arm` in the audit, `experimentArm` on the event) and the dimension every champion/challenger comparison groups by, e.g. `CHAMPION` / `CHALLENGER`."
+        },
+        "version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Strategy version this arm decides with, or NULL meaning \"this document's own version\" (the champion arm). A challenger version must be content-frozen and RISK_APPROVED before the champion carrying it may be activated (DEC-11), which is how an unapproved definition is kept out of a live experiment.",
+          "minimum": 1,
+          "examples": [
+            null,
+            18
+          ]
+        },
+        "percentBps": {
+          "type": "integer",
+          "description": "Share of the population in basis points: 9000 = 90.00%, 10000 = 100%. Basis points rather than a float so a 0.5% ramp is exact and Σ = 10000 is an integer identity a test can assert.",
+          "minimum": 0,
+          "maximum": 10000,
+          "examples": [
+            9000,
+            1000
+          ]
+        }
+      }
+    }
+  }
+}

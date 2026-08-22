@@ -1,0 +1,35 @@
+{
+  "eventId": "01M0MEKD80BJ9GMKAGX507Q08D",
+  "eventType": "DecisionMade",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-22T10:00:00Z",
+  "producer": "decision-service",
+  "aggregateType": "Decision",
+  "aggregateId": "01M0MEKD808FEZ4EZFREDCA5PS",
+  "correlationId": "01M0MEKD80Z6KZY56P3NDSRZWE",
+  "causationId": "01M0MEKD80HP60M9A4TCYVW9GK",
+  "payload": {
+    "decisionId": "01M0MEKD808FEZ4EZFREDCA5PS",
+    "customerId": "C123",
+    "accountId": "A123",
+    "caseId": "01M0MEKD80CYJMPJVS094NGMXE",
+    "mode": "ONLINE",
+    "decision": "TREAT",
+    "strategyId": "EARLY_COLLECTION",
+    "strategyVersion": 17,
+    "treatmentCode": "SMS_EARLY_REMINDER",
+    "channel": "SMS",
+    "reasonCodes": [
+      "STRATEGY_ELIGIBLE",
+      "SEGMENT_EARLY_LOW_RISK",
+      "DPD_31_60",
+      "HIGH_CONTACTABILITY",
+      "PAYMENT_PROPENSITY_BAND",
+      "CHANNEL_ELIGIBLE",
+      "SMS_ALLOWED",
+      "NO_ACTIVE_ARRANGEMENT"
+    ],
+    "experimentArm": "CHAMPION",
+    "batchId": null
+  }
+}

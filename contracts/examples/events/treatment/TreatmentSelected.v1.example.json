@@ -1,0 +1,24 @@
+{
+  "eventId": "01M0MEKD807CHF1SNJV1QY3T8V",
+  "eventType": "TreatmentSelected",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-22T10:00:00Z",
+  "producer": "decision-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0MEKD80CYJMPJVS094NGMXE",
+  "correlationId": "01M0MEKD80Z6KZY56P3NDSRZWE",
+  "causationId": "01M0MEKD80HP60M9A4TCYVW9GK",
+  "payload": {
+    "decisionId": "01M0MEKD808FEZ4EZFREDCA5PS",
+    "caseId": "01M0MEKD80CYJMPJVS094NGMXE",
+    "accountId": "A123",
+    "customerId": "C123",
+    "treatmentCode": "SMS_EARLY_REMINDER",
+    "type": "SMS",
+    "channel": "SMS",
+    "params": {
+      "templateId": "SMS_EARLY_1",
+      "locale": "en-IE"
+    }
+  }
+}

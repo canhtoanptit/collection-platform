@@ -1,0 +1,662 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/rule-set.v1.json",
+  "title": "rule-set.v1",
+  "description": "A versioned, immutable set of declarative rules evaluated against a `context-document.v1.json` (A§55, plan §7 DEC-1/DEC-4). Two kinds share this shape: `RULES` sets carry business decision logic (which treatment), `POLICY` sets carry global constraints that outrank everything else (A§54) — policy sets are global and are never pinned per strategy, so a strategy document references a rule set but never a policy set. The DSL is deliberately not Turing-complete: no loops, no arithmetic, no user functions, no quantifiers over arrays. That is what makes a decision deterministic, replayable from its input snapshot, explainable in reason codes, and parity-testable against the legacy engine (A§88). Evaluation is first-match-wins ordered by (`priority` DESC, `ruleId` ASC) — a total order, so two engines cannot disagree; a leaf whose `field` is missing from the context evaluates to false and records `FIELD_MISSING` in the trace rather than raising (LIB-9 `ruledsl`). Published sets are immutable: DEC-4 rejects a mutation of a PUBLISHED version with 409, and a change ships as a new `version`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ruleSetId",
+    "kind",
+    "version",
+    "effectiveFrom",
+    "effectiveTo",
+    "rules"
+  ],
+  "properties": {
+    "ruleSetId": {
+      "$ref": "#/$defs/code",
+      "description": "Stable identifier of the rule set family, e.g. `EARLY_COLLECTION_RULES` or `GLOBAL_CONTACT_POLICY`. Together with `version` it is the primary key; a strategy's `ruleSetRef` names both."
+    },
+    "kind": {
+      "description": "`RULES` = business decision logic; outcomes may SELECT_TREATMENT or SUPPRESS. `POLICY` = global policy constraints; outcomes may only narrow (SUPPRESS, FORBID_CHANNEL) and never select a treatment, which is CLAUDE.md hard rule 2 and A§54 expressed in the schema rather than in prose. Both directions are enforced below by `if/then`, so a policy set that tries to pick a treatment — the classic way an \"optimization override\" sneaks in — fails validation at publish time.",
+      "enum": [
+        "RULES",
+        "POLICY"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "description": "Major version of this rule set, starting at 1 and incremented on every publish. The meaning of a published (`ruleSetId`, `version`) pair never changes; decisions record the exact pair they used so an audit can replay them.",
+      "minimum": 1,
+      "examples": [
+        42
+      ]
+    },
+    "effectiveFrom": {
+      "type": "string",
+      "description": "First business date (UTC calendar date, `YYYY-MM-DD`) on which this version may be used.",
+      "format": "date",
+      "examples": [
+        "2026-08-01"
+      ]
+    },
+    "effectiveTo": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Last business date on which this version may be used, inclusive, or NULL for open-ended. Required and nullable rather than optional: \"no end date\" is a decision someone made, and an audit must see it stated.",
+      "format": "date",
+      "examples": [
+        null,
+        "2026-12-31"
+      ]
+    },
+    "rules": {
+      "type": "array",
+      "description": "The rules, in authoring order. Authoring order carries no meaning — evaluation order is (`priority` DESC, `ruleId` ASC). `ruleId` is unique within the set and Σ of matching rules is irrelevant: exactly one rule matches (the first in that order) and it alone supplies the outcome and reason code. DEC-4 validates uniqueness and that every `field` exists in the context field catalogue and every `reasonCode` in registries/reason-codes.v1.json.",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "title": "RULES sets may not forbid a channel",
+      "description": "FORBID_CHANNEL is a policy narrowing and exists only in a POLICY set. A business rule set that forbids a channel would put a constraint outside the policy precedence chain, where the post-selection guard cannot re-validate it.",
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "RULES"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "rules": {
+            "items": {
+              "properties": {
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "enum": [
+                        "SELECT_TREATMENT",
+                        "SUPPRESS"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "POLICY sets narrow only, never select",
+      "description": "CLAUDE.md hard rule 2 / A§54: constraints expose narrowing only. A POLICY set that could SELECT_TREATMENT would let policy pick outcomes and, worse, let a treatment choice claim policy precedence.",
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "POLICY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "rules": {
+            "items": {
+              "properties": {
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "enum": [
+                        "SUPPRESS",
+                        "FORBID_CHANNEL"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "code": {
+      "title": "Code",
+      "description": "SCREAMING_SNAKE_CASE identifier: starts with a letter, 3–64 characters. The platform's vocabulary shape for ids, reason codes, treatment codes and segment names — stable, greppable, safe in a URL and in a log line.",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+    },
+    "fieldPath": {
+      "title": "FieldPath",
+      "description": "Dot path into the context document, e.g. `delinquency.dpd`. Must exist in `context-field-catalogue.v1.json`: DEC-4 rejects an unknown path with a 400 naming the field, so a renamed context field cannot silently turn a condition permanently false. The catalogue also supplies the comparison type and unit.",
+      "type": "string",
+      "pattern": "^[a-z][A-Za-z0-9]*(\\.[A-Za-z0-9][A-Za-z0-9_]*)+$",
+      "minLength": 3,
+      "maxLength": 128,
+      "examples": [
+        "delinquency.dpd",
+        "customer.doNotContact"
+      ]
+    },
+    "scalar": {
+      "title": "ComparisonValue",
+      "description": "A single comparison value: string, number or boolean. NEVER null — absence is tested with IS_NULL / NOT_NULL, so a null here would be a second, ambiguous way to ask the same question. A catalogue `number` field may be compared against a JSON number (`35`) or a decimal string (`\"500.00\"`); both are parsed as exact decimals, which is what lets major-unit money strings be compared without a float. A `date` field compares against `YYYY-MM-DD` or an RFC3339 UTC timestamp. `boolean` fields compare only against `true`/`false`, `string` fields only against strings (exact equality; no substring, no regex, no case folding).",
+      "type": [
+        "string",
+        "number",
+        "boolean"
+      ]
+    },
+    "condition": {
+      "title": "Condition",
+      "description": "A leaf comparison. The permitted shape of `value` follows from `op`, modelled as a `oneOf` over four op families so that an impossible combination is rejected by the schema rather than by a runtime surprise: presence ops carry NO `value` at all, scalar comparisons carry exactly one, BETWEEN carries an inclusive two-element `[low, high]`, and IN / NOT_IN carry a non-empty set. The four branches are mutually exclusive on `op`, so exactly one always matches and the validator's error names the family that failed.",
+      "type": "object",
+      "oneOf": [
+        {
+          "title": "presence ops (IS_NULL, NOT_NULL)",
+          "description": "No `value` is permitted: `additionalProperties: false` with `value` undeclared is what rejects `{op: IS_NULL, value: null}`.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "op"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/fieldPath"
+            },
+            "op": {
+              "description": "IS_NULL matches when the field is JSON null or absent from the context; NOT_NULL is its exact complement.",
+              "enum": [
+                "IS_NULL",
+                "NOT_NULL"
+              ]
+            }
+          }
+        },
+        {
+          "title": "scalar comparison ops (EQ, NE, GT, GTE, LT, LTE)",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "op",
+            "value"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/fieldPath"
+            },
+            "op": {
+              "description": "Ordering ops (GT, GTE, LT, LTE) are valid only for catalogue types `number` and `date`; EQ/NE apply to every type. The type check is the catalogue's job at publish time (DEC-4), not this schema's — the schema cannot know which type `field` names.",
+              "enum": [
+                "EQ",
+                "NE",
+                "GT",
+                "GTE",
+                "LT",
+                "LTE"
+              ]
+            },
+            "value": {
+              "$ref": "#/$defs/scalar"
+            }
+          }
+        },
+        {
+          "title": "BETWEEN",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "op",
+            "value"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/fieldPath"
+            },
+            "op": {
+              "const": "BETWEEN"
+            },
+            "value": {
+              "type": "array",
+              "description": "Exactly `[low, high]`, INCLUSIVE at both ends (`dpd BETWEEN [31, 60]` matches 31 and 60) — the convention business users assume when they write \"31 to 60 days\", and the one LIB-9 implements. `minItems`/`maxItems` are both 2, so a three-element range or a bare scalar is a validation error rather than a rule that silently ignores a bound. `low <= high` is checked at publish time (the schema cannot compare siblings).",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "$ref": "#/$defs/scalar"
+              },
+              "examples": [
+                [
+                  31,
+                  60
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "title": "set-membership ops (IN, NOT_IN)",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "op",
+            "value"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/fieldPath"
+            },
+            "op": {
+              "enum": [
+                "IN",
+                "NOT_IN"
+              ]
+            },
+            "value": {
+              "type": "array",
+              "description": "Non-empty set of comparison values. `uniqueItems` because a repeated member is always an authoring mistake, and an empty set is rejected because `IN []` (never true) and `NOT_IN []` (always true) are both traps a reviewer will read as the opposite.",
+              "minItems": 1,
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/scalar"
+              },
+              "examples": [
+                [
+                  "1-30",
+                  "31-60"
+                ]
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "conditionGroup": {
+      "$ref": "#/$defs/conditionGroupLevel1",
+      "title": "ConditionGroup",
+      "description": "PUBLIC ENTRY POINT for a boolean condition tree — the shape `strategy-document.v1.json` references for `eligibility` and segment `when` clauses, and the shape of a rule's `when`. A group is `{\"all\": [...]}` (conjunction) XOR `{\"any\": [...]}` (disjunction), never both: the two branches are a `oneOf` and each forbids the other's key, so `{\"all\": [...], \"any\": [...]}` — whose meaning nobody can guess — fails validation. Members are either leaf conditions or nested groups. NESTING IS CAPPED AT 5 LEVELS, and the cap is mechanical, not advisory: `conditionGroupLevel1`…`conditionGroupLevel5` form a finite chain and a level-5 group accepts leaf conditions only, so a 6-level tree cannot be expressed at all. The cap exists because a condition tree deeper than five levels is unreviewable by the business owner who has to sign it off, and because a bounded grammar keeps the evaluator's cost predictable. An empty `all` is vacuously TRUE and is the documented DEFAULT segment / unconditional-eligibility idiom; an empty `any` is rejected, since a group that can never match is always an authoring error."
+    },
+    "conditionGroupLevel1": {
+      "title": "ConditionGroup (nesting level 1 of 5)",
+      "description": "Outermost group. Members may be leaf conditions or level-2 groups.",
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "description": "Conjunction. Empty = vacuously true (the DEFAULT segment idiom).",
+              "minItems": 0,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel2"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "description": "Disjunction. Must be non-empty: an empty `any` never matches.",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel2"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nodeLevel2": {
+      "title": "Condition or level-2 group",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/condition"
+        },
+        {
+          "$ref": "#/$defs/conditionGroupLevel2"
+        }
+      ]
+    },
+    "conditionGroupLevel2": {
+      "title": "ConditionGroup (nesting level 2 of 5)",
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel3"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel3"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nodeLevel3": {
+      "title": "Condition or level-3 group",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/condition"
+        },
+        {
+          "$ref": "#/$defs/conditionGroupLevel3"
+        }
+      ]
+    },
+    "conditionGroupLevel3": {
+      "title": "ConditionGroup (nesting level 3 of 5)",
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel4"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel4"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nodeLevel4": {
+      "title": "Condition or level-4 group",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/condition"
+        },
+        {
+          "$ref": "#/$defs/conditionGroupLevel4"
+        }
+      ]
+    },
+    "conditionGroupLevel4": {
+      "title": "ConditionGroup (nesting level 4 of 5)",
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel5"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/nodeLevel5"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nodeLevel5": {
+      "title": "Condition or level-5 group",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/condition"
+        },
+        {
+          "$ref": "#/$defs/conditionGroupLevel5"
+        }
+      ]
+    },
+    "conditionGroupLevel5": {
+      "title": "ConditionGroup (nesting level 5 of 5 — leaves only)",
+      "description": "The deepest permitted group: its members are leaf conditions only. This is where the depth cap bites — there is no `nodeLevel6`, so a sixth level of nesting has no schema to validate against and the document is rejected.",
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/condition"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/condition"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "rule": {
+      "title": "Rule",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ruleId",
+        "priority",
+        "when",
+        "then"
+      ],
+      "properties": {
+        "ruleId": {
+          "$ref": "#/$defs/code",
+          "description": "Identifier of the rule, unique within the set and stable across versions where the rule's intent is unchanged — it is recorded in the decision trace as `matchedRuleId`, and it is the tie-break (ASC) when two rules share a priority, which is what makes evaluation a total order."
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Evaluation priority; HIGHER wins. Rules are ordered (`priority` DESC, `ruleId` ASC) and the first whose `when` matches supplies the outcome — later rules are not evaluated. Leave gaps (100, 200, 300) so a rule can be inserted between two others without renumbering a published set.",
+          "minimum": 0,
+          "maximum": 1000000,
+          "examples": [
+            300
+          ]
+        },
+        "when": {
+          "$ref": "#/$defs/conditionGroup",
+          "description": "Condition tree that must be true for this rule to match. `{\"all\": []}` is an unconditional rule — the catch-all at the lowest priority."
+        },
+        "then": {
+          "$ref": "#/$defs/action",
+          "description": "What matching this rule means."
+        }
+      }
+    },
+    "action": {
+      "title": "Action",
+      "description": "The outcome of a matched rule, modelled as a `oneOf` per outcome so that the fields which are meaningful for that outcome are required and the ones that are not are forbidden — a SUPPRESS carrying a `treatmentCode` is dead configuration that a reader would take for a selection.",
+      "type": "object",
+      "oneOf": [
+        {
+          "title": "SELECT_TREATMENT",
+          "description": "Choose a treatment by code (RULES sets only). The channel comes from the strategy's `treatments[]` entry for that code, so it is not repeated here and cannot contradict it.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "treatmentCode",
+            "reasonCode"
+          ],
+          "properties": {
+            "outcome": {
+              "const": "SELECT_TREATMENT"
+            },
+            "treatmentCode": {
+              "$ref": "#/$defs/code",
+              "description": "Must be one of the `treatments[].treatmentCode` values of every strategy that references this rule set — validated when the strategy transitions to TEST (DEC-3), because a rule pointing at a treatment the strategy does not offer would decide nothing at runtime."
+            },
+            "reasonCode": {
+              "$ref": "#/$defs/code",
+              "description": "Registry reason code explaining the match, e.g. `DPD_31_60`. REQUIRED on every outcome: an unexplainable decision is not shippable (A§58), and the registry is closed, so DEC-4 rejects an unknown code."
+            }
+          }
+        },
+        {
+          "title": "SUPPRESS",
+          "description": "Take no action on this subject. Valid in both kinds: a business rule suppresses (e.g. an arrangement is being honoured), and a policy rule suppresses as a narrowing constraint.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "reasonCode"
+          ],
+          "properties": {
+            "outcome": {
+              "const": "SUPPRESS"
+            },
+            "reasonCode": {
+              "$ref": "#/$defs/code"
+            }
+          }
+        },
+        {
+          "title": "FORBID_CHANNEL",
+          "description": "Remove one channel from consideration — POLICY sets only (enforced by the `kind` guard above). This is the only channel-level narrowing on the platform: it cannot select, cannot re-permit, and the post-selection guard re-applies it to the chosen treatment, so an optimizer that prefers the forbidden channel still cannot dispatch on it (A§54, CLAUDE.md hard rule 2).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "channel",
+            "reasonCode"
+          ],
+          "properties": {
+            "outcome": {
+              "const": "FORBID_CHANNEL"
+            },
+            "channel": {
+              "$ref": "#/$defs/channel"
+            },
+            "reasonCode": {
+              "$ref": "#/$defs/code"
+            }
+          }
+        }
+      ]
+    },
+    "channel": {
+      "title": "Channel",
+      "description": "Delivery channel of a treatment. `CALL` is a collector call task rather than an automated send, which is why it is a channel here and `CALL_TASK` is the treatment type in strategy documents.",
+      "enum": [
+        "SMS",
+        "EMAIL",
+        "LETTER",
+        "CALL",
+        "DIGITAL"
+      ]
+    }
+  }
+}

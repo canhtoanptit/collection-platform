@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/decisioning/context-document.v1.json",
+  "title": "context-document.v1",
+  "description": "The complete input to one decision (A§52, plan §7 DEC-1/DEC-6). The context builder assembles it from the owning services (account, delinquency, customer, arrangement, contact) — never by reading another service's store — validates it against this schema, snapshots it to s3://colx-dev-decision-audit/input-snapshots/ and records `input_content_hash` = SHA-256 of its canonical JSON. Everything the rule engine and the models may read is here: a decision is a pure function of this document plus the pinned strategy, rule set, policy set and guardrail config, which is what makes it replayable years later. All seven sections are required — a partial context is never decided on; an upstream failure is `CONTEXT_UNAVAILABLE` (fail closed), not a document with holes. The same schema shapes the batch population (`population-line.v1.json`) and the Snowflake-built context (ANA-10), and the context-parity test asserts the two are byte-identical after canonicalization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subject",
+    "delinquency",
+    "account",
+    "customer",
+    "arrangement",
+    "contactHistory",
+    "provenance"
+  ],
+  "properties": {
+    "subject": {
+      "$ref": "#/$defs/subject",
+      "description": "Who and what the decision is about."
+    },
+    "delinquency": {
+      "type": "object",
+      "description": "Current delinquency position of the account, owned by delinquency-service (D§5).",
+      "additionalProperties": false,
+      "required": [
+        "dpd",
+        "bucket",
+        "amountOverdue",
+        "currency"
+      ],
+      "properties": {
+        "dpd": {
+          "type": "integer",
+          "description": "Days past due: `asOf − oldestUnpaidDueDate` in whole days, 0 when the account is current. Computed by delinquency-service, never recomputed here.",
+          "minimum": 0,
+          "examples": [
+            35
+          ]
+        },
+        "bucket": {
+          "type": "string",
+          "description": "Delinquency bucket code from the versioned bucket configuration. Deliberately not an enum: buckets are configurable per D§5 (`GET|PUT /v1/delinquency/bucket-configs`), so a portfolio may run `CURRENT/1-30/31-60/61-90/90+` or its own ladder without a contracts change. Rules compare it with EQ/IN.",
+          "pattern": "^[A-Z0-9][A-Z0-9_+-]{0,15}$",
+          "examples": [
+            "CURRENT",
+            "1-30",
+            "31-60",
+            "90+"
+          ]
+        },
+        "amountOverdue": {
+          "$ref": "#/$defs/decimalMajorUnits",
+          "description": "Amount overdue in MAJOR units as a decimal string, e.g. `\"500.00\"` = EUR 500.00. This is the one place on the platform where money is not `int64` minor units (CLAUDE.md §3, contracts/README.md §4): collections strategies are written by business users against amounts they recognise, so a threshold reads `GT \"500\"` and not `GT 50000` — a rule set full of minor-unit integers is a rule set nobody proof-reads correctly. The context builder performs the minor→major conversion once (DEC-6) and the catalogue records the unit per field; the DSL compares as an exact decimal, so no float ever touches the value."
+        },
+        "currency": {
+          "type": "string",
+          "description": "ISO-4217 alpha-3 currency of `amountOverdue` and `account.currentBalance`. Always present with the amounts — an amount without a currency is never valid on this platform.",
+          "pattern": "^[A-Z]{3}$",
+          "examples": [
+            "EUR"
+          ]
+        }
+      }
+    },
+    "account": {
+      "type": "object",
+      "description": "Account facts owned by account-service.",
+      "additionalProperties": false,
+      "required": [
+        "productCode",
+        "currentBalance",
+        "status"
+      ],
+      "properties": {
+        "productCode": {
+          "type": "string",
+          "description": "Product the account belongs to, used for product-specific treatment eligibility. Source-system code (`cb_account.prod_cd`), carried through unchanged.",
+          "pattern": "^[A-Z0-9][A-Z0-9_-]{0,31}$",
+          "examples": [
+            "CARD_STD",
+            "LOAN_PERS"
+          ]
+        },
+        "currentBalance": {
+          "$ref": "#/$defs/decimalMajorUnits",
+          "description": "Total outstanding balance in MAJOR units as a decimal string, in `delinquency.currency`. Major units for the same reason as `delinquency.amountOverdue`."
+        },
+        "status": {
+          "type": "string",
+          "description": "Account status as published by account-service. Not an enum here: the vocabulary is owned by that service's contract (CON-3) and this document must not fork it. Rules compare it with EQ/IN.",
+          "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+          "examples": [
+            "OPEN",
+            "CLOSED",
+            "WRITTEN_OFF"
+          ]
+        }
+      }
+    },
+    "customer": {
+      "type": "object",
+      "description": "Customer collection profile owned by customer-service, including the constraints that the policy stage reads first (A§54).",
+      "additionalProperties": false,
+      "required": [
+        "contactability",
+        "preferredChannel",
+        "doNotContact",
+        "vulnerabilityFlag",
+        "segment"
+      ],
+      "properties": {
+        "contactability": {
+          "description": "Derived contactability band (customer-service derives it so that constraints override stated preferences — plan §7 SVC-1). `UNCONTACTABLE` means no channel has usable contact details.",
+          "enum": [
+            "HIGH",
+            "MEDIUM",
+            "LOW",
+            "UNCONTACTABLE"
+          ]
+        },
+        "preferredChannel": {
+          "description": "Channel the customer prefers, or `NONE` when no preference is recorded. A preference is an input to optimization, never an override of policy: a preferred channel that policy forbids is still not used.",
+          "enum": [
+            "SMS",
+            "EMAIL",
+            "LETTER",
+            "CALL",
+            "DIGITAL",
+            "NONE"
+          ]
+        },
+        "doNotContact": {
+          "type": "boolean",
+          "description": "Customer-level do-not-contact flag. `true` is a policy constraint, not a preference: the policy stage suppresses every automated contact treatment and the post-selection guard re-checks it, so no optimization outcome can override it (CLAUDE.md hard rule 2, A§54).",
+          "examples": [
+            false
+          ]
+        },
+        "vulnerabilityFlag": {
+          "type": "boolean",
+          "description": "Customer is flagged as vulnerable or in an assistance programme (D§4.1). `true` narrows treatments to the vulnerability-safe set — a policy constraint, handled like `doNotContact`.",
+          "examples": [
+            false
+          ]
+        },
+        "segment": {
+          "type": "string",
+          "description": "Customer segment code as published by customer-service (source `segment_cd` carried through). Used by strategy eligibility and segmentation.",
+          "pattern": "^[A-Z0-9][A-Z0-9_]{0,31}$",
+          "examples": [
+            "A",
+            "RETAIL_MASS"
+          ]
+        }
+      }
+    },
+    "arrangement": {
+      "type": "object",
+      "description": "Arrangement and promise position owned by arrangement-service — the reason most \"why was this customer contacted again?\" questions get answered.",
+      "additionalProperties": false,
+      "required": [
+        "hasActiveArrangement",
+        "hasOpenPromise",
+        "brokenPromises90d"
+      ],
+      "properties": {
+        "hasActiveArrangement": {
+          "type": "boolean",
+          "description": "An arrangement is ACTIVE (confirmed and not broken/completed). Strategies normally suppress collection contact while an arrangement is being honoured.",
+          "examples": [
+            false
+          ]
+        },
+        "hasOpenPromise": {
+          "type": "boolean",
+          "description": "A promise to pay is open (made, not yet due, not yet kept or broken).",
+          "examples": [
+            false
+          ]
+        },
+        "brokenPromises90d": {
+          "type": "integer",
+          "description": "Count of promises broken in the last 90 days, as a whole number. Drives escalation rules: repeated broken promises usually disqualify soft treatments.",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        }
+      }
+    },
+    "contactHistory": {
+      "type": "object",
+      "description": "Recent contact activity owned by contact-service, and the input to frequency-cap rules. Counts are attempts recorded on the account's customer, not deliveries.",
+      "additionalProperties": false,
+      "required": [
+        "contacts7d",
+        "contacts30d",
+        "byChannel7d",
+        "lastContactAt"
+      ],
+      "properties": {
+        "contacts7d": {
+          "type": "integer",
+          "description": "Contact attempts in the last 7 days across every channel.",
+          "minimum": 0,
+          "examples": [
+            2
+          ]
+        },
+        "contacts30d": {
+          "type": "integer",
+          "description": "Contact attempts in the last 30 days across every channel.",
+          "minimum": 0,
+          "examples": [
+            5
+          ]
+        },
+        "byChannel7d": {
+          "type": "object",
+          "description": "Contact attempts in the last 7 days broken down by channel, e.g. `{\"SMS\": 1, \"EMAIL\": 1}`. THE ONE DELIBERATE `additionalProperties` EXCEPTION in contracts/schemas/decisioning: the key set is the channel vocabulary owned by contact-service, and a new channel there must not require a new version of every decisioning contract, so the keys are open — but not untyped. `propertyNames` constrains keys to SCREAMING_SNAKE channel codes and `additionalProperties` constrains every value to a non-negative integer count, so the map is fully typed and no free-form blob can hide here. A channel absent from the map means zero contacts on that channel; the catalogue lists the five known channels as addressable paths.",
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,31}$"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "examples": [
+            {
+              "SMS": 1,
+              "EMAIL": 1
+            }
+          ]
+        },
+        "lastContactAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When the most recent contact attempt was made, RFC3339 UTC with `Z`. NULL — not omitted — when the customer has never been contacted, so that a rule can test it explicitly with IS_NULL / NOT_NULL and a missing upstream is distinguishable from a genuine never-contacted.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "examples": [
+            "2026-08-19T09:15:00Z"
+          ]
+        }
+      }
+    },
+    "provenance": {
+      "type": "array",
+      "description": "Where every section of this document came from and how fresh it was — one entry per section the builder assembled (A§52, DEC-6). Required and non-empty: a decision audit that cannot say which upstream supplied `delinquency.dpd` and as of when is not an audit. Not addressable by rules (the DSL has no array quantifiers), so it never changes a decision — it only explains one.",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/provenanceEntry"
+      }
+    }
+  },
+  "$defs": {
+    "subject": {
+      "title": "DecisionSubject",
+      "description": "The customer/account (and optionally case) a decision is about. Shared by population lines and outcome lines so the batch key and the context can be compared field for field.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "customerId",
+        "accountId"
+      ],
+      "properties": {
+        "customerId": {
+          "type": "string",
+          "description": "Platform customer identifier (an unprefixed ULID in production). No pattern is imposed: dev fixtures and migration populations legitimately carry source-system keys such as `C123` (D§8), and a decision must be reproducible from the population it was made on.",
+          "minLength": 1,
+          "maxLength": 64,
+          "examples": [
+            "C123"
+          ]
+        },
+        "accountId": {
+          "type": "string",
+          "description": "Platform account identifier (an unprefixed ULID in production; source keys such as `A123` in fixtures and migration populations). Also the champion/challenger allocation key: the experiment bucket is derived from `accountId` + salt (testdata/allocation-golden-vectors.json), so the same account always lands in the same arm.",
+          "minLength": 1,
+          "maxLength": 64,
+          "examples": [
+            "A123"
+          ]
+        },
+        "caseId": {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+          "description": "OPTIONAL — the collection case this decision belongs to, when one is open. A platform-minted ULID (unlike customerId/accountId, a case is never owned by a source system), so the envelope's ULID definition is reused rather than restated. Omitted (never null) for pre-case decisioning and for simulation populations built from history. Treatments require a case, so a TREAT decision taken without one creates the case downstream.",
+          "examples": [
+            "01M0MEKD80CYJMPJVS094NGMXE"
+          ]
+        }
+      }
+    },
+    "decimalMajorUnits": {
+      "title": "DecimalMajorUnits",
+      "description": "A monetary amount in MAJOR units as a decimal string with at most two fraction digits, e.g. `\"500\"`, `\"500.5\"`, `\"500.00\"`, `\"-12.34\"`. A string rather than a JSON number so that no consumer can round-trip it through a float; negative values are permitted because credit balances and reversals exist. Valid only inside decision context documents — every other contract on the platform uses `{amountMinor: int64, currency}`.",
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+      "maxLength": 24,
+      "examples": [
+        "500.00",
+        "12750.55"
+      ]
+    },
+    "provenanceEntry": {
+      "title": "ProvenanceEntry",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "source",
+        "asOf"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Section or catalogue path this entry accounts for — a top-level section name (`delinquency`) covers every field beneath it; a full path (`contactHistory.contacts7d`) narrows to one field when sections come from more than one upstream.",
+          "pattern": "^[a-z][A-Za-z0-9]*(\\.[A-Za-z0-9][A-Za-z0-9_]*)*$",
+          "minLength": 2,
+          "maxLength": 128,
+          "examples": [
+            "delinquency",
+            "contactHistory.contacts7d"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "description": "What supplied the value: the kebab-case deployable name of the owning service for online decisions (`delinquency-service`), `snowflake-population` for batch/simulation contexts built by ANA-10, or `caller-supplied` for the role-gated TEST/SIMULATION path where the caller passes a full context.",
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "minLength": 3,
+          "maxLength": 64,
+          "examples": [
+            "delinquency-service",
+            "snowflake-population",
+            "caller-supplied"
+          ]
+        },
+        "asOf": {
+          "type": "string",
+          "description": "As-of time of the supplied value (not the fetch time), RFC3339 UTC with `Z`. Staleness is visible in the explanation, which is how a \"the data was already wrong\" dispute gets settled.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "examples": [
+            "2026-08-22T09:55:00Z"
+          ]
+        }
+      }
+    }
+  }
+}

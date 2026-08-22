@@ -1,0 +1,73 @@
+{
+  "configId": "GLOBAL_GUARDRAILS",
+  "version": 3,
+  "contactWindows": [
+    {
+      "channel": "SMS",
+      "startLocal": "08:00",
+      "endLocal": "21:00",
+      "timezone": "Europe/Dublin"
+    },
+    {
+      "channel": "CALL",
+      "startLocal": "09:00",
+      "endLocal": "20:00",
+      "timezone": "Europe/Dublin"
+    },
+    {
+      "channel": "EMAIL",
+      "startLocal": "06:00",
+      "endLocal": "23:00",
+      "timezone": "Europe/Dublin"
+    },
+    {
+      "channel": "DIGITAL",
+      "startLocal": "00:00",
+      "endLocal": "23:59",
+      "timezone": "UTC"
+    },
+    {
+      "channel": "LETTER",
+      "startLocal": "00:00",
+      "endLocal": "23:59",
+      "timezone": "UTC"
+    }
+  ],
+  "frequencyCaps": [
+    {
+      "channel": "ALL",
+      "windowDays": 7,
+      "maxContacts": 4
+    },
+    {
+      "channel": "ALL",
+      "windowDays": 30,
+      "maxContacts": 10
+    },
+    {
+      "channel": "SMS",
+      "windowDays": 7,
+      "maxContacts": 2
+    },
+    {
+      "channel": "EMAIL",
+      "windowDays": 7,
+      "maxContacts": 3
+    },
+    {
+      "channel": "CALL",
+      "windowDays": 7,
+      "maxContacts": 3
+    },
+    {
+      "channel": "LETTER",
+      "windowDays": 30,
+      "maxContacts": 2
+    },
+    {
+      "channel": "DIGITAL",
+      "windowDays": 7,
+      "maxContacts": 7
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "subject": {
+    "customerId": "C123",
+    "accountId": "A123",
+    "caseId": "01M0MEKD80CYJMPJVS094NGMXE"
+  },
+  "delinquency": {
+    "dpd": 35,
+    "bucket": "31-60",
+    "amountOverdue": "500.00",
+    "currency": "EUR"
+  },
+  "account": {
+    "productCode": "CARD_STD",
+    "currentBalance": "3250.75",
+    "status": "OPEN"
+  },
+  "customer": {
+    "contactability": "HIGH",
+    "preferredChannel": "SMS",
+    "doNotContact": false,
+    "vulnerabilityFlag": false,
+    "segment": "RETAIL_MASS"
+  },
+  "arrangement": {
+    "hasActiveArrangement": false,
+    "hasOpenPromise": false,
+    "brokenPromises90d": 0
+  },
+  "contactHistory": {
+    "contacts7d": 2,
+    "contacts30d": 5,
+    "byChannel7d": {
+      "SMS": 1,
+      "EMAIL": 1
+    },
+    "lastContactAt": "2026-08-19T09:15:00Z"
+  },
+  "provenance": [
+    {
+      "path": "subject",
+      "source": "case-service",
+      "asOf": "2026-08-22T09:59:58Z"
+    },
+    {
+      "path": "delinquency",
+      "source": "delinquency-service",
+      "asOf": "2026-08-22T06:00:00Z"
+    },
+    {
+      "path": "account",
+      "source": "account-service",
+      "asOf": "2026-08-22T09:59:57Z"
+    },
+    {
+      "path": "customer",
+      "source": "customer-service",
+      "asOf": "2026-08-22T09:59:57Z"
+    },
+    {
+      "path": "arrangement",
+      "source": "arrangement-service",
+      "asOf": "2026-08-22T09:59:58Z"
+    },
+    {
+      "path": "contactHistory",
+      "source": "contact-service",
+      "asOf": "2026-08-22T09:59:58Z"
+    }
+  ]
+}

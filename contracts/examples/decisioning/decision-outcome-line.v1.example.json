@@ -1,0 +1,25 @@
+{
+  "decisionId": "01M0MEKD808FEZ4EZFREDCA5PS",
+  "subject": {
+    "customerId": "C123",
+    "accountId": "A123",
+    "caseId": "01M0MEKD80CYJMPJVS094NGMXE"
+  },
+  "decision": "TREAT",
+  "strategyId": "EARLY_COLLECTION",
+  "strategyVersion": 17,
+  "treatmentCode": "SMS_EARLY_REMINDER",
+  "channel": "SMS",
+  "reasonCodes": [
+    "STRATEGY_ELIGIBLE",
+    "SEGMENT_EARLY_LOW_RISK",
+    "DPD_31_60",
+    "HIGH_CONTACTABILITY",
+    "PAYMENT_PROPENSITY_BAND",
+    "CHANNEL_ELIGIBLE",
+    "SMS_ALLOWED",
+    "NO_ACTIVE_ARRANGEMENT"
+  ],
+  "experimentArm": "CHAMPION",
+  "allocationBucket": 2972
+}

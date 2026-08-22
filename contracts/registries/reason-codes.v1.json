@@ -1,0 +1,210 @@
+{
+  "registryVersion": 1,
+  "codes": [
+    {
+      "code": "DO_NOT_CONTACT",
+      "category": "POLICY",
+      "description": "The customer carries a do-not-contact flag. Suppresses every automated contact treatment and is re-checked immediately before dispatch, so a flag set after the decision still prevents the send."
+    },
+    {
+      "code": "VULNERABLE_CUSTOMER_HOLD",
+      "category": "POLICY",
+      "description": "The customer is flagged as vulnerable or in an assistance programme, so collection contact is held pending the vulnerability-safe treatment path."
+    },
+    {
+      "code": "AUTOMATED_CONTACT_NOT_ALLOWED",
+      "category": "POLICY",
+      "description": "Policy forbids automated contact for this customer; only collector-initiated action is permitted. The A§54 worked example: policy forbids, optimization prefers SMS, result is no SMS."
+    },
+    {
+      "code": "LEGAL_HOLD_ACTIVE",
+      "category": "POLICY",
+      "description": "A legal case is active on the account, so collections contact is suspended while the legal process runs."
+    },
+    {
+      "code": "COMPLAINT_HOLD_ACTIVE",
+      "category": "POLICY",
+      "description": "An open complaint places the account on hold; contact resumes only when the complaint is resolved."
+    },
+    {
+      "code": "BANKRUPTCY_NOTIFIED",
+      "category": "POLICY",
+      "description": "An insolvency or bankruptcy notification was received for the customer, which removes the account from normal collections contact."
+    },
+    {
+      "code": "DECEASED_HOLD",
+      "category": "POLICY",
+      "description": "The customer is recorded as deceased; all contact is suppressed and the account follows the bereavement process."
+    },
+    {
+      "code": "STRATEGY_ELIGIBLE",
+      "category": "ELIGIBILITY",
+      "description": "The account matched the eligibility conditions of the selected strategy. Emitted on every decision that reached a strategy, so an explanation always states which gate was passed."
+    },
+    {
+      "code": "NO_STRATEGY_MATCH",
+      "category": "ELIGIBILITY",
+      "description": "No ACTIVE strategy's eligibility matched this context, so the decision is INELIGIBLE and no strategy is attributed. Usually means a coverage gap rather than a healthy exclusion — a rising count is a signal to review strategy eligibility."
+    },
+    {
+      "code": "CHANNEL_ELIGIBLE",
+      "category": "ELIGIBILITY",
+      "description": "The selected channel is usable for this customer: contact details exist for it and no constraint removed it."
+    },
+    {
+      "code": "CHANNEL_NOT_ELIGIBLE",
+      "category": "ELIGIBILITY",
+      "description": "The channel a treatment needs is unusable — no contact detail on file, or the detail failed validation — so the treatment was not a candidate."
+    },
+    {
+      "code": "ACCOUNT_NOT_DELINQUENT",
+      "category": "ELIGIBILITY",
+      "description": "The account is current (0 DPD, nothing overdue), so no collections strategy applies."
+    },
+    {
+      "code": "ACCOUNT_CLOSED",
+      "category": "ELIGIBILITY",
+      "description": "The account is closed or written off and is out of scope for collections treatment."
+    },
+    {
+      "code": "SEGMENT_EARLY_LOW_RISK",
+      "category": "SEGMENT",
+      "description": "Early-stage delinquency with a low risk profile: no broken promises, contactable, modest exposure. Receives the light-touch treatment ladder."
+    },
+    {
+      "code": "SEGMENT_EARLY_HIGH_RISK",
+      "category": "SEGMENT",
+      "description": "Early-stage delinquency with adverse indicators (broken promises, low contactability or high exposure). Escalates faster than the low-risk segment."
+    },
+    {
+      "code": "SEGMENT_LATE_STAGE",
+      "category": "SEGMENT",
+      "description": "Later-stage delinquency where the treatment ladder moves from reminders to collector contact and formal notices."
+    },
+    {
+      "code": "SEGMENT_DEFAULT",
+      "category": "SEGMENT",
+      "description": "The catch-all segment: the subject matched no earlier segment. Every subject lands in exactly one segment, so \"unsegmented\" is never a silent state."
+    },
+    {
+      "code": "DPD_1_30",
+      "category": "RULE",
+      "description": "Days past due is between 1 and 30 inclusive."
+    },
+    {
+      "code": "DPD_31_60",
+      "category": "RULE",
+      "description": "Days past due is between 31 and 60 inclusive — the A§55 / D§8 worked example condition (dpd 35)."
+    },
+    {
+      "code": "DPD_61_90",
+      "category": "RULE",
+      "description": "Days past due is between 61 and 90 inclusive."
+    },
+    {
+      "code": "DPD_90_PLUS",
+      "category": "RULE",
+      "description": "Days past due is over 90."
+    },
+    {
+      "code": "HIGH_CONTACTABILITY",
+      "category": "RULE",
+      "description": "The customer's derived contactability is HIGH, so a self-service digital or SMS treatment is likely to reach them (A§58)."
+    },
+    {
+      "code": "LOW_CONTACTABILITY",
+      "category": "RULE",
+      "description": "The customer's derived contactability is LOW or UNCONTACTABLE, which favours letter or collector treatment over messaging."
+    },
+    {
+      "code": "SMS_ALLOWED",
+      "category": "RULE",
+      "description": "The rule set permits SMS for this subject: mobile contact is available, no policy narrowing applies and the SMS frequency budget is not exhausted (A§58)."
+    },
+    {
+      "code": "NO_ACTIVE_ARRANGEMENT",
+      "category": "RULE",
+      "description": "No payment arrangement is active on the account, so collection contact is appropriate (A§58)."
+    },
+    {
+      "code": "ACTIVE_ARRANGEMENT_PRESENT",
+      "category": "RULE",
+      "description": "An arrangement is active and being honoured, so contact is suppressed — chasing a customer who is paying to plan is the fastest way to break the plan."
+    },
+    {
+      "code": "OPEN_PROMISE_PENDING",
+      "category": "RULE",
+      "description": "A promise to pay is open and not yet due, so the account waits for the promise date rather than being contacted again."
+    },
+    {
+      "code": "BROKEN_PROMISE_HISTORY",
+      "category": "RULE",
+      "description": "One or more promises were broken in the last 90 days, which disqualifies the light-touch treatments and escalates the ladder."
+    },
+    {
+      "code": "PAYMENT_PROPENSITY_BAND",
+      "category": "MODEL",
+      "description": "The PAYMENT_PROPENSITY model returned a score and its band was used in the decision. The exact score and band are in the decision trace; the code records that the model participated (A§56/A§58)."
+    },
+    {
+      "code": "PAYMENT_PROPENSITY_HIGH",
+      "category": "MODEL",
+      "description": "Payment propensity fell in the high band: a reminder is likely to be sufficient, so the cheapest effective channel is preferred."
+    },
+    {
+      "code": "PAYMENT_PROPENSITY_LOW",
+      "category": "MODEL",
+      "description": "Payment propensity fell in the low band, which favours earlier collector contact over further automated reminders."
+    },
+    {
+      "code": "MODEL_SCORE_UNAVAILABLE",
+      "category": "MODEL",
+      "description": "A model call failed or timed out and the strategy's `onError: DEFAULT` substituted its `defaultScore`. Recorded so a substituted score is never mistaken for a real one, and so the substitution rate is countable."
+    },
+    {
+      "code": "POLICY_VIOLATION_GUARD",
+      "category": "CONSTRAINT",
+      "description": "The post-selection guard re-validated the chosen treatment against the policy snapshot and rejected it, so the decision is NO_ACTION and nothing is dispatched. Its presence means the pipeline tried to select something policy forbids — a bug to be investigated, never an expected outcome (A§54, CLAUDE.md hard rule 2)."
+    },
+    {
+      "code": "CHANNEL_FORBIDDEN_BY_POLICY",
+      "category": "CONSTRAINT",
+      "description": "A POLICY rule set FORBID_CHANNEL narrowing removed this channel from consideration before selection."
+    },
+    {
+      "code": "SUPPRESSED_BY_POLICY",
+      "category": "CONSTRAINT",
+      "description": "A policy constraint suppressed every treatment for this subject, so the decision is SUPPRESSED. The specific POLICY code accompanies this one."
+    },
+    {
+      "code": "NO_TREATMENT_AVAILABLE",
+      "category": "CONSTRAINT",
+      "description": "Every candidate treatment was filtered out by policy, constraints or channel eligibility, leaving nothing to select, so the decision is NO_ACTION."
+    },
+    {
+      "code": "CONTEXT_UNAVAILABLE",
+      "category": "EXECUTION",
+      "description": "The decision context could not be assembled — an upstream service failed or timed out — so no decision was taken. Fail closed: a partial context is never decided on (also the A§20 error code returned to the caller)."
+    },
+    {
+      "code": "POLICY_RECHECK_UNAVAILABLE",
+      "category": "EXECUTION",
+      "description": "The pre-dispatch customer-policy re-check could not be completed, so the treatment is SUPPRESSED rather than sent on the assumption that the previous answer still holds. Fail closed by design (DEC-16)."
+    },
+    {
+      "code": "CONTACT_WINDOW_BLOCKED",
+      "category": "EXECUTION",
+      "description": "Dispatch fell outside the channel's permitted local contact window from the published guardrail configuration. The treatment is rescheduled to the next window opening rather than dropped."
+    },
+    {
+      "code": "FREQUENCY_CAP_EXCEEDED",
+      "category": "EXECUTION",
+      "description": "Sending would exceed a contact frequency cap for the channel or across all channels in its rolling window, so the treatment is SUPPRESSED."
+    },
+    {
+      "code": "PROVIDER_DISPATCH_FAILED",
+      "category": "EXECUTION",
+      "description": "The channel provider rejected the dispatch after retries, so the treatment is FAILED. Distinguishes a delivery failure from a platform decision not to contact."
+    }
+  ]
+}

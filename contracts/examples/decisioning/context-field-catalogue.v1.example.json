@@ -1,0 +1,146 @@
+{
+  "catalogueVersion": 1,
+  "fields": [
+    {
+      "path": "subject.customerId",
+      "type": "string",
+      "description": "Customer the decision is about. Addressable so a targeted pilot can be scoped by IN on a small list, not for general rule logic."
+    },
+    {
+      "path": "subject.accountId",
+      "type": "string",
+      "description": "Account the decision is about, and the champion/challenger allocation key."
+    },
+    {
+      "path": "subject.caseId",
+      "type": "string",
+      "description": "Collection case, when one is open. Nullable — test it with IS_NULL / NOT_NULL to write pre-case versus in-case rules."
+    },
+    {
+      "path": "delinquency.dpd",
+      "type": "number",
+      "unit": "days",
+      "description": "Days past due, whole days, 0 when the account is current. Supplied by delinquency-service; the canonical bucketing input."
+    },
+    {
+      "path": "delinquency.bucket",
+      "type": "string",
+      "description": "Delinquency bucket code from the versioned bucket configuration, e.g. CURRENT, 1-30, 31-60, 90+. Configurable per portfolio, so compare with EQ or IN and never with an ordering operator."
+    },
+    {
+      "path": "delinquency.amountOverdue",
+      "type": "number",
+      "unit": "majorUnits",
+      "description": "Amount overdue in MAJOR currency units, e.g. 500.00 means EUR 500.00 — write thresholds as \"500\", never as 50000 minor units. Compared as an exact decimal."
+    },
+    {
+      "path": "delinquency.currency",
+      "type": "string",
+      "description": "ISO-4217 currency of the overdue amount and the balance. Test it before comparing an amount in a multi-currency portfolio."
+    },
+    {
+      "path": "account.productCode",
+      "type": "string",
+      "description": "Product the account belongs to, for product-specific treatment eligibility. Source-system code carried through unchanged."
+    },
+    {
+      "path": "account.currentBalance",
+      "type": "number",
+      "unit": "majorUnits",
+      "description": "Total outstanding balance in MAJOR currency units, in the account's currency. Used for exposure-based segmentation."
+    },
+    {
+      "path": "account.status",
+      "type": "string",
+      "description": "Account status published by account-service, e.g. OPEN, CLOSED, WRITTEN_OFF. Vocabulary owned by that service, so compare with EQ or IN."
+    },
+    {
+      "path": "customer.contactability",
+      "type": "string",
+      "description": "Derived contactability band: HIGH, MEDIUM, LOW or UNCONTACTABLE. Derived by customer-service so that constraints already override stated preferences."
+    },
+    {
+      "path": "customer.preferredChannel",
+      "type": "string",
+      "description": "Preferred channel: SMS, EMAIL, LETTER, CALL, DIGITAL or NONE. An input to optimization, never an override of policy."
+    },
+    {
+      "path": "customer.doNotContact",
+      "type": "boolean",
+      "description": "Customer-level do-not-contact flag. A policy constraint, not a preference: true means no automated contact, and the pre-dispatch guard re-checks it."
+    },
+    {
+      "path": "customer.vulnerabilityFlag",
+      "type": "boolean",
+      "description": "Customer is flagged vulnerable or in an assistance programme. True narrows treatments to the vulnerability-safe set."
+    },
+    {
+      "path": "customer.segment",
+      "type": "string",
+      "description": "Customer segment code published by customer-service, used by strategy eligibility and segmentation."
+    },
+    {
+      "path": "arrangement.hasActiveArrangement",
+      "type": "boolean",
+      "description": "An arrangement is active and being honoured. Almost every strategy suppresses collection contact while this is true."
+    },
+    {
+      "path": "arrangement.hasOpenPromise",
+      "type": "boolean",
+      "description": "A promise to pay is open: made, not yet due, neither kept nor broken."
+    },
+    {
+      "path": "arrangement.brokenPromises90d",
+      "type": "number",
+      "unit": "count",
+      "description": "Promises broken in the last 90 days. The usual escalation trigger out of the light-touch treatment ladder."
+    },
+    {
+      "path": "contactHistory.contacts7d",
+      "type": "number",
+      "unit": "count",
+      "description": "Contact attempts in the last 7 days across every channel. Frequency-cap rules read this; the pre-dispatch guardrail check is separate and authoritative."
+    },
+    {
+      "path": "contactHistory.contacts30d",
+      "type": "number",
+      "unit": "count",
+      "description": "Contact attempts in the last 30 days across every channel."
+    },
+    {
+      "path": "contactHistory.byChannel7d.SMS",
+      "type": "number",
+      "unit": "count",
+      "description": "SMS attempts in the last 7 days. Absent from the context means zero, and a leaf on a missing field evaluates false, so compare with GTE rather than EQ 0."
+    },
+    {
+      "path": "contactHistory.byChannel7d.EMAIL",
+      "type": "number",
+      "unit": "count",
+      "description": "Email attempts in the last 7 days."
+    },
+    {
+      "path": "contactHistory.byChannel7d.LETTER",
+      "type": "number",
+      "unit": "count",
+      "description": "Letters sent in the last 7 days."
+    },
+    {
+      "path": "contactHistory.byChannel7d.CALL",
+      "type": "number",
+      "unit": "count",
+      "description": "Collector call attempts in the last 7 days."
+    },
+    {
+      "path": "contactHistory.byChannel7d.DIGITAL",
+      "type": "number",
+      "unit": "count",
+      "description": "Digital/in-app contacts in the last 7 days."
+    },
+    {
+      "path": "contactHistory.lastContactAt",
+      "type": "date",
+      "description": "When the most recent contact attempt was made, RFC3339 UTC. Nullable when the customer has never been contacted — test it with IS_NULL / NOT_NULL."
+    }
+  ]
+}
