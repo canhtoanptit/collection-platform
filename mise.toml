@@ -1,0 +1,11 @@
+# Optional toolchain pinning. Everything also works with system-installed
+# tools at compatible versions (see docs/conventions.md).
+[tools]
+go = "1.26"
+terraform = "1.12"
+helm = "4"
+helmfile = "1"
+kubectl = "1.32"
+node = "24"
+pnpm = "10"
+python = "3.12"

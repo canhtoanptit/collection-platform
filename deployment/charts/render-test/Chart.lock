@@ -1,0 +1,6 @@
+dependencies:
+- name: collections-service
+  repository: file://../collections-service
+  version: 0.1.0
+digest: sha256:aa18afeb6c02d78465a8d17c5a543085c76ed2c55ed905be890b42018e4734c8
+generated: "2026-08-22T19:29:26.461008+07:00"

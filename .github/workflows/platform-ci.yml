@@ -1,0 +1,46 @@
+name: platform-ci
+
+on:
+  pull_request:
+    paths:
+      - 'platform/**'
+      - 'contracts/**'
+      - 'go.work'
+      - 'tools/**'
+      - 'makefiles/**'
+      - 'Makefile'
+      - '.golangci.yml'
+      - 'scripts/ci/**'
+      - '.github/workflows/platform-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'platform/**'
+      - 'contracts/**'
+      - 'go.work'
+      - 'tools/**'
+      - 'makefiles/**'
+      - 'Makefile'
+      - '.golangci.yml'
+      - 'scripts/ci/**'
+      - '.github/workflows/platform-ci.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+      - name: bootstrap
+        run: make bootstrap
+      - name: lint
+        run: make lint
+      - name: build
+        run: make build-all
+      - name: test
+        run: make test-all
+      - name: contracts
+        run: make contracts-check

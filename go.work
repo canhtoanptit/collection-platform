@@ -1,0 +1,10 @@
+go 1.26.2
+
+// The tools module is deliberately NOT part of the workspace: its heavy tool
+// dependencies (sqlc, vacuum, ...) must not influence workspace MVS. Invoke
+// tools via `GOWORK=off go -C tools tool <name>` (see Makefile TOOL variable) —
+// GOWORK=off is required or the tool directives are invisible.
+use (
+	./contracts
+	./platform
+)

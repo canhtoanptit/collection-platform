@@ -1,0 +1,168 @@
+# Reference values shape for consumers of the collections-service library chart.
+#
+# IMPORTANT: Helm namespaces subchart values, so the keys below are NOT read by
+# the library templates (they would land under `.Values.collections-service.*`).
+# This file is documentation plus a starting point: copy it into the consuming
+# service chart's own values.yaml, at the top level. Every optional key has a
+# safe default inside the templates, so a consumer only has to set `image`.
+#
+# See deployment/charts/render-test for a working consumer.
+
+# -- Name overrides. Default object name is "<release>-<chart name>".
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Container image. `tag` defaults to the consumer chart's appVersion.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- References to image pull secrets, e.g. [{name: ecr-creds}].
+imagePullSecrets: []
+
+# -- Replica count. Ignored when autoscaling.enabled is true.
+replicaCount: 2
+
+# -- Entrypoint override. `args` defaults to ["serve"].
+command: []
+args: []
+
+# -- Extra annotations/labels merged onto the pod template. The Prometheus
+# scrape annotations are always added (see `metrics`).
+podAnnotations: {}
+podLabels: {}
+
+# -- Extra annotations/labels merged onto every rendered object.
+commonAnnotations: {}
+commonLabels: {}
+
+serviceAccount:
+  # -- Create a ServiceAccount for the service.
+  create: true
+  # -- Name to use. Defaults to the fullname when create is true.
+  name: ""
+  # -- IRSA role to bind. Renders eks.amazonaws.com/role-arn when non-empty.
+  roleArn: ""
+  # -- Additional ServiceAccount annotations.
+  annotations: {}
+
+service:
+  type: ClusterIP
+  # -- Service port numbers. Keys must stay http/metrics.
+  ports:
+    http: 8080
+    metrics: 9090
+  annotations: {}
+
+# -- Container ports. http serves the API and probes, metrics serves /metrics.
+containerPorts:
+  http: 8080
+  metrics: 9090
+
+metrics:
+  # -- Add prometheus.io/* pod annotations (kube-prometheus-stack pod scrape).
+  enabled: true
+  path: /metrics
+
+# -- Plain environment variables, verbatim k8s EnvVar objects:
+#    [{name: LOG_LEVEL, value: info}, {name: X, valueFrom: {...}}]
+env: []
+
+envFrom:
+  # -- Name of the Secret synced by ExternalSecret (ESO). Optional: skipped
+  # when empty. Set optional: true while the ExternalSecret is not yet applied.
+  secretName: ""
+  optional: false
+  # -- Name of a ConfigMap to load wholesale. Optional.
+  configMapName: ""
+
+# -- Probes. Paths are the platform/health defaults; both hit the http port.
+probes:
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+# -- Pod-level security context. Merged over the hardened defaults.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. Merged over the hardened defaults.
+securityContext:
+  runAsNonRoot: true
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Writable scratch space, needed because the root filesystem is read-only.
+tmpDir:
+  enabled: true
+  sizeLimit: 64Mi
+
+# -- Extra volumes/mounts appended verbatim.
+extraVolumes: []
+extraVolumeMounts: []
+
+terminationGracePeriodSeconds: 30
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  # -- Set to enable the memory metric as well.
+  targetMemoryUtilizationPercentage: null
+
+# -- Scheduled work (`server tick <task>`), one CronJob per entry. `args`
+# defaults to ["tick", "<name>"]; pass it explicitly to add flags such as
+# --as-of. Object name is "<fullname>-<name>".
+# cronJobs:
+#   - name: dpd-recalculate
+#     schedule: "15 1 * * *"
+#     args: ["tick", "dpd-recalculate"]
+cronJobs: []
+
+migrate:
+  # -- Run `server migrate up` as a pre-install/pre-upgrade Helm hook.
+  enabled: true
+  args:
+    - migrate
+    - up
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 256Mi

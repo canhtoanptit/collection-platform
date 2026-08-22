@@ -1,0 +1,14 @@
+apiVersion: v2
+name: render-test
+description: |
+  RENDER-TEST ONLY — not a deployable service. A minimal consumer of the
+  collections-service library chart that instantiates every named template with
+  sample values, so `helm template` in CI proves the library still renders.
+  Never add this chart to deployment/helmfile.yaml.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  - name: collections-service
+    version: 0.1.0
+    repository: file://../collections-service

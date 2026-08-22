@@ -1,0 +1,43 @@
+# Reusable CI for one Go service. Each service adds a thin caller workflow:
+#
+#   name: svc-case
+#   on:
+#     pull_request: { paths: ['services/case/**', 'platform/**', 'contracts/**'] }
+#     push: { branches: [main], paths: ['services/case/**', 'platform/**', 'contracts/**'] }
+#   jobs:
+#     ci:
+#       uses: ./.github/workflows/service-ci.yml
+#       with: { dir: services/case }
+name: service-ci
+
+on:
+  workflow_call:
+    inputs:
+      dir:
+        description: Service directory (e.g. services/case)
+        required: true
+        type: string
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+      - name: bootstrap
+        run: make bootstrap
+      - name: generated code drift
+        run: |
+          make -C ${{ inputs.dir }} generate
+          git diff --exit-code
+      - name: lint
+        run: make -C ${{ inputs.dir }} lint
+      - name: unit tests + coverage floors
+        run: make -C ${{ inputs.dir }} coverage
+      - name: contract tests
+        run: make -C ${{ inputs.dir }} contract-test
+      - name: integration tests (testcontainers)
+        run: make -C ${{ inputs.dir }} test-integration

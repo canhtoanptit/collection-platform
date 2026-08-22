@@ -1,0 +1,46 @@
+# local tool binaries (installed by `make bootstrap`)
+/bin/
+
+# go
+coverage.out
+coverage.html
+*.test
+
+# terraform
+.terraform/
+.terraform.lock.hcl.tmp
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars.local
+crash.log
+
+# helm: vendored chart dependencies (rebuild with `helm dependency build`);
+# Chart.lock is committed.
+deployment/charts/*/charts/*.tgz
+
+# node / ui
+node_modules/
+dist/
+.eslintcache
+
+# dbt / python
+target/
+dbt_packages/
+__pycache__/
+.venv/
+*.pyc
+logs/
+
+# secrets must never be committed (real values live in AWS Secrets Manager)
+.env
+.env.*
+*.pem
+*_rsa
+*_rsa.pub
+*.p8
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/

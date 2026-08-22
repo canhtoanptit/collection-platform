@@ -1,0 +1,15 @@
+apiVersion: v2
+name: collections-service
+description: |
+  Library chart holding the canonical Kubernetes objects for a collections
+  platform Go service: Deployment, Service, ServiceAccount (+IRSA), HPA,
+  scheduled-work CronJobs and the goose migrate pre-install/pre-upgrade hook.
+  Consumed by per-service charts under deployment/charts/<svc>; it renders
+  nothing on its own.
+type: library
+version: 0.1.0
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - collections
+  - library
+home: https://github.com/canhtoanptit/collection-platform

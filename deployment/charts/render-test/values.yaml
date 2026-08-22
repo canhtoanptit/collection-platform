@@ -1,0 +1,84 @@
+# Sample values exercising every optional branch of the library chart.
+# Run `helm dependency build deployment/charts/render-test` once, then
+# `helm template deployment/charts/render-test`.
+
+image:
+  repository: 000000000000.dkr.ecr.eu-west-1.amazonaws.com/colx/render-test
+  tag: "0.0.0-render-test"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  roleArn: arn:aws:iam::000000000000:role/colx-dev-render-test
+  annotations:
+    collections.internal/owner: platform
+
+service:
+  type: ClusterIP
+  ports:
+    http: 8080
+    metrics: 9090
+
+containerPorts:
+  http: 8080
+  metrics: 9090
+
+env:
+  - name: LOG_LEVEL
+    value: info
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: http://opentelemetry-collector.observability:4317
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+
+envFrom:
+  # Synced from AWS Secrets Manager by an ExternalSecret (DATABASE_URL, ...).
+  secretName: render-test-secrets
+  optional: true
+  configMapName: render-test-config
+
+podAnnotations:
+  collections.internal/render-test: "true"
+
+commonLabels:
+  collections.internal/tier: domain
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: render-test
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+cronJobs:
+  - name: dpd-recalculate
+    schedule: "15 1 * * *"
+    args: ["tick", "dpd-recalculate"]
+  - name: promise-sweep
+    schedule: "45 2 * * *"
+    args: ["tick", "promise-sweep", "--as-of=$(BUSINESS_DATE)"]
+    env:
+      - name: BUSINESS_DATE
+        value: "2026-01-01"
+
+migrate:
+  enabled: true
