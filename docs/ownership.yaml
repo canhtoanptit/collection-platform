@@ -177,12 +177,10 @@ CON-7:
   - "scripts/ci/contracts-check.sh"
   - "scripts/verify/CON-7.sh"
 
-# Decisioning contracts, registries, golden vectors, decisioning event contexts.
-DEC-1:
-  - "contracts/openapi/strategy.v1.yaml"
-  - "contracts/openapi/decision.v1.yaml"
-  - "contracts/openapi/treatment.v1.yaml"
-  - "contracts/openapi/model.v1.yaml"
+# Decisioning JSON Schemas, decisioning event contexts, registries, golden
+# vectors. (DEC-1 was split by the lead into 1A schemas / 1B OpenAPI so the two
+# agents can run in parallel without sharing a directory.)
+DEC-1A:
   - "contracts/schemas/decisioning/**"
   - "contracts/schemas/events/strategy/**"
   - "contracts/schemas/events/decision/**"
@@ -191,18 +189,28 @@ DEC-1:
   - "contracts/examples/events/strategy/**"
   - "contracts/examples/events/decision/**"
   - "contracts/examples/events/treatment/**"
-  - "contracts/examples/openapi/strategy/**"
-  - "contracts/examples/openapi/decision/**"
-  - "contracts/examples/openapi/treatment/**"
-  - "contracts/examples/openapi/model/**"
   - "contracts/registries/**"
   - "contracts/testdata/**"
-  - "scripts/verify/DEC-1.sh"
+  - "scripts/verify/DEC-1A.sh"
+
+# Decisioning OpenAPI specs. Self-contained component schemas (no external
+# $ref into schemas/decisioning); examples live inside the specs — the
+# validate_test.go mirror rule means examples/openapi/** must stay empty.
+DEC-1B:
+  - "contracts/openapi/strategy.v1.yaml"
+  - "contracts/openapi/decision.v1.yaml"
+  - "contracts/openapi/treatment.v1.yaml"
+  - "contracts/openapi/model.v1.yaml"
+  - "scripts/verify/DEC-1B.sh"
 
 # File-feed contracts + the pure feedspec validation library. Creates the
-# ingestion module; ING-1 owns the rest of ingestion/** from Phase 5.
+# ingestion module (including the one-line `use ./ingestion` go.work addition —
+# serialized with FND-0, which is complete); ING-1 owns the rest of
+# ingestion/** from Phase 5.
 ING-3:
   - "contracts/files/**"
+  - "go.work"
+  - "go.work.sum"
   - "ingestion/go.mod"
   - "ingestion/go.sum"
   - "ingestion/internal/feedspec/**"
