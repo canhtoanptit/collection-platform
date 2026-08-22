@@ -1,0 +1,723 @@
+# =============================================================================
+# Collections Platform — account-service API (CON-3)
+# =============================================================================
+# Owns (contracts/README.md "URL path-ownership matrix"): the account resource,
+# its balance, its history, and the customer -> accounts listing. The listing
+# lives here rather than in customer.v1.yaml because the service that owns the
+# data owns the path (A§7.3: no service reads another service's store), even
+# though A§13 catalogues the URL under customers.
+#
+#   GET /v1/accounts/{accountId}
+#   GET /v1/accounts/{accountId}/balance
+#   GET /v1/accounts/{accountId}/history
+#   GET /v1/customers/{customerId}/accounts
+#
+# Not owned here, despite the URL prefix:
+#   GET /v1/accounts/{accountId}/debt         -> debt.v1.yaml
+#   GET /v1/accounts/{accountId}/delinquency  -> delinquency.v1.yaml
+#
+# Source: A§14 + A§13 (API catalogue), A§9 (Account entity), A§5.2
+# (account-service responsibilities), D§4.1.
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `account.v2.yaml`. See contracts/README.md §1.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Account Service API
+  version: 1.0.0
+  description: >-
+    Collections view of an account (A§5.2): account and product reference,
+    normalised status, and the balance snapshot that drives delinquency
+    calculation and decisioning — `currentBalanceMinor`,
+    `overdueAmountMinor`, `minimumDueMinor`, `lastPaymentAt` and
+    `oldestUnpaidDueDate`.
+
+
+    Every account here originates in a source system and is maintained from the
+    canonical `AccountSnapshot` ingestion stream; this API is read-only. There
+    is no write path: correcting an account means correcting the source.
+
+
+    Conventions (normative: `contracts/README.md`): money is `int64` minor
+    units with a sibling `currency` (never floats, never major units), A§20
+    error body on every non-2xx response, `X-Correlation-Id` accepted on every
+    request and echoed on every response (A§97), pagination is `limit` plus an
+    opaque `cursor` with `{items, nextCursor}` responses — no offsets, no total
+    counts.
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/account run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: accounts
+    description: Account reference, balance snapshot and balance history (A§14).
+
+paths:
+  /v1/accounts/{accountId}:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getAccount
+      summary: Get the collections view of an account
+      description: >-
+        Returns one account: reference data, product relationship, normalised
+        status and the current balance snapshot (A§14, A§9).
+
+
+        Required scope: `accounts:read`.
+      tags:
+        - accounts
+      responses:
+        '200':
+          description: The account's collections view.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/accounts/{accountId}/balance:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getAccountBalance
+      summary: Get the current balance snapshot of an account
+      description: >-
+        Returns just the monetary state of the account plus the `asOf` instant
+        it was observed at the source (A§14, A§5.2 "balance snapshot"). Callers
+        that only need amounts — the decision context builder, the collector
+        workbench header — should use this instead of the full account, because
+        it is the one projection the service keeps hot.
+
+
+        Required scope: `accounts:read`.
+      tags:
+        - accounts
+      responses:
+        '200':
+          description: The account's current balance snapshot.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountBalance'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/accounts/{accountId}/history:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listAccountHistory
+      summary: List the balance/status snapshots recorded for an account
+      description: >-
+        Returns the append-only series of snapshots the service recorded for
+        this account, newest first (A§14). One entry per observed change: the
+        canonicalizer writes a snapshot when any of the balance, due or status
+        fields moved, so the series is the audit trail behind "why did DPD
+        change on that day".
+
+
+        Paginated with `limit` plus an opaque `cursor`; a `cursor` is only valid
+        for the same `from`/`to` arguments. Required scope: `accounts:read`.
+      tags:
+        - accounts
+      parameters:
+        - $ref: '#/components/parameters/FromDateQuery'
+        - $ref: '#/components/parameters/ToDateQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of account snapshots, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountHistoryList'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/customers/{customerId}/accounts:
+    parameters:
+      - $ref: '#/components/parameters/CustomerIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listCustomerAccounts
+      summary: List the accounts of a customer
+      description: >-
+        Returns every account collections holds for the customer, most recently
+        opened first (A§13). Owned by account-service rather than
+        customer-service because the data is account-service's (A§7.3); routing
+        is by full path, so the two specs coexist under `/v1/customers`.
+
+
+        A customer with no accounts is an empty page, not a 404; 404 is returned
+        only when the customer itself is unknown to collections. Paginated with
+        `limit` plus an opaque `cursor`. Required scope: `accounts:read`.
+      tags:
+        - accounts
+      parameters:
+        - $ref: '#/components/parameters/AccountStatusQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of the customer's accounts.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountList'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403.
+
+  parameters:
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        Source-system account identifier (account number). Owned by the source
+        system and never re-minted by the platform (contracts/README.md §6), so
+        it keeps the source format rather than being a ULID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-100045
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      description: >-
+        Source-system customer identifier, as used by customer-service. Free-form
+        source id, not a ULID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: CUST-000123
+    AccountStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: >-
+        Return only accounts in this status. Omit for every account regardless
+        of status, including closed and written-off ones.
+      schema:
+        $ref: '#/components/schemas/AccountStatus'
+    FromDateQuery:
+      name: from
+      in: query
+      required: false
+      description: >-
+        Earliest business date to include, `YYYY-MM-DD`, inclusive. Compared
+        against the snapshot's `observedAt` date in UTC. Omit for the beginning
+        of retained history.
+      schema:
+        type: string
+        format: date
+        example: '2026-06-01'
+    ToDateQuery:
+      name: to
+      in: query
+      required: false
+      description: >-
+        Latest business date to include, `YYYY-MM-DD`, inclusive. Compared
+        against the snapshot's `observedAt` date in UTC. Omit for "up to now".
+        A `to` earlier than `from` is 400 `VALIDATION_FAILED`.
+      schema:
+        type: string
+        format: date
+        example: '2026-08-22'
+
+  schemas:
+    Account:
+      type: object
+      title: Account
+      description: >-
+        Collections view of an account (A§9). Read-only projection maintained
+        from the canonical `AccountSnapshot` ingestion stream: the platform is
+        never the book of record for a balance.
+      additionalProperties: false
+      required:
+        - accountId
+        - customerId
+        - sourceSystem
+        - productId
+        - productCode
+        - currency
+        - status
+        - openedAt
+        - currentBalanceMinor
+        - overdueAmountMinor
+        - minimumDueMinor
+      properties:
+        accountId:
+          type: string
+          description: Source-system account identifier; the primary key of this resource.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        customerId:
+          type: string
+          description: >-
+            Source-system identifier of the customer that holds the account —
+            the join key to customer-service.
+          minLength: 1
+          maxLength: 64
+          example: CUST-000123
+        sourceSystem:
+          type: string
+          description: >-
+            Code of the system of record this account was ingested from, e.g.
+            `COREBANK`. Load-bearing for reconciliation: control totals are
+            asserted per source system (D§38).
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: COREBANK
+        productId:
+          type: string
+          description: >-
+            Source-system product identifier of the account's product (A§9).
+            Opaque to collections.
+          minLength: 1
+          maxLength: 64
+          example: PRD-PL-24M
+        productCode:
+          type: string
+          description: >-
+            Collections-facing product code, normalised by the ingestion
+            canonicalizer. This — not `productId` — is what strategy rules and
+            the decision context document read, so its vocabulary is reference
+            data owned by account-service rather than a contract enum.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PERSONAL_LOAN
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency of every `*Minor` amount on this account.
+            An account has exactly one currency; multi-currency exposure is
+            modelled as separate accounts.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        openedAt:
+          type: string
+          format: date-time
+          description: When the account was opened at the source, RFC3339 UTC.
+          example: '2024-03-11T00:00:00Z'
+        closedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the account was closed at the source, RFC3339 UTC. Omitted
+            while the account is open; always present when `status` is `CLOSED`.
+          example: '2026-07-30T00:00:00Z'
+        currentBalanceMinor:
+          type: integer
+          format: int64
+          description: >-
+            Total outstanding balance in minor units of `currency` (e.g. 250000
+            = EUR 2,500.00). Positive when the customer owes money; may be
+            negative when the account is in credit.
+          example: 250000
+        overdueAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount past due in minor units of `currency` — the arrears figure
+            delinquency-service uses together with `oldestUnpaidDueDate` to
+            derive DPD. Zero when the account is up to date, never negative.
+          minimum: 0
+          example: 45000
+        minimumDueMinor:
+          type: integer
+          format: int64
+          description: >-
+            Minimum amount contractually due at the next due date, in minor
+            units of `currency`. Zero when nothing is due. Never negative.
+          minimum: 0
+          example: 15000
+        lastPaymentAt:
+          type: string
+          format: date-time
+          description: >-
+            When the source system last recorded a payment against this
+            account, RFC3339 UTC. Omitted when no payment has ever been
+            received.
+          example: '2026-07-05T11:42:00Z'
+        oldestUnpaidDueDate:
+          type: string
+          format: date
+          description: >-
+            Due date of the oldest instalment still unpaid, `YYYY-MM-DD`. The
+            primary DPD input (D§5): DPD is derived from this date, not from the
+            age of the arrears balance. Omitted when nothing is unpaid.
+          example: '2026-07-18'
+      example:
+        accountId: ACC-100045
+        customerId: CUST-000123
+        sourceSystem: COREBANK
+        productId: PRD-PL-24M
+        productCode: PERSONAL_LOAN
+        currency: EUR
+        status: ACTIVE
+        openedAt: '2024-03-11T00:00:00Z'
+        currentBalanceMinor: 250000
+        overdueAmountMinor: 45000
+        minimumDueMinor: 15000
+        lastPaymentAt: '2026-07-05T11:42:00Z'
+        oldestUnpaidDueDate: '2026-07-18'
+
+    AccountStatus:
+      type: string
+      title: AccountStatus
+      description: >-
+        Normalised collections status of the account. Source systems have richer
+        and mutually inconsistent status vocabularies; the ingestion
+        canonicalizer maps them into this closed set so that strategy rules can
+        be written once. `CLOSED` and `WRITTEN_OFF` are terminal for
+        collections purposes.
+      enum:
+        - ACTIVE
+        - SUSPENDED
+        - CLOSED
+        - WRITTEN_OFF
+      example: ACTIVE
+
+    AccountBalance:
+      type: object
+      title: AccountBalance
+      description: >-
+        Monetary state of an account at a point in time (A§14). Same amounts as
+        the corresponding fields on `Account`, plus the `asOf` instant, so a
+        caller can tell how stale the figures are without fetching the whole
+        account.
+      additionalProperties: false
+      required:
+        - accountId
+        - currency
+        - currentBalanceMinor
+        - overdueAmountMinor
+        - minimumDueMinor
+        - asOf
+      properties:
+        accountId:
+          type: string
+          description: Source-system account identifier the balance belongs to.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every `*Minor` amount below.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        currentBalanceMinor:
+          type: integer
+          format: int64
+          description: Total outstanding balance in minor units of `currency`.
+          example: 250000
+        overdueAmountMinor:
+          type: integer
+          format: int64
+          description: Amount past due in minor units of `currency`. Never negative.
+          minimum: 0
+          example: 45000
+        minimumDueMinor:
+          type: integer
+          format: int64
+          description: >-
+            Minimum amount contractually due at the next due date, in minor
+            units of `currency`. Never negative.
+          minimum: 0
+          example: 15000
+        lastPaymentAt:
+          type: string
+          format: date-time
+          description: >-
+            When the source system last recorded a payment, RFC3339 UTC.
+            Omitted when no payment has ever been received.
+          example: '2026-07-05T11:42:00Z'
+        oldestUnpaidDueDate:
+          type: string
+          format: date
+          description: >-
+            Due date of the oldest unpaid instalment, `YYYY-MM-DD`. Omitted when
+            nothing is unpaid.
+          example: '2026-07-18'
+        asOf:
+          type: string
+          format: date-time
+          description: >-
+            When these figures were observed at the source system, RFC3339 UTC.
+            This is source time, not ingestion time: it is what makes the
+            balance comparable with the source in reconciliation (D§38).
+          example: '2026-08-22T02:05:00Z'
+      example:
+        accountId: ACC-100045
+        currency: EUR
+        currentBalanceMinor: 250000
+        overdueAmountMinor: 45000
+        minimumDueMinor: 15000
+        lastPaymentAt: '2026-07-05T11:42:00Z'
+        oldestUnpaidDueDate: '2026-07-18'
+        asOf: '2026-08-22T02:05:00Z'
+
+    AccountHistoryEntry:
+      type: object
+      title: AccountHistoryEntry
+      description: >-
+        One point-in-time snapshot of an account as recorded by account-service
+        (A§14). Append-only: entries are never updated or deleted (CLAUDE.md
+        hard rule 4). Distinct from the canonical ingestion
+        `AccountSnapshot.v1.json`, which is the inbound wire shape this entry is
+        derived from.
+      additionalProperties: false
+      required:
+        - snapshotId
+        - accountId
+        - observedAt
+        - status
+        - currency
+        - currentBalanceMinor
+        - overdueAmountMinor
+        - minimumDueMinor
+      properties:
+        snapshotId:
+          type: string
+          description: >-
+            Platform-generated ULID for this snapshot. ULIDs sort by creation
+            time, which is what makes cursor pagination over history cheap.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId:
+          type: string
+          description: Source-system account identifier the snapshot belongs to.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        observedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the snapshot's figures were observed at the source system,
+            RFC3339 UTC. The series is ordered by this value, newest first.
+          example: '2026-08-22T02:05:00Z'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency the snapshot's amounts are denominated
+            in — recorded per snapshot so history stays readable if an account
+            is ever re-denominated at the source.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        currentBalanceMinor:
+          type: integer
+          format: int64
+          description: Total outstanding balance at `observedAt`, in minor units.
+          example: 250000
+        overdueAmountMinor:
+          type: integer
+          format: int64
+          description: Amount past due at `observedAt`, in minor units. Never negative.
+          minimum: 0
+          example: 45000
+        minimumDueMinor:
+          type: integer
+          format: int64
+          description: Minimum amount due at `observedAt`, in minor units. Never negative.
+          minimum: 0
+          example: 15000
+        lastPaymentAt:
+          type: string
+          format: date-time
+          description: >-
+            Last payment recorded as at `observedAt`, RFC3339 UTC. Omitted when
+            no payment had been received by then.
+          example: '2026-07-05T11:42:00Z'
+        oldestUnpaidDueDate:
+          type: string
+          format: date
+          description: >-
+            Oldest unpaid due date as at `observedAt`, `YYYY-MM-DD`. Omitted
+            when nothing was unpaid.
+          example: '2026-07-18'
+      example:
+        snapshotId: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId: ACC-100045
+        observedAt: '2026-08-22T02:05:00Z'
+        status: ACTIVE
+        currency: EUR
+        currentBalanceMinor: 250000
+        overdueAmountMinor: 45000
+        minimumDueMinor: 15000
+        lastPaymentAt: '2026-07-05T11:42:00Z'
+        oldestUnpaidDueDate: '2026-07-18'
+
+    AccountList:
+      type: object
+      title: AccountList
+      description: >-
+        One page of accounts (contracts/README.md §10). No offset and no total
+        count: neither is cheap on the operational store, and neither is part of
+        the contract.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The accounts on this page, most recently opened first.
+          items:
+            $ref: '#/components/schemas/Account'
+          maxItems: 200
+          example:
+            - accountId: ACC-100045
+              customerId: CUST-000123
+              sourceSystem: COREBANK
+              productId: PRD-PL-24M
+              productCode: PERSONAL_LOAN
+              currency: EUR
+              status: ACTIVE
+              openedAt: '2024-03-11T00:00:00Z'
+              currentBalanceMinor: 250000
+              overdueAmountMinor: 45000
+              minimumDueMinor: 15000
+              lastPaymentAt: '2026-07-05T11:42:00Z'
+              oldestUnpaidDueDate: '2026-07-18'
+        nextCursor:
+          type: string
+          description: >-
+            Opaque cursor for the next page, or `null` on the last page. Pass it
+            back verbatim as `cursor` with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJvIjoiQUNDLTEwMDA0NSJ9
+
+    AccountHistoryList:
+      type: object
+      title: AccountHistoryList
+      description: One page of account snapshots (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The snapshots on this page, newest `observedAt` first.
+          items:
+            $ref: '#/components/schemas/AccountHistoryEntry'
+          maxItems: 200
+          example:
+            - snapshotId: 01M0MEKBHXV37E3S3E28JT97KB
+              accountId: ACC-100045
+              observedAt: '2026-08-22T02:05:00Z'
+              status: ACTIVE
+              currency: EUR
+              currentBalanceMinor: 250000
+              overdueAmountMinor: 45000
+              minimumDueMinor: 15000
+              lastPaymentAt: '2026-07-05T11:42:00Z'
+              oldestUnpaidDueDate: '2026-07-18'
+            - snapshotId: 01M0MEK9ZQ4T8VBR6Y1J5C3H2A
+              accountId: ACC-100045
+              observedAt: '2026-08-21T02:05:00Z'
+              status: ACTIVE
+              currency: EUR
+              currentBalanceMinor: 250000
+              overdueAmountMinor: 30000
+              minimumDueMinor: 15000
+              lastPaymentAt: '2026-07-05T11:42:00Z'
+              oldestUnpaidDueDate: '2026-07-18'
+        nextCursor:
+          type: string
+          description: >-
+            Opaque cursor for the next page, or `null` on the last page. Pass it
+            back verbatim as `cursor` with identical `from`/`to` arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJvIjoiMDFNME1FS0JIWFYzN0UzUzNFMjhKVDk3S0IifQ

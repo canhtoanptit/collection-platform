@@ -1,0 +1,1455 @@
+# =============================================================================
+# Collections Platform — case-service API (CON-3)
+# =============================================================================
+# The exemplar service contract (EXE-1). Owns
+# (contracts/README.md "URL path-ownership matrix"):
+#
+#   POST   /v1/cases                      GET  /v1/cases
+#   GET    /v1/cases/{caseId}             PATCH /v1/cases/{caseId}
+#   POST   /v1/cases/{caseId}/assign      POST /v1/cases/{caseId}/suspend
+#   POST   /v1/cases/{caseId}/resume      POST /v1/cases/{caseId}/close
+#   POST   /v1/cases/{caseId}/reopen      GET  /v1/cases/{caseId}/activities
+#   GET    /v1/customers/{customerId}/cases
+#
+# The nine A§15 endpoints verbatim, plus the two listings the collector
+# workbench needs (implementation plan §7 Phase 1 CON-3 / UI-driven contract
+# additions). `GET /v1/customers/{customerId}/cases` lives here rather than in
+# customer.v1.yaml because the service that owns the data owns the path
+# (A§7.3); routing is by full path, so several specs define paths under
+# `/v1/customers`.
+#
+# Not owned here, despite the URL prefix:
+#   GET /v1/cases/{caseId}/legal -> legal.v1.yaml
+#
+# Source: A§15 (case API catalogue), A§9 (Collection Case entity), A§10.1 (case
+# state machine), A§5.5 (case-service responsibilities), D§6 (case management
+# requirements).
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `case.v2.yaml`. See contracts/README.md §1.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Case Service API
+  version: 1.0.0
+  description: >-
+    A collection case is the unit of operational work for an account's debt
+    situation (D§6): lifecycle, assignment, priority, next action, activities
+    and closure (A§5.5).
+
+
+    The state machine is A§10.1 — `NEW -> OPEN -> ACTIVE`, with `SUSPENDED`,
+    `ESCALATED`, `RESOLVED` and `CLOSED` — and it is the *only* way status
+    changes: each transition has its own command endpoint, so an illegal
+    transition is a 409 with a specific code rather than a silently accepted
+    write. Attributes that are not part of the state machine (priority, next
+    action) are edited with `PATCH` under an `If-Match` row version.
+
+
+    `status` `ESCALATED` and the `stage` (`AGENCY` / `LEGAL`) are not settable
+    through this API: they follow agency placement and legal referral, which
+    agency-service and legal-service own (A§7.2). Case-service reacts to their
+    events.
+
+
+    Conventions (normative: `contracts/README.md`): A§20 error body on every
+    non-2xx response; `Idempotency-Key` required on every POST command (A§21);
+    `If-Match` required on `PATCH`, carrying the `rowVersion` returned as
+    `ETag`, with 412 on a stale value; pagination is `limit` plus an opaque
+    `cursor` with `{items, nextCursor}` responses; `X-Correlation-Id` accepted
+    on every request, echoed on every response, and copied into the
+    `correlationId` of every event and case activity the request produces
+    (A§97).
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description: `cases:read` to
+    read, `cases:write` to create and to run day-to-day commands, `cases:admin`
+    for the two commands that end or revive a case's life — `close` and
+    `reopen`.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/case run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: cases
+    description: Case lifecycle, assignment, priority and closure (A§15, A§10.1).
+  - name: case-activities
+    description: The append-only activity trail of a case (A§5.5, D§6).
+
+paths:
+  /v1/cases:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createCase
+      summary: Open a collection case
+      description: >-
+        Opens a case for an account in state `NEW` (A§10.1, A§15). Most cases
+        are opened automatically by case-service in reaction to a
+        `DelinquencyChanged` event; this endpoint exists for the manual and
+        migration paths, and behaves identically.
+
+
+        Required scope: `cases:write`. `Idempotency-Key` is required (A§21):
+        the same key with the same body replays the stored 201 without opening a
+        second case, the same key with a different body is 422
+        `IDEMPOTENCY_KEY_REUSED`, and a duplicate arriving while the first
+        request is still in flight is 409 `REQUEST_IN_PROGRESS`.
+
+
+        Documented failures beyond the shared ones: 409 `CASE_ALREADY_OPEN` when
+        the account already has a case that is not `CLOSED` — an account carries
+        at most one live case, which is what makes "the case for this account"
+        well defined for treatment and for the workbench; 422
+        `CASE_INVALID` when `strategyId` is supplied without `strategyVersion`
+        or vice versa, or when the referenced account is unknown to collections.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The case to open.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCaseRequest'
+      responses:
+        '201':
+          description: The case was opened.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Case'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listCases
+      summary: Search cases
+      description: >-
+        Returns a page of cases matching the supplied filters — the query behind
+        the collector workbench queue. Every filter is an explicit named
+        parameter and `sort` is a closed enum: no free-form expressions, ever
+        (contracts/README.md §10).
+
+
+        Filters combine with AND. `assignedCollector` and `assignedTeam` are the
+        two that make a work queue: a collector asks for their own cases ordered
+        by `nextActionAt`, a team lead asks for the team's ordered by
+        `priority`. Cases with no `nextActionAt` sort last under the
+        `nextActionAt` orderings, whichever direction is requested.
+
+
+        Paginated with `limit` plus an opaque `cursor`; a cursor is only valid
+        for the identical filter *and* sort arguments. Required scope:
+        `cases:read`.
+      tags:
+        - cases
+      parameters:
+        - $ref: '#/components/parameters/AccountIdQuery'
+        - $ref: '#/components/parameters/CustomerIdQuery'
+        - $ref: '#/components/parameters/CaseStatusQuery'
+        - $ref: '#/components/parameters/AssignedTeamQuery'
+        - $ref: '#/components/parameters/AssignedCollectorQuery'
+        - $ref: '#/components/parameters/CaseSortQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of matching cases.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseList'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getCase
+      summary: Get a case
+      description: >-
+        Returns one case (A§15). The response carries the case's `rowVersion`
+        both in the body and as the `ETag` header; the `ETag` value is what a
+        subsequent `PATCH` must send in `If-Match`.
+
+
+        Required scope: `cases:read`.
+      tags:
+        - cases
+      responses:
+        '200':
+          description: The case.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Case'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    patch:
+      operationId: updateCase
+      summary: Update the editable attributes of a case
+      description: >-
+        Updates the attributes that are *not* part of the state machine:
+        `priority` and `nextActionAt` (A§15). Status, stage, assignment and
+        outcome are deliberately not accepted here — each has its own command
+        endpoint, so that every transition is auditable and every illegal one is
+        a 409 rather than a quiet write.
+
+
+        Required scope: `cases:write`.
+
+
+        `If-Match` is required and must carry the `ETag` from the most recent
+        read (contracts/README.md §9). A stale value is 412 and nothing changes;
+        `If-Match: *` is not accepted, because a blind overwrite of a case
+        another collector is working is exactly the failure this guard exists to
+        prevent. A successful update increments `rowVersion` and returns the new
+        `ETag`.
+
+
+        A body with no properties set is 400 `VALIDATION_FAILED`. Patching a
+        `CLOSED` case is 409 `CASE_CLOSED`: reopen it first.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        description: The attributes to change. At least one property must be present.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCaseRequest'
+      responses:
+        '200':
+          description: The updated case, with the incremented `rowVersion`.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Case'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '412':
+          $ref: './common.v1.yaml#/components/responses/PreconditionFailed'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}/assign:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: assignCase
+      summary: Assign or reassign a case
+      description: >-
+        Assigns the case to a team, a collector, or both, and moves it from
+        `NEW` or `OPEN` to `ACTIVE` (A§10.1, D§6 "assign / reassign"). Assigning
+        an already-assigned case is a reassignment: the previous holder is
+        recorded in the activity trail, not overwritten silently.
+
+
+        Required scope: `cases:write`. `Idempotency-Key` is required (A§21).
+
+
+        Documented failures beyond the shared ones: 409 `CASE_CLOSED` when the
+        case is `CLOSED`; 409 `CASE_TRANSITION_INVALID` when it is `SUSPENDED`
+        — resume it first; 422 `CASE_INVALID` when neither `assignedTeam` nor
+        `assignedCollector` is supplied.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: Who the case is assigned to.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignCaseRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CaseCommandAccepted'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}/suspend:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: suspendCase
+      summary: Suspend a case
+      description: >-
+        Moves an `OPEN` or `ACTIVE` case to `SUSPENDED` (A§10.1): work and
+        treatment dispatch stop, the case keeps its assignment, and no
+        `nextActionAt` is honoured while suspended. Used for disputes,
+        complaints, bereavement, hardship reviews and legal holds.
+
+
+        Required scope: `cases:write`. `Idempotency-Key` is required (A§21) —
+        note that a retry of the same suspension is a replay, whereas a *second*
+        suspension with a different key on an already-suspended case is 409
+        `CASE_TRANSITION_INVALID`.
+
+
+        Documented failures beyond the shared ones: 409 `CASE_CLOSED` when the
+        case is `CLOSED`; 409 `CASE_TRANSITION_INVALID` from any state other
+        than `OPEN` or `ACTIVE`.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: Why the case is being suspended, and until when.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuspendCaseRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CaseCommandAccepted'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}/resume:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: resumeCase
+      summary: Resume a suspended case
+      description: >-
+        Moves a `SUSPENDED` case back to `ACTIVE` (A§10.1). Assignment and
+        priority are restored as they were; `nextActionAt` is not
+        rescheduled automatically — the caller sets it with `PATCH` if the
+        suspension has made it stale.
+
+
+        Required scope: `cases:write`. `Idempotency-Key` is required (A§21).
+
+
+        Documented failures beyond the shared ones: 409
+        `CASE_TRANSITION_INVALID` from any state other than `SUSPENDED`; 409
+        `CASE_CLOSED` when the case is `CLOSED`.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: Why the case is being resumed.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeCaseRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CaseCommandAccepted'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}/close:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: closeCase
+      summary: Close a case
+      description: >-
+        Records the case's `outcome` and moves it to `CLOSED`, the terminal
+        state (A§10.1, A§15). A closed case receives no further treatment: that
+        is domain invariant A§11.1, and it is enforced here rather than in the
+        callers.
+
+
+        Required scope: `cases:admin` — deliberately stricter than the other
+        commands, because closure ends collections activity on the debt and is
+        what recovery and portfolio reporting count.
+
+
+        `Idempotency-Key` is required (A§21).
+
+
+        Documented failures beyond the shared ones: 409 `CASE_CLOSED` when the
+        case is already `CLOSED`; 409 `CASE_TRANSITION_INVALID` when it is
+        `SUSPENDED` — resume it first, so that the suspension reason does not
+        disappear into a closure.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The outcome the case is being closed with.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseCaseRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CaseCommandAccepted'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: reopenCase
+      summary: Reopen a closed or resolved case
+      description: >-
+        Moves a `RESOLVED` or `CLOSED` case back to `ACTIVE`, clearing its
+        `outcome` and `closedAt` (A§10.1). This is the explicit reopening that
+        domain invariant A§11.1 requires before a closed case may be treated
+        again; the previous outcome stays visible in the activity trail.
+
+
+        Required scope: `cases:admin`. `Idempotency-Key` is required (A§21).
+
+
+        Documented failures beyond the shared ones: 409
+        `CASE_TRANSITION_INVALID` when the case is in any state other than
+        `RESOLVED` or `CLOSED` — reopening a live case is meaningless and is
+        rejected rather than silently ignored.
+      tags:
+        - cases
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: Why the case is being reopened.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReopenCaseRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CaseCommandAccepted'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/cases/{caseId}/activities:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listCaseActivities
+      summary: List the activities recorded on a case
+      description: >-
+        Returns the case's activity trail, newest first (A§15, A§5.5). The trail
+        is append-only — INSERT and SELECT only, enforced in the database
+        (CLAUDE.md hard rule 4) — and holds every state transition, assignment,
+        contact, decision and payment the case saw, each stamped with the
+        `correlationId` of the request or event that caused it, so a business
+        interaction can be reconstructed end to end (A§97).
+
+
+        Paginated with `limit` plus an opaque `cursor`; ordering is by `seq`
+        descending, which is stable because `seq` is assigned per case under the
+        same transaction as the activity. Required scope: `cases:read`.
+      tags:
+        - case-activities
+      parameters:
+        - $ref: '#/components/parameters/ActivityTypeQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of case activities, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseActivityList'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/customers/{customerId}/cases:
+    parameters:
+      - $ref: '#/components/parameters/CustomerIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listCustomerCases
+      summary: List the cases of a customer
+      description: >-
+        Returns every case collections holds for the customer across all their
+        accounts, newest `openedAt` first (A§13) — the customer-level view a
+        collector opens before making contact, so that they can see the whole
+        relationship rather than one account.
+
+
+        Owned by case-service rather than customer-service because the data is
+        case-service's (A§7.3). A customer with no cases is an empty page, not a
+        404. Paginated with `limit` plus an opaque `cursor`. Required scope:
+        `cases:read`.
+      tags:
+        - cases
+      parameters:
+        - $ref: '#/components/parameters/CaseStatusQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of the customer's cases.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseList'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description (`cases:read`, `cases:write`, or `cases:admin` for `close`
+        and `reopen`), and a token without it is rejected with 403.
+
+  headers:
+    ETag:
+      description: >-
+        Current row version of the case as an RFC 7232 entity tag: the decimal
+        `rowVersion` in double quotes, e.g. `"7"`. Send it back verbatim in
+        `If-Match` on `PATCH`; a stale value is 412 (contracts/README.md §9).
+      required: true
+      schema:
+        type: string
+        pattern: '^"[0-9]+"$'
+        example: '"7"'
+    Location:
+      description: >-
+        Absolute path of the created case, `/v1/cases/{caseId}`. Present on 201
+        only, including on an idempotent replay of the original 201.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+        example: /v1/cases/01M0MEP4K7X9C2VQ5N8T3R6B1D
+
+  parameters:
+    CaseIdPath:
+      name: caseId
+      in: path
+      required: true
+      description: >-
+        Platform-generated ULID of the case. Cases are minted by the platform,
+        so unlike `accountId` and `customerId` this is a ULID
+        (contracts/README.md §6).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      description: >-
+        Source-system customer identifier, as used by customer-service.
+        Free-form source id, not a ULID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: CUST-000123
+    AccountIdQuery:
+      name: accountId
+      in: query
+      required: false
+      description: >-
+        Return only cases for this source-system account. Combined with the
+        other filters using AND.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-100045
+    CustomerIdQuery:
+      name: customerId
+      in: query
+      required: false
+      description: >-
+        Return only cases for this source-system customer. Combined with the
+        other filters using AND.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: CUST-000123
+    CaseStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: >-
+        Return only cases in this status. Omit for every status, including
+        `CLOSED`.
+      schema:
+        $ref: '#/components/schemas/CaseStatus'
+    AssignedTeamQuery:
+      name: assignedTeam
+      in: query
+      required: false
+      description: >-
+        Return only cases assigned to this team. Use with `sort=priority` for a
+        team lead's triage view. Unassigned cases are never matched by this
+        filter.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: EARLY_STAGE_TEAM
+    AssignedCollectorQuery:
+      name: assignedCollector
+      in: query
+      required: false
+      description: >-
+        Return only cases assigned to this collector, identified by their token
+        subject (`sub` claim). Use with `sort=nextActionAt` for a collector's own
+        work queue. Unassigned cases are never matched by this filter.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+    CaseSortQuery:
+      name: sort
+      in: query
+      required: false
+      description: >-
+        Ordering of the page, from a closed set (contracts/README.md §10). A
+        leading `-` reverses the direction. `nextActionAt` ascending puts the
+        most overdue action first; `priority` ascending puts the most urgent
+        case first, because priority 1 is the highest. Cases without a
+        `nextActionAt` sort last in both `nextActionAt` directions. Ties are
+        broken by `caseId` so that paging is stable. Defaults to `nextActionAt`.
+      schema:
+        type: string
+        enum:
+          - nextActionAt
+          - -nextActionAt
+          - priority
+          - -priority
+        default: nextActionAt
+        example: -priority
+    ActivityTypeQuery:
+      name: activityType
+      in: query
+      required: false
+      description: >-
+        Return only activities of this type, e.g. `CASE_ASSIGNED`. Omit for the
+        full trail.
+      schema:
+        type: string
+        pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+        example: CASE_ASSIGNED
+
+  responses:
+    CaseCommandAccepted:
+      description: >-
+        The command was applied (or replayed, for a repeated
+        `Idempotency-Key`). The body is the case in its new state and the `ETag`
+        carries the new `rowVersion`.
+      headers:
+        ETag:
+          $ref: '#/components/headers/ETag'
+        X-Correlation-Id:
+          $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Case'
+
+  schemas:
+    Case:
+      type: object
+      title: Case
+      description: >-
+        A collection case (A§9, D§6): the operational work associated with an
+        account's debt situation. One live case per account at a time.
+      additionalProperties: false
+      required:
+        - caseId
+        - customerId
+        - accountId
+        - status
+        - stage
+        - priority
+        - openedAt
+        - rowVersion
+      properties:
+        caseId:
+          type: string
+          description: >-
+            Platform-generated ULID of the case; also the partition key of every
+            case event (A§26).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+        customerId:
+          type: string
+          description: >-
+            Source-system identifier of the customer the case is about — the
+            join key to customer-service.
+          minLength: 1
+          maxLength: 64
+          example: CUST-000123
+        accountId:
+          type: string
+          description: >-
+            Source-system identifier of the account the case is about — the join
+            key to account-service and delinquency-service.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        debtId:
+          type: string
+          description: >-
+            ULID of the specific debt exposure being collected, when the case was
+            raised against one. Omitted for account-level cases, which is the
+            normal shape.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEM7YB2Q4XKR9F0T5D3C8N
+        status:
+          $ref: '#/components/schemas/CaseStatus'
+        stage:
+          $ref: '#/components/schemas/CaseStage'
+        priority:
+          type: integer
+          format: int32
+          description: >-
+            Work priority, 1 (highest) to 5 (lowest). An integer rather than a
+            named band because `sort=priority` has to be a total order, and
+            because the priority is computed from strategy output that the
+            business re-tunes.
+          minimum: 1
+          maximum: 5
+          example: 2
+        assignedTeam:
+          type: string
+          description: >-
+            Team the case is assigned to. Omitted while the case is unassigned.
+          minLength: 1
+          maxLength: 64
+          example: EARLY_STAGE_TEAM
+        assignedCollector:
+          type: string
+          description: >-
+            Collector the case is assigned to, identified by their token subject
+            (`sub` claim). Omitted while no individual holds it — a case can be
+            assigned to a team without an individual owner.
+          minLength: 1
+          maxLength: 128
+          example: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+        strategyId:
+          type: string
+          description: >-
+            Identifier of the strategy currently driving the case, from the
+            strategy document. Not a ULID: strategy ids are human-authored
+            stable codes owned by strategy-service. Omitted until a decision has
+            been made for the case, and always accompanied by
+            `strategyVersion`.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_V2
+        strategyVersion:
+          type: integer
+          format: int32
+          description: >-
+            Version of `strategyId` that was in force. Pinned on the case
+            because a strategy version cannot change after activation (A§11.3)
+            and a decision must reference a strategy version (A§11.4): without
+            the pin, a past decision could not be explained.
+          minimum: 1
+          example: 4
+        openedAt:
+          type: string
+          format: date-time
+          description: When the case was opened, RFC3339 UTC.
+          example: '2026-07-20T06:15:00Z'
+        nextActionAt:
+          type: string
+          format: date-time
+          description: >-
+            When the next action on this case is due, RFC3339 UTC. Drives the
+            collector work queue and the treatment scheduler. Omitted when no
+            action is scheduled, which is why `sort=nextActionAt` puts such
+            cases last.
+          example: '2026-08-23T08:00:00Z'
+        closedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the case was closed, RFC3339 UTC. Present exactly when `status`
+            is `CLOSED`; cleared by `reopen`.
+          example: '2026-09-01T14:22:00Z'
+        outcome:
+          type: string
+          description: >-
+            Outcome recorded at closure, e.g. `PAID_IN_FULL`, `SETTLED`,
+            `WRITTEN_OFF`, `UNCOLLECTIBLE`. Present exactly when `status` is
+            `CLOSED`; cleared by `reopen`. A pattern-constrained code rather
+            than a contract enum: the outcome vocabulary is reference data the
+            business extends, and adding a member to a released enum would break
+            consumers (contracts/README.md §1).
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAID_IN_FULL
+        rowVersion:
+          type: integer
+          format: int64
+          description: >-
+            Optimistic-concurrency row version, incremented on every change.
+            Returned as the `ETag` (quoted) and required back in `If-Match` on
+            `PATCH` (contracts/README.md §9).
+          minimum: 1
+          example: 7
+      example:
+        caseId: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+        customerId: CUST-000123
+        accountId: ACC-100045
+        status: ACTIVE
+        stage: null
+        priority: 2
+        assignedTeam: EARLY_STAGE_TEAM
+        assignedCollector: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+        strategyId: EARLY_STAGE_V2
+        strategyVersion: 4
+        openedAt: '2026-07-20T06:15:00Z'
+        nextActionAt: '2026-08-23T08:00:00Z'
+        rowVersion: 7
+
+    CaseStatus:
+      type: string
+      title: CaseStatus
+      description: >-
+        Case lifecycle state, exactly the A§10.1 state machine. `NEW` is the
+        state a freshly opened case is in before assignment; `OPEN` is
+        acknowledged but unassigned; `ACTIVE` is being worked; `SUSPENDED` is
+        paused with assignment intact; `ESCALATED` accompanies a non-null
+        `stage` and is reached through agency placement or legal referral rather
+        than through a call to this API; `RESOLVED` is worked to a conclusion
+        awaiting closure; `CLOSED` is terminal and blocks further treatment
+        until an explicit `reopen` (A§11.1).
+      enum:
+        - NEW
+        - OPEN
+        - ACTIVE
+        - SUSPENDED
+        - ESCALATED
+        - RESOLVED
+        - CLOSED
+      example: ACTIVE
+
+    CaseStage:
+      type: string
+      title: CaseStage
+      description: >-
+        Escalation stage of the case, or `null` while it is handled in-house
+        (A§10.1). `AGENCY` follows a debt placement owned by agency-service,
+        `LEGAL` a referral owned by legal-service; case-service sets the stage
+        by reacting to their events, so it is not settable through this API.
+        Explicitly nullable rather than omitted because "in-house" is a
+        meaningful value that queue filters branch on.
+
+
+        `null` is deliberately *not* listed as an `enum` member, even though
+        vacuum's `nullable-enum-contains-null` rule asks for it: oapi-codegen
+        turns a null enum member into a bogus Go constant
+        (`LessThannil CaseStage = "<nil>"`), which the repo-wide `exhaustive`
+        linter would then demand a case for in every switch. `nullable: true`
+        alone is what generators and the request/response validators honour —
+        the value is generated as `*CaseStage`, and `null` validates.
+      nullable: true
+      enum:
+        - AGENCY
+        - LEGAL
+      example: AGENCY
+
+    CreateCaseRequest:
+      type: object
+      title: CreateCaseRequest
+      description: >-
+        Request to open a case. The case starts in `NEW`; supplying an
+        assignment here does not move it to `ACTIVE` — call `assign` for that,
+        so that assignment is always one auditable transition.
+      additionalProperties: false
+      required:
+        - customerId
+        - accountId
+      properties:
+        customerId:
+          type: string
+          description: Source-system identifier of the customer the case is about.
+          minLength: 1
+          maxLength: 64
+          example: CUST-000123
+        accountId:
+          type: string
+          description: Source-system identifier of the account the case is about.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        debtId:
+          type: string
+          description: >-
+            ULID of a specific debt exposure, when the case is raised against one
+            rather than against the account as a whole.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEM7YB2Q4XKR9F0T5D3C8N
+        priority:
+          type: integer
+          format: int32
+          description: >-
+            Initial priority, 1 (highest) to 5 (lowest). Defaults to 3 when
+            omitted.
+          minimum: 1
+          maximum: 5
+          default: 3
+          example: 2
+        assignedTeam:
+          type: string
+          description: Team to record as the initial owner, if known at creation.
+          minLength: 1
+          maxLength: 64
+          example: EARLY_STAGE_TEAM
+        strategyId:
+          type: string
+          description: >-
+            Strategy to pin on the case at creation. Must be supplied together
+            with `strategyVersion`; one without the other is 422 `CASE_INVALID`.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_V2
+        strategyVersion:
+          type: integer
+          format: int32
+          description: Version of `strategyId` to pin. See `strategyId`.
+          minimum: 1
+          example: 4
+        nextActionAt:
+          type: string
+          format: date-time
+          description: >-
+            When the first action is due, RFC3339 UTC. Omit to leave the case
+            unscheduled.
+          example: '2026-07-21T08:00:00Z'
+        reason:
+          type: string
+          description: >-
+            Why the case is being opened, recorded on the creation activity.
+            Required for manual creation to stay auditable; codes rather than
+            free text keep PII out of the trail.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: MANUAL_REVIEW
+      example:
+        customerId: CUST-000123
+        accountId: ACC-100045
+        priority: 2
+        assignedTeam: EARLY_STAGE_TEAM
+        nextActionAt: '2026-07-21T08:00:00Z'
+        reason: MANUAL_REVIEW
+
+    UpdateCaseRequest:
+      type: object
+      title: UpdateCaseRequest
+      description: >-
+        Attributes of a case that may be edited directly. At least one property
+        must be present; an empty object is 400 `VALIDATION_FAILED`. Properties
+        that are absent are left unchanged — this is a partial update, not a
+        replacement.
+      additionalProperties: false
+      properties:
+        priority:
+          type: integer
+          format: int32
+          description: New priority, 1 (highest) to 5 (lowest).
+          minimum: 1
+          maximum: 5
+          example: 1
+        nextActionAt:
+          type: string
+          format: date-time
+          description: >-
+            New due time for the next action, RFC3339 UTC, or `null` to clear the
+            schedule. This is the one place a null is meaningful in a request
+            body: absent means "leave alone", null means "unschedule".
+          nullable: true
+          example: '2026-08-25T09:00:00Z'
+      example:
+        priority: 1
+        nextActionAt: '2026-08-25T09:00:00Z'
+
+    AssignCaseRequest:
+      type: object
+      title: AssignCaseRequest
+      description: >-
+        Request to assign or reassign a case. At least one of `assignedTeam` and
+        `assignedCollector` must be present; neither is 422 `CASE_INVALID`.
+        Supplying only one leaves the other as it was — assigning an individual
+        does not clear the team.
+      additionalProperties: false
+      properties:
+        assignedTeam:
+          type: string
+          description: Team to assign the case to.
+          minLength: 1
+          maxLength: 64
+          example: LATE_STAGE_TEAM
+        assignedCollector:
+          type: string
+          description: >-
+            Collector to assign the case to, identified by their token subject
+            (`sub` claim).
+          minLength: 1
+          maxLength: 128
+          example: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+        reason:
+          type: string
+          description: >-
+            Why the case is being assigned or reassigned, recorded on the
+            assignment activity.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: WORKLOAD_REBALANCE
+      example:
+        assignedTeam: LATE_STAGE_TEAM
+        assignedCollector: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+        reason: WORKLOAD_REBALANCE
+
+    SuspendCaseRequest:
+      type: object
+      title: SuspendCaseRequest
+      description: Request to suspend a case.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Why the case is being suspended, e.g. `DISPUTE_RAISED`,
+            `COMPLAINT_OPEN`, `BEREAVEMENT`, `HARDSHIP_REVIEW`, `LEGAL_HOLD`.
+            Required: a suspension with no recorded reason cannot be reviewed.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DISPUTE_RAISED
+        until:
+          type: string
+          format: date-time
+          description: >-
+            When the suspension is expected to end, RFC3339 UTC. Advisory only —
+            it surfaces in review queues but does not resume the case, because an
+            automatic resume would restart treatment without anyone confirming
+            the reason had gone away.
+          example: '2026-09-05T00:00:00Z'
+      example:
+        reason: DISPUTE_RAISED
+        until: '2026-09-05T00:00:00Z'
+
+    ResumeCaseRequest:
+      type: object
+      title: ResumeCaseRequest
+      description: Request to resume a suspended case.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Why the case is being resumed, e.g. `DISPUTE_RESOLVED`,
+            `HOLD_EXPIRED`. Required, so that the suspension and its end are
+            both accounted for in the trail.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DISPUTE_RESOLVED
+      example:
+        reason: DISPUTE_RESOLVED
+
+    CloseCaseRequest:
+      type: object
+      title: CloseCaseRequest
+      description: Request to close a case with a recorded outcome.
+      additionalProperties: false
+      required:
+        - outcome
+      properties:
+        outcome:
+          type: string
+          description: >-
+            Outcome to record on the case, e.g. `PAID_IN_FULL`, `SETTLED`,
+            `ARRANGEMENT_COMPLETED`, `WRITTEN_OFF`, `UNCOLLECTIBLE`,
+            `DUPLICATE`. Required — closure without an outcome would make
+            recovery reporting meaningless.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAID_IN_FULL
+        reason:
+          type: string
+          description: >-
+            Optional code refining the outcome, recorded on the closure
+            activity.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: FINAL_PAYMENT_CLEARED
+      example:
+        outcome: PAID_IN_FULL
+        reason: FINAL_PAYMENT_CLEARED
+
+    ReopenCaseRequest:
+      type: object
+      title: ReopenCaseRequest
+      description: >-
+        Request to reopen a resolved or closed case. This is the explicit
+        reopening domain invariant A§11.1 requires before further treatment.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Why the case is being reopened, e.g. `PAYMENT_REVERSED`,
+            `CLOSED_IN_ERROR`, `NEW_ARREARS`. Required: reopening a closed case
+            is an exception and must be attributable.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAYMENT_REVERSED
+      example:
+        reason: PAYMENT_REVERSED
+
+    CaseList:
+      type: object
+      title: CaseList
+      description: >-
+        One page of cases (contracts/README.md §10). No offset and no total
+        count: neither is cheap on the operational store, and neither is part of
+        the contract.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The cases on this page, in the requested sort order.
+          items:
+            $ref: '#/components/schemas/Case'
+          maxItems: 200
+          example:
+            - caseId: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+              customerId: CUST-000123
+              accountId: ACC-100045
+              status: ACTIVE
+              stage: null
+              priority: 2
+              assignedTeam: EARLY_STAGE_TEAM
+              assignedCollector: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+              strategyId: EARLY_STAGE_V2
+              strategyVersion: 4
+              openedAt: '2026-07-20T06:15:00Z'
+              nextActionAt: '2026-08-23T08:00:00Z'
+              rowVersion: 7
+        nextCursor:
+          type: string
+          description: >-
+            Opaque cursor for the next page, or `null` on the last page. Pass it
+            back verbatim as `cursor` with identical filter and sort arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJvIjoiMDFNME1FUDRLN1g5QzJWUTVOOFQzUjZCMUQifQ
+
+    CaseActivity:
+      type: object
+      title: CaseActivity
+      description: >-
+        One entry in a case's append-only activity trail (A§5.5, D§6 "track
+        activities"). Written in the same transaction as the change it records,
+        so the trail can never disagree with the case.
+      additionalProperties: false
+      required:
+        - activityId
+        - caseId
+        - seq
+        - activityType
+        - actor
+        - occurredAt
+        - correlationId
+        - detail
+      properties:
+        activityId:
+          type: string
+          description: Platform-generated ULID of the activity.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEPX9D5R3W7YS2G4M6Q8Z0
+        caseId:
+          type: string
+          description: ULID of the case the activity belongs to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+        seq:
+          type: integer
+          format: int64
+          description: >-
+            Position of the activity within this case's trail, starting at 1 and
+            gapless. The ordering key: `occurredAt` alone is not enough, because
+            two activities written in the same transaction share an instant.
+          minimum: 1
+          example: 12
+        activityType:
+          type: string
+          description: >-
+            What happened, e.g. `CASE_CREATED`, `CASE_ASSIGNED`,
+            `CASE_SUSPENDED`, `CONTACT_ATTEMPTED`, `PROMISE_CREATED`,
+            `PAYMENT_RECEIVED`, `NOTE_ADDED`. A pattern-constrained code rather
+            than a contract enum: activities arrive from every service in the
+            platform, and the set grows as services are added.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: CASE_ASSIGNED
+        actor:
+          type: string
+          description: >-
+            Who caused the activity: a user's token subject (`sub` claim) for
+            operator actions, or the producing service's name for automatic
+            ones, e.g. `case-service` or `treatment-service`.
+          minLength: 1
+          maxLength: 128
+          example: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+        occurredAt:
+          type: string
+          format: date-time
+          description: When the activity happened, RFC3339 UTC.
+          example: '2026-08-22T10:00:00Z'
+        correlationId:
+          type: string
+          description: >-
+            Correlation id of the request or event that caused the activity
+            (A§97) — the handle that ties this entry to the API call, the Kafka
+            message, the Airflow run and the log lines around it.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        detail:
+          type: object
+          description: >-
+            Activity-type-specific payload, e.g. `{"from":"OPEN","to":"ACTIVE"}`
+            for a transition or `{"channel":"SMS"}` for a contact. Deliberately
+            open: the shape is defined per `activityType` by the service that
+            writes it and validated there, exactly as the event envelope's
+            `payload` is (contracts/README.md §2). This is the only untyped
+            member in the spec, and it never carries PII.
+            An activity with nothing to add carries `{}`.
+          additionalProperties: true
+          example:
+            from: OPEN
+            to: ACTIVE
+            assignedCollector: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+      example:
+        activityId: 01M0MEPX9D5R3W7YS2G4M6Q8Z0
+        caseId: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+        seq: 12
+        activityType: CASE_ASSIGNED
+        actor: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+        occurredAt: '2026-08-22T10:00:00Z'
+        correlationId: 01M0MEKBHXV37E3S3E28JT97KB
+        detail:
+          from: OPEN
+          to: ACTIVE
+          assignedCollector: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+
+    CaseActivityList:
+      type: object
+      title: CaseActivityList
+      description: One page of case activities (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The activities on this page, highest `seq` first.
+          items:
+            $ref: '#/components/schemas/CaseActivity'
+          maxItems: 200
+          example:
+            - activityId: 01M0MEPX9D5R3W7YS2G4M6Q8Z0
+              caseId: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+              seq: 12
+              activityType: CASE_ASSIGNED
+              actor: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+              occurredAt: '2026-08-22T10:00:00Z'
+              correlationId: 01M0MEKBHXV37E3S3E28JT97KB
+              detail:
+                from: OPEN
+                to: ACTIVE
+            - activityId: 01M0MEPT2C4Q1V6XR8F3H5J7K9
+              caseId: 01M0MEP4K7X9C2VQ5N8T3R6B1D
+              seq: 11
+              activityType: CASE_CREATED
+              actor: case-service
+              occurredAt: '2026-07-20T06:15:00Z'
+              correlationId: 01M0MEK9ZQ4T8VBR6Y1J5C3H2A
+              detail:
+                trigger: DELINQUENCY_CHANGED
+                dpd: 1
+        nextCursor:
+          type: string
+          description: >-
+            Opaque cursor for the next page, or `null` on the last page. Pass it
+            back verbatim as `cursor`.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJzIjoxMX0

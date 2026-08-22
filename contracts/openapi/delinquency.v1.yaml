@@ -1,0 +1,858 @@
+# =============================================================================
+# Collections Platform — delinquency-service API (CON-3)
+# =============================================================================
+# Owns (contracts/README.md "URL path-ownership matrix"):
+#
+#   GET      /v1/accounts/{accountId}/delinquency
+#   GET      /v1/accounts/{accountId}/delinquency/history
+#   GET|PUT  /v1/delinquency/bucket-configs
+#
+# The account-scoped paths sit under `/v1/accounts` because A§14 catalogues them
+# there, but the data is delinquency-service's, so they are declared here and
+# not in account.v1.yaml (A§7.3: no service reads another service's store).
+# Routing is by full path, so account.v1.yaml, debt.v1.yaml and this spec all
+# legitimately define paths under `/v1/accounts`.
+#
+# Source: A§14 (API catalogue), A§9 (Delinquency entity), A§5.4
+# (delinquency-service responsibilities), D§5 (delinquency requirements —
+# "actual buckets must be configurable rather than hard-coded").
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `delinquency.v2.yaml`. See contracts/README.md §1.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Delinquency Service API
+  version: 1.0.0
+  description: >-
+    Delinquency state of an account (A§5.4): days past due, bucket, cure and
+    re-default lifecycle, and the historical series behind roll-rate analysis.
+    Delinquency is *derived* — from the account's `oldestUnpaidDueDate` and
+    `overdueAmountMinor` — and delinquency-service is the only owner of that
+    derivation; nobody else computes DPD.
+
+
+    Buckets are configuration, not code (D§5). The bucket ladder and the
+    re-default window live in a versioned document served by
+    `/v1/delinquency/bucket-configs`, and every delinquency record stamps the
+    `bucketConfigVersion` that produced its `bucket`, so a historical bucket
+    stays interpretable after the ladder changes.
+
+
+    Conventions (normative: `contracts/README.md`): money is `int64` minor units
+    with a sibling `currency`, A§20 error body on every non-2xx response,
+    `X-Correlation-Id` accepted on every request and echoed on every response
+    (A§97), pagination is `limit` plus an opaque `cursor` with
+    `{items, nextCursor}` responses.
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/delinquency run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: delinquency
+    description: Per-account delinquency state and history — DPD, bucket, cure, re-default (A§14).
+  - name: bucket-configs
+    description: The versioned, configurable delinquency bucket ladder (D§5).
+
+paths:
+  /v1/accounts/{accountId}/delinquency:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getAccountDelinquency
+      summary: Get the current delinquency state of an account
+      description: >-
+        Returns the account's current delinquency record: DPD, bucket, lifecycle
+        status and the dates that define the episode (A§14, A§9).
+
+
+        `dpd` is derived from the account's `oldestUnpaidDueDate`, not from the
+        age of the arrears balance, and is recomputed on every account snapshot
+        and on the daily delinquency tick. An account that has never been
+        delinquent still has a record, with `status` `CURRENT`, `dpd` 0 and no
+        `firstDelinquencyDate`.
+
+
+        Required scope: `delinquency:read`.
+      tags:
+        - delinquency
+      responses:
+        '200':
+          description: The account's current delinquency state.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delinquency'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/accounts/{accountId}/delinquency/history:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listAccountDelinquencyHistory
+      summary: List the delinquency transitions recorded for an account
+      description: >-
+        Returns the append-only series of delinquency transitions for the
+        account, newest first (D§5 "historical delinquency"). One entry per
+        change of bucket or status, each carrying the bucket it moved from, so
+        the series is the raw material for roll-rate reporting and for answering
+        "when did this account enter 31-60 and why".
+
+
+        Entries are never updated or deleted (CLAUDE.md hard rule 4). Paginated
+        with `limit` plus an opaque `cursor`; a cursor is only valid for the
+        same `from`/`to` arguments. Required scope: `delinquency:read`.
+      tags:
+        - delinquency
+      parameters:
+        - $ref: '#/components/parameters/FromDateQuery'
+        - $ref: '#/components/parameters/ToDateQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of delinquency transitions, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DelinquencyHistoryList'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/delinquency/bucket-configs:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getBucketConfig
+      summary: Get the bucket configuration
+      description: >-
+        Returns the active bucket configuration, or a specific historical
+        version when `version` is supplied (D§5). Historical versions must stay
+        readable because every delinquency record and every history entry stamps
+        the `bucketConfigVersion` that produced its bucket name; without the old
+        document, an old bucket name cannot be mapped back to a DPD range.
+
+
+        Required scope: `delinquency:read`.
+      tags:
+        - bucket-configs
+      parameters:
+        - $ref: '#/components/parameters/BucketConfigVersionQuery'
+      responses:
+        '200':
+          description: The requested bucket configuration version.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BucketConfig'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    put:
+      operationId: replaceBucketConfig
+      summary: Replace the bucket configuration with a new version
+      description: >-
+        Publishes a new bucket configuration (D§5: "actual buckets must be
+        configurable rather than hard-coded"). The submitted document fully
+        replaces the ladder — this is not a patch — and the service assigns the
+        next `version`; a caller cannot choose one. Previous versions stay
+        readable via `GET` with `?version=`.
+
+
+        Required scope: `delinquency:admin`. Read scopes are not sufficient:
+        re-cutting the ladder re-buckets the whole portfolio and therefore
+        changes which strategies select which treatments.
+
+
+        `PUT` is idempotent by construction and so carries no
+        `Idempotency-Key` (contracts/README.md §8): submitting the identical
+        document twice yields two versions with identical content, which has no
+        further effect on bucketing. `If-Match` is likewise not used — the
+        configuration is a singleton with no row version on this API.
+
+
+        The submitted ladder is validated as a whole and rejected with
+        400 `BUCKET_CONFIG_INVALID` unless **all** of the following hold, with
+        the offending bucket reported in `details[].field` as
+        `buckets[<index>].<property>`:
+
+          * at least one bucket, at most 20;
+          * every `name` is unique within the document;
+          * `minDpd` <= `maxDpd` for every bounded bucket;
+          * sorted by `minDpd`, the first bucket has `minDpd` 0 — buckets must
+            cover DPD 0 so that a current account has a bucket;
+          * the ladder is **contiguous and non-overlapping**: each bucket's
+            `minDpd` equals the previous bucket's `maxDpd` + 1, leaving no gap
+            and no overlap;
+          * exactly one bucket has `maxDpd` `null` (open-ended) and it is the
+            last one, so that every possible DPD value maps to exactly one
+            bucket.
+
+        A valid document takes effect immediately for subsequent
+        recalculations; already-recorded delinquency records keep the bucket and
+        `bucketConfigVersion` they were computed with and are not rewritten
+        (CLAUDE.md hard rule 4).
+      tags:
+        - bucket-configs
+      requestBody:
+        required: true
+        description: The complete replacement bucket ladder and re-default window.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BucketConfigUpdate'
+      responses:
+        '200':
+          description: >-
+            The newly published configuration, including the `version` the
+            service assigned to it.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BucketConfig'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403.
+
+  parameters:
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        Source-system account identifier (account number), as used by
+        account-service. Free-form source id, not a ULID
+        (contracts/README.md §6).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-100045
+    BucketConfigVersionQuery:
+      name: version
+      in: query
+      required: false
+      description: >-
+        Return this configuration version instead of the active one. Omit for
+        the active version. An unknown version is 404.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        example: 3
+    FromDateQuery:
+      name: from
+      in: query
+      required: false
+      description: >-
+        Earliest business date to include, `YYYY-MM-DD`, inclusive, compared
+        against the entry's `changedAt` date in UTC. Omit for the beginning of
+        retained history.
+      schema:
+        type: string
+        format: date
+        example: '2026-06-01'
+    ToDateQuery:
+      name: to
+      in: query
+      required: false
+      description: >-
+        Latest business date to include, `YYYY-MM-DD`, inclusive, compared
+        against the entry's `changedAt` date in UTC. Omit for "up to now". A
+        `to` earlier than `from` is 400 `VALIDATION_FAILED`.
+      schema:
+        type: string
+        format: date
+        example: '2026-08-22'
+
+  schemas:
+    Delinquency:
+      type: object
+      title: Delinquency
+      description: >-
+        Current delinquency state of one account (A§9). Every field is derived
+        by delinquency-service: this resource has no write path, because a
+        delinquency that could be edited by hand would not be defensible in an
+        audit.
+      additionalProperties: false
+      required:
+        - delinquencyId
+        - accountId
+        - dpd
+        - bucket
+        - bucketConfigVersion
+        - status
+        - overdueAmountMinor
+        - currency
+        - asOf
+      properties:
+        delinquencyId:
+          type: string
+          description: >-
+            Platform-generated ULID of the delinquency record — one per account,
+            carried on `DelinquencyChanged` events for traceability.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEN2H4W8P6RJ3K5Y7B1D9F
+        accountId:
+          type: string
+          description: >-
+            Source-system identifier of the account this state belongs to, and
+            the partition key of `DelinquencyChanged` (A§26).
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        dpd:
+          type: integer
+          format: int32
+          description: >-
+            Days past due: whole days between the account's
+            `oldestUnpaidDueDate` and the `asOf` business date. 0 when nothing
+            is overdue. Never negative — an amount due in the future is not
+            delinquency.
+          minimum: 0
+          example: 35
+        bucket:
+          type: string
+          description: >-
+            Name of the bucket `dpd` falls in, taken from the bucket
+            configuration identified by `bucketConfigVersion`. Not an enum: the
+            ladder is configurable per D§5, so the vocabulary is data, not
+            contract.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DPD_31_60
+        bucketConfigVersion:
+          type: integer
+          format: int32
+          description: >-
+            Version of the bucket configuration that produced `bucket`. Stamped
+            so that a bucket name stays interpretable after the ladder is
+            re-cut; resolve it with
+            `GET /v1/delinquency/bucket-configs?version=`.
+          minimum: 1
+          example: 3
+        status:
+          $ref: '#/components/schemas/DelinquencyStatus'
+        firstDelinquencyDate:
+          type: string
+          format: date
+          description: >-
+            Business date the account first became delinquent, ever,
+            `YYYY-MM-DD`. Omitted for an account that has never been
+            delinquent. Never reset by a cure — it is the anchor for lifetime
+            delinquency reporting.
+          example: '2026-07-19'
+        currentDelinquencyDate:
+          type: string
+          format: date
+          description: >-
+            Business date the *current* delinquency episode started,
+            `YYYY-MM-DD`. Reset on each new episode, so it differs from
+            `firstDelinquencyDate` after a cure and re-default. Omitted while
+            the account is `CURRENT`.
+          example: '2026-07-19'
+        cureDate:
+          type: string
+          format: date
+          description: >-
+            Business date the account most recently cured — arrears cleared and
+            DPD back to 0 — `YYYY-MM-DD`. Omitted when it has never cured.
+            Present alongside a `DELINQUENT` or `REDEFAULTED` status when an
+            earlier episode cured.
+          example: '2026-05-02'
+        redefaultDate:
+          type: string
+          format: date
+          description: >-
+            Business date the account became delinquent again within
+            `redefaultWindowDays` of `cureDate`, `YYYY-MM-DD`. Omitted unless a
+            re-default has been detected.
+          example: '2026-07-19'
+        overdueAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount past due in minor units of `currency` at `asOf`, mirrored
+            from the account snapshot that drove this calculation. Zero when
+            `status` is `CURRENT` or `CURED`.
+          minimum: 0
+          example: 45000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of `overdueAmountMinor`.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        asOf:
+          type: string
+          format: date-time
+          description: >-
+            When this state was last calculated, RFC3339 UTC. DPD advances with
+            the business date, so a state's age matters to a caller.
+          example: '2026-08-22T02:20:00Z'
+      example:
+        delinquencyId: 01M0MEN2H4W8P6RJ3K5Y7B1D9F
+        accountId: ACC-100045
+        dpd: 35
+        bucket: DPD_31_60
+        bucketConfigVersion: 3
+        status: DELINQUENT
+        firstDelinquencyDate: '2026-07-19'
+        currentDelinquencyDate: '2026-07-19'
+        overdueAmountMinor: 45000
+        currency: EUR
+        asOf: '2026-08-22T02:20:00Z'
+
+    DelinquencyStatus:
+      type: string
+      title: DelinquencyStatus
+      description: >-
+        Lifecycle status of the account's delinquency (A§5.4). `CURRENT` means
+        not delinquent. `CURED` means the arrears were cleared and the
+        re-default window has not yet been detected as breached; `REDEFAULTED`
+        means it was. The last three values are exactly the ones carried on the
+        `DelinquencyChanged` event, which is what drives case creation and case
+        resolution — `CURRENT` never appears on that event because it is the
+        absence of an episode.
+      enum:
+        - CURRENT
+        - DELINQUENT
+        - CURED
+        - REDEFAULTED
+      example: DELINQUENT
+
+    DelinquencyHistoryEntry:
+      type: object
+      title: DelinquencyHistoryEntry
+      description: >-
+        One recorded delinquency transition (D§5 "historical delinquency",
+        A§5.4 "roll-rate transitions"). Append-only.
+      additionalProperties: false
+      required:
+        - transitionId
+        - accountId
+        - changedAt
+        - dpd
+        - bucket
+        - previousBucket
+        - bucketConfigVersion
+        - status
+        - overdueAmountMinor
+        - currency
+      properties:
+        transitionId:
+          type: string
+          description: >-
+            Platform-generated ULID of the transition. ULIDs sort by creation
+            time, which is what makes cursor pagination over the series cheap.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MENB5C3V7YTS8G2M4Q6X0Z
+        accountId:
+          type: string
+          description: Source-system identifier of the account that transitioned.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        changedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the transition was recorded, RFC3339 UTC. The series is
+            ordered by this value, newest first.
+          example: '2026-08-19T02:20:00Z'
+        dpd:
+          type: integer
+          format: int32
+          description: Days past due immediately after the transition. Never negative.
+          minimum: 0
+          example: 32
+        bucket:
+          type: string
+          description: >-
+            Bucket the account moved *into*, resolved against
+            `bucketConfigVersion`.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DPD_31_60
+        previousBucket:
+          type: string
+          description: >-
+            Bucket the account moved *out of*, or `null` for the first entry in
+            the account's history, where there is no previous bucket. Explicitly
+            null rather than omitted, because "no previous bucket" is
+            information a roll-rate calculation needs.
+          nullable: true
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DPD_1_30
+        bucketConfigVersion:
+          type: integer
+          format: int32
+          description: >-
+            Version of the bucket configuration in force when the transition was
+            recorded. Old entries keep their original version, so a re-cut
+            ladder never rewrites history.
+          minimum: 1
+          example: 3
+        status:
+          $ref: '#/components/schemas/DelinquencyStatus'
+        overdueAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount past due at the moment of the transition, in minor units of
+            `currency`. Never negative.
+          minimum: 0
+          example: 45000
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency the transition's overdue amount is
+            denominated in.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+      example:
+        transitionId: 01M0MENB5C3V7YTS8G2M4Q6X0Z
+        accountId: ACC-100045
+        changedAt: '2026-08-19T02:20:00Z'
+        dpd: 32
+        bucket: DPD_31_60
+        previousBucket: DPD_1_30
+        bucketConfigVersion: 3
+        status: DELINQUENT
+        overdueAmountMinor: 45000
+        currency: EUR
+
+    DelinquencyHistoryList:
+      type: object
+      title: DelinquencyHistoryList
+      description: >-
+        One page of delinquency transitions (contracts/README.md §10). No offset
+        and no total count: neither is cheap on the operational store, and
+        neither is part of the contract.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The transitions on this page, newest `changedAt` first.
+          items:
+            $ref: '#/components/schemas/DelinquencyHistoryEntry'
+          maxItems: 200
+          example:
+            - transitionId: 01M0MENB5C3V7YTS8G2M4Q6X0Z
+              accountId: ACC-100045
+              changedAt: '2026-08-19T02:20:00Z'
+              dpd: 32
+              bucket: DPD_31_60
+              previousBucket: DPD_1_30
+              bucketConfigVersion: 3
+              status: DELINQUENT
+              overdueAmountMinor: 45000
+              currency: EUR
+            - transitionId: 01M0MEN8T1R4K9WJ2H6P3F5D7B
+              accountId: ACC-100045
+              changedAt: '2026-07-19T02:20:00Z'
+              dpd: 1
+              bucket: DPD_1_30
+              previousBucket: null
+              bucketConfigVersion: 3
+              status: DELINQUENT
+              overdueAmountMinor: 15000
+              currency: EUR
+        nextCursor:
+          type: string
+          description: >-
+            Opaque cursor for the next page, or `null` on the last page. Pass it
+            back verbatim as `cursor` with identical `from`/`to` arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJvIjoiMDFNME1FTkI1QzNWN1lUUzhHMk00UTZYMFoifQ
+
+    DelinquencyBucket:
+      type: object
+      title: DelinquencyBucket
+      description: >-
+        One rung of the bucket ladder: a half-open-at-the-top DPD range with a
+        name. Ranges are inclusive at both ends when `maxDpd` is set.
+      additionalProperties: false
+      required:
+        - name
+        - minDpd
+        - maxDpd
+      properties:
+        name:
+          type: string
+          description: >-
+            Bucket name, stamped onto every delinquency record that falls in the
+            range and used verbatim by strategy rules and analytics. Unique
+            within a configuration version. The `DPD_<min>_<max>` /
+            `DPD_<min>_PLUS` convention is what the rest of the platform's
+            examples and reason codes assume, but it is not enforced.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DPD_31_60
+        minDpd:
+          type: integer
+          format: int32
+          description: >-
+            Lowest DPD value in the bucket, inclusive. The first bucket of a
+            valid ladder has `minDpd` 0.
+          minimum: 0
+          example: 31
+        maxDpd:
+          type: integer
+          format: int32
+          description: >-
+            Highest DPD value in the bucket, inclusive, or `null` for the
+            open-ended final bucket (the "90+" rung). Explicitly nullable rather
+            than omitted: "unbounded above" is a value, and exactly one bucket
+            per configuration must carry it.
+          nullable: true
+          minimum: 0
+          example: 60
+      example:
+        name: DPD_31_60
+        minDpd: 31
+        maxDpd: 60
+
+    BucketConfigUpdate:
+      type: object
+      title: BucketConfigUpdate
+      description: >-
+        Replacement bucket configuration submitted to
+        `PUT /v1/delinquency/bucket-configs`. Carries no `version`: versions are
+        assigned by the service, never chosen by the caller.
+      additionalProperties: false
+      required:
+        - buckets
+        - redefaultWindowDays
+      properties:
+        buckets:
+          type: array
+          description: >-
+            The complete bucket ladder, which must be contiguous,
+            non-overlapping, start at DPD 0 and end with exactly one open-ended
+            bucket — see the operation description for the full rule set and the
+            400 `BUCKET_CONFIG_INVALID` failure mode. Order in the array is not
+            significant; validation sorts by `minDpd`.
+          items:
+            $ref: '#/components/schemas/DelinquencyBucket'
+          minItems: 1
+          maxItems: 20
+          example:
+            - name: CURRENT
+              minDpd: 0
+              maxDpd: 0
+            - name: DPD_1_30
+              minDpd: 1
+              maxDpd: 30
+            - name: DPD_31_60
+              minDpd: 31
+              maxDpd: 60
+            - name: DPD_61_90
+              minDpd: 61
+              maxDpd: 90
+            - name: DPD_90_PLUS
+              minDpd: 91
+              maxDpd: null
+        redefaultWindowDays:
+          type: integer
+          format: int32
+          description: >-
+            Number of days after a cure within which a fresh delinquency counts
+            as a re-default rather than a new episode (A§5.4). 0 disables
+            re-default detection: any new delinquency is then a new episode.
+          minimum: 0
+          maximum: 3650
+          example: 90
+      example:
+        buckets:
+          - name: CURRENT
+            minDpd: 0
+            maxDpd: 0
+          - name: DPD_1_30
+            minDpd: 1
+            maxDpd: 30
+          - name: DPD_31_60
+            minDpd: 31
+            maxDpd: 60
+          - name: DPD_61_90
+            minDpd: 61
+            maxDpd: 90
+          - name: DPD_90_PLUS
+            minDpd: 91
+            maxDpd: null
+        redefaultWindowDays: 90
+
+    BucketConfig:
+      type: object
+      title: BucketConfig
+      description: >-
+        A published version of the bucket configuration (D§5). Immutable once
+        published: changing the ladder means publishing a new version, so that
+        every historical bucket stays resolvable.
+      additionalProperties: false
+      required:
+        - version
+        - buckets
+        - redefaultWindowDays
+        - active
+        - publishedAt
+        - publishedBy
+      properties:
+        version:
+          type: integer
+          format: int32
+          description: >-
+            Monotonically increasing version number assigned by the service on
+            publication. Stamped as `bucketConfigVersion` on every delinquency
+            record computed while it was active.
+          minimum: 1
+          example: 3
+        buckets:
+          type: array
+          description: The bucket ladder of this version, sorted ascending by `minDpd`.
+          items:
+            $ref: '#/components/schemas/DelinquencyBucket'
+          minItems: 1
+          maxItems: 20
+          example:
+            - name: CURRENT
+              minDpd: 0
+              maxDpd: 0
+            - name: DPD_1_30
+              minDpd: 1
+              maxDpd: 30
+            - name: DPD_31_60
+              minDpd: 31
+              maxDpd: 60
+            - name: DPD_61_90
+              minDpd: 61
+              maxDpd: 90
+            - name: DPD_90_PLUS
+              minDpd: 91
+              maxDpd: null
+        redefaultWindowDays:
+          type: integer
+          format: int32
+          description: >-
+            Re-default window in days that was published with this version. 0
+            means re-default detection is disabled.
+          minimum: 0
+          maximum: 3650
+          example: 90
+        active:
+          type: boolean
+          description: >-
+            True for the version currently used to bucket accounts. Exactly one
+            published version is active at a time — the most recent one.
+          example: true
+        publishedAt:
+          type: string
+          format: date-time
+          description: When this version was published, RFC3339 UTC.
+          example: '2026-08-01T09:30:00Z'
+        publishedBy:
+          type: string
+          description: >-
+            Subject (`sub` claim) of the operator who published this version.
+            Recorded because re-cutting the ladder re-buckets the portfolio and
+            must be attributable.
+          minLength: 1
+          maxLength: 128
+          example: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40
+      example:
+        version: 3
+        buckets:
+          - name: CURRENT
+            minDpd: 0
+            maxDpd: 0
+          - name: DPD_1_30
+            minDpd: 1
+            maxDpd: 30
+          - name: DPD_31_60
+            minDpd: 31
+            maxDpd: 60
+          - name: DPD_61_90
+            minDpd: 61
+            maxDpd: 90
+          - name: DPD_90_PLUS
+            minDpd: 91
+            maxDpd: null
+        redefaultWindowDays: 90
+        active: true
+        publishedAt: '2026-08-01T09:30:00Z'
+        publishedBy: 8f14e45f-ea0f-4a2b-9ba1-6c3d2e1a7b40

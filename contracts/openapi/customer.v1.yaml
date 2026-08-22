@@ -1,0 +1,364 @@
+# =============================================================================
+# Collections Platform — customer-service API (CON-3)
+# =============================================================================
+# Owns: GET /v1/customers/{customerId} only. The other `/v1/customers/...`
+# paths belong to the services that own the data (contracts/README.md
+# "URL path-ownership matrix", A§7.3):
+#
+#   GET /v1/customers/{customerId}/accounts -> account.v1.yaml
+#   GET /v1/customers/{customerId}/cases    -> case.v1.yaml
+#   GET /v1/customers/{customerId}/contacts -> contact.v1.yaml
+#
+# Source: A§13 (customer API catalogue), A§9 (Customer entity), A§5.1
+# (customer-service responsibilities), D§4.1 (functional requirements).
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `customer.v2.yaml`. See contracts/README.md §1.
+#
+# Vocabulary policy used throughout this spec: closed state machines defined by
+# the design pack are `enum`s; vocabularies that are reference data owned by a
+# service (segments, reason codes) are pattern-constrained strings, because
+# adding an enum member to a released contract is a breaking change.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Customer Service API
+  version: 1.0.0
+  description: >-
+    Collections view of a customer (A§5.1): the minimum operational
+    representation collections needs — status, segment and contactability —
+    never the enterprise customer master, which stays in the source system and
+    is referenced by `enterpriseCustomerId`.
+
+
+    Conventions (normative: `contracts/README.md`): A§20 error body on every
+    non-2xx response, `X-Correlation-Id` accepted on every request and echoed
+    on every response (A§97), RFC3339 UTC timestamps, money as `int64` minor
+    units with a sibling `currency`.
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/customer run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: customers
+    description: Collections customer profile — status, segment, contactability (A§13).
+
+paths:
+  /v1/customers/{customerId}:
+    parameters:
+      - $ref: '#/components/parameters/CustomerIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getCustomer
+      summary: Get the collections view of a customer
+      description: >-
+        Returns the collections profile of one customer: status, segment and the
+        contactability block that decisioning and treatment execution consume
+        (A§13, A§9).
+
+
+        Required scope: `customers:read`.
+
+
+        The contactability block is authoritative for contact suppression:
+        `doNotContact`, `vulnerabilityFlag` and `constraints[]` can only ever
+        *narrow* what a treatment may do, and are re-checked at dispatch time —
+        optimisation can never override them (A§54).
+      tags:
+        - customers
+      responses:
+        '200':
+          description: The customer's collections profile.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403.
+
+  parameters:
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      description: >-
+        Source-system customer identifier. Owned by the enterprise customer
+        master and never re-minted by the platform (contracts/README.md §6), so
+        it keeps the source format rather than being a ULID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: CUST-000123
+
+  schemas:
+    Customer:
+      type: object
+      title: Customer
+      description: >-
+        Collections view of a customer (A§9). Deliberately narrow: identity,
+        lifecycle status, collections segment and contactability. Names,
+        addresses, phone numbers and other contact details are held by
+        contact-service and the enterprise master, not here.
+      additionalProperties: false
+      required:
+        - customerId
+        - enterpriseCustomerId
+        - status
+        - segment
+        - contactability
+        - createdAt
+        - updatedAt
+      properties:
+        customerId:
+          type: string
+          description: >-
+            Source-system customer identifier — the primary key of this
+            resource and the value used in every `/v1/customers/{customerId}`
+            path across the platform.
+          minLength: 1
+          maxLength: 64
+          example: CUST-000123
+        enterpriseCustomerId:
+          type: string
+          description: >-
+            Identifier of the same customer in the enterprise customer master.
+            Present so that downstream consumers can join back to the master
+            without collections becoming it (A§5.1). Usually identical to
+            `customerId`; it differs when a source system uses a local key.
+          minLength: 1
+          maxLength: 64
+          example: ECIF-77120045
+        status:
+          $ref: '#/components/schemas/CustomerStatus'
+        segment:
+          type: string
+          description: >-
+            Collections segment the customer currently falls in (D§4.1).
+            Reference data owned by strategy-service — the value matches a
+            `segments[].name` of the active strategy document, and an
+            unsegmented customer carries `DEFAULT`, mirroring the strategy
+            document's mandatory final default segment.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_LOW_RISK
+        contactability:
+          $ref: '#/components/schemas/Contactability'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the collections profile was first created, RFC3339 UTC.
+          example: '2026-01-14T09:12:03Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the collections profile last changed, RFC3339 UTC. Equal to
+            `createdAt` when it has never been updated.
+          example: '2026-08-22T10:00:00Z'
+      example:
+        customerId: CUST-000123
+        enterpriseCustomerId: ECIF-77120045
+        status: ACTIVE
+        segment: EARLY_STAGE_LOW_RISK
+        contactability:
+          doNotContact: false
+          preferredChannel: SMS
+          vulnerabilityFlag: false
+          constraints:
+            - constraintId: 01M0MEKBHXV37E3S3E28JT97KB
+              type: FORBID_CHANNEL
+              channel: LETTER
+              source: CUSTOMER_REQUEST
+              reasonCode: PAPERLESS_PREFERENCE
+              effectiveFrom: '2026-03-01T00:00:00Z'
+        createdAt: '2026-01-14T09:12:03Z'
+        updatedAt: '2026-08-22T10:00:00Z'
+
+    CustomerStatus:
+      type: string
+      title: CustomerStatus
+      description: >-
+        Lifecycle status of the *collections* profile, normalised by the
+        ingestion canonicalizer from the source system's own status values.
+        `DECEASED` and `CLOSED` are terminal: no treatment may be dispatched
+        for such a customer regardless of what a strategy selects.
+      enum:
+        - ACTIVE
+        - INACTIVE
+        - DECEASED
+        - CLOSED
+      example: ACTIVE
+
+    Channel:
+      type: string
+      title: Channel
+      description: >-
+        Contact channel. The closed set implemented by treatment-service's
+        channel adapters; contact-service records outcomes against the same
+        values.
+      enum:
+        - SMS
+        - EMAIL
+        - LETTER
+        - DIGITAL
+      example: SMS
+
+    Contactability:
+      type: object
+      title: Contactability
+      description: >-
+        Everything decisioning and treatment execution need in order to decide
+        whether — and how — the customer may be contacted (A§5.1). Every member
+        is *narrowing*: it can forbid or restrict contact, never permit contact
+        that policy forbids (A§54, CLAUDE.md hard rule 2).
+      additionalProperties: false
+      required:
+        - doNotContact
+        - vulnerabilityFlag
+        - constraints
+      properties:
+        doNotContact:
+          type: boolean
+          description: >-
+            True when the customer must not be contacted on any channel. A
+            global suppression that is re-evaluated immediately before dispatch,
+            so a flag flipped after a decision was made still suppresses the
+            treatment.
+          example: false
+        preferredChannel:
+          $ref: '#/components/schemas/Channel'
+        vulnerabilityFlag:
+          type: boolean
+          description: >-
+            True when a vulnerability or assistance indicator applies, where
+            legally and operationally appropriate to record (D§4.1). Drives
+            gentler treatment paths and additional policy constraints; the
+            underlying reason is deliberately not exposed on this API.
+          example: false
+        constraints:
+          type: array
+          description: >-
+            Collections constraints currently in force for this customer
+            (A§8.1 `CollectionConstraint`). May be empty; order is not
+            significant. Only constraints that are effective now are returned.
+          items:
+            $ref: '#/components/schemas/CollectionConstraint'
+          maxItems: 100
+      example:
+        doNotContact: false
+        preferredChannel: SMS
+        vulnerabilityFlag: false
+        constraints: []
+
+    CollectionConstraint:
+      type: object
+      title: CollectionConstraint
+      description: >-
+        One narrowing constraint on how the customer may be treated (A§8.1,
+        A§54). Constraint types expose narrowing only: `SUPPRESS_CONTACT`
+        removes every treatment, `FORBID_CHANNEL` removes one channel. Nothing
+        in the decisioning chain can widen them.
+      additionalProperties: false
+      required:
+        - constraintId
+        - type
+        - source
+        - effectiveFrom
+      properties:
+        constraintId:
+          type: string
+          description: Platform-generated ULID identifying this constraint.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        type:
+          type: string
+          description: >-
+            What the constraint narrows. `FORBID_CHANNEL` carries the channel it
+            forbids in `channel`; `SUPPRESS_CONTACT` forbids all channels and
+            omits it.
+          enum:
+            - SUPPRESS_CONTACT
+            - FORBID_CHANNEL
+          example: FORBID_CHANNEL
+        channel:
+          $ref: '#/components/schemas/Channel'
+        source:
+          type: string
+          description: >-
+            Why the constraint exists. Recorded because an operator auditing a
+            suppressed treatment must be able to see whether it came from the
+            customer, from regulation, or from a legal representation.
+          enum:
+            - CUSTOMER_REQUEST
+            - REGULATORY
+            - VULNERABILITY
+            - LEGAL_REPRESENTATION
+            - COMPLAINT
+          example: CUSTOMER_REQUEST
+        reasonCode:
+          type: string
+          description: >-
+            Optional stable reason code refining `source`, from the collections
+            reason-code reference data. Free text is deliberately not accepted
+            here: constraint records must stay free of PII.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAPERLESS_PREFERENCE
+        effectiveFrom:
+          type: string
+          format: date-time
+          description: When the constraint started to apply, RFC3339 UTC.
+          example: '2026-03-01T00:00:00Z'
+        effectiveTo:
+          type: string
+          format: date-time
+          description: >-
+            When the constraint stops applying, RFC3339 UTC. Omitted for an
+            open-ended constraint.
+          example: '2027-03-01T00:00:00Z'
+      example:
+        constraintId: 01M0MEKBHXV37E3S3E28JT97KB
+        type: FORBID_CHANNEL
+        channel: LETTER
+        source: CUSTOMER_REQUEST
+        reasonCode: PAPERLESS_PREFERENCE
+        effectiveFrom: '2026-03-01T00:00:00Z'

@@ -1,0 +1,300 @@
+# =============================================================================
+# Collections Platform — debt-service API (CON-3)
+# =============================================================================
+# Owns (contracts/README.md "URL path-ownership matrix"):
+#
+#   GET /v1/debts/{debtId}
+#   GET /v1/accounts/{accountId}/debt
+#
+# The second path sits under `/v1/accounts` because A§14 catalogues it there,
+# but the data is debt-service's, so the path is declared here and not in
+# account.v1.yaml (A§7.3: no service reads another service's store). Routing is
+# by full path, so both specs legitimately define paths under `/v1/accounts`.
+#
+# Source: A§14 (API catalogue), A§9 (Debt entity), A§5.3 (debt-service
+# responsibilities), A§8.1 (Account -> Debt -> DebtComponent).
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `debt.v2.yaml`. See contracts/README.md §1.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Debt Service API
+  version: 1.0.0
+  description: >-
+    Debt exposure for an account (A§5.3): the decomposition of what is owed
+    into principal, interest, fees and penalties, and the single
+    `recoverableAmountMinor` figure that recovery, agency placement and legal
+    referral all work from.
+
+
+    Read-only. Debt records are maintained from the canonical `DebtSnapshot`
+    ingestion stream; the platform is not the book of record for an exposure.
+
+
+    Conventions (normative: `contracts/README.md`): money is `int64` minor units
+    with a sibling `currency` (never floats, never major units, never a
+    formatted string), A§20 error body on every non-2xx response,
+    `X-Correlation-Id` accepted on every request and echoed on every response
+    (A§97).
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/debt run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: debts
+    description: Debt exposure, components and recoverable balance (A§14, A§5.3).
+
+paths:
+  /v1/debts/{debtId}:
+    parameters:
+      - $ref: '#/components/parameters/DebtIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getDebt
+      summary: Get a debt exposure by id
+      description: >-
+        Returns one debt record by its platform identifier, whether it is the
+        account's current exposure or a historical one that has since been
+        settled, written off or superseded (A§9).
+
+
+        Required scope: `debts:read`.
+      tags:
+        - debts
+      responses:
+        '200':
+          description: The debt exposure.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Debt'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/accounts/{accountId}/debt:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getAccountDebt
+      summary: Get the current debt exposure of an account
+      description: >-
+        Returns the account's current debt exposure (A§14). The path is singular
+        by design: an account carries exactly one *current* debt record at a
+        time — the decomposition into principal, interest, fees and penalties
+        happens inside that record rather than across sibling records — so this
+        returns an object, not a page. Superseded records stay addressable by id
+        via `GET /v1/debts/{debtId}`.
+
+
+        404 is returned both when the account is unknown and when it has no debt
+        exposure recorded yet; the two are deliberately indistinguishable.
+
+
+        Required scope: `debts:read`.
+      tags:
+        - debts
+      responses:
+        '200':
+          description: The account's current debt exposure.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Debt'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403.
+
+  parameters:
+    DebtIdPath:
+      name: debtId
+      in: path
+      required: true
+      description: >-
+        Platform-generated ULID of the debt record. Unlike `accountId` and
+        `customerId`, a debt record is minted by the platform, so it is a ULID
+        (contracts/README.md §6).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEM7YB2Q4XKR9F0T5D3C8N
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        Source-system account identifier (account number), as used by
+        account-service. Free-form source id, not a ULID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-100045
+
+  schemas:
+    Debt:
+      type: object
+      title: Debt
+      description: >-
+        Debt exposure attached to an account (A§9). The four component amounts
+        are the audit trail behind the single figure collections acts on:
+        `recoverableAmountMinor`. They are reported as separate `int64` minor-unit
+        scalars sharing one `currency` rather than as four money objects, because
+        a debt record is single-currency by construction.
+      additionalProperties: false
+      required:
+        - debtId
+        - accountId
+        - debtType
+        - principalMinor
+        - interestMinor
+        - feesMinor
+        - penaltiesMinor
+        - recoverableAmountMinor
+        - currency
+        - effectiveDate
+      properties:
+        debtId:
+          type: string
+          description: Platform-generated ULID identifying this debt record.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEM7YB2Q4XKR9F0T5D3C8N
+        accountId:
+          type: string
+          description: >-
+            Source-system identifier of the account the exposure belongs to —
+            the join key to account-service.
+          minLength: 1
+          maxLength: 64
+          example: ACC-100045
+        debtType:
+          type: string
+          description: >-
+            Category of the exposure, e.g. `PERSONAL_LOAN`, `CREDIT_CARD`,
+            `OVERDRAFT`, `MORTGAGE`. Reference data owned by debt-service rather
+            than a contract enum: the set grows with the bank's product
+            catalogue, and adding a member to a released enum would be a
+            breaking change for consumers (contracts/README.md §1).
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PERSONAL_LOAN
+        principalMinor:
+          type: integer
+          format: int64
+          description: >-
+            Outstanding principal in minor units of `currency` (e.g. 210000 =
+            EUR 2,100.00). Never negative.
+          minimum: 0
+          example: 210000
+        interestMinor:
+          type: integer
+          format: int64
+          description: >-
+            Accrued interest in minor units of `currency`. Never negative; zero
+            on non-interest-bearing exposures.
+          minimum: 0
+          example: 28000
+        feesMinor:
+          type: integer
+          format: int64
+          description: >-
+            Fees charged and still outstanding, in minor units of `currency`.
+            Never negative.
+          minimum: 0
+          example: 9000
+        penaltiesMinor:
+          type: integer
+          format: int64
+          description: >-
+            Penalty and late charges still outstanding, in minor units of
+            `currency`. Never negative.
+          minimum: 0
+          example: 3000
+        recoverableAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount collections may legitimately pursue, in minor units of
+            `currency`. This is the figure recovery, agency placement and legal
+            referral all work from. It is *not* required to equal the sum of the
+            four components: waivers, statute-barred interest and regulatory
+            caps reduce it, and the difference is intentional and auditable.
+          minimum: 0
+          example: 247000
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency shared by every `*Minor` amount on this
+            record. A debt record is single-currency; exposure in a second
+            currency is a separate record.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        effectiveDate:
+          type: string
+          format: date
+          description: >-
+            Business date the exposure figures are effective for, `YYYY-MM-DD`
+            (A§9). A calendar date rather than a timestamp because source
+            systems strike debt positions per business day.
+          example: '2026-08-22'
+      example:
+        debtId: 01M0MEM7YB2Q4XKR9F0T5D3C8N
+        accountId: ACC-100045
+        debtType: PERSONAL_LOAN
+        principalMinor: 210000
+        interestMinor: 28000
+        feesMinor: 9000
+        penaltiesMinor: 3000
+        recoverableAmountMinor: 247000
+        currency: EUR
+        effectiveDate: '2026-08-22'
