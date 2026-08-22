@@ -1,0 +1,1433 @@
+# =============================================================================
+# Collections Platform — arrangement-service API (CON-4)
+# =============================================================================
+# Owns arrangements (structured payment plans) AND promises-to-pay, because
+# both are the same aggregate family in A§23 (`PromiseCreated`/`PromiseBroken`
+# and `ArrangementCreated`/`ArrangementBroken` all have producer "Arrangement").
+# D§10 keeps the distinction sharp:
+#
+#   a promise is a customer commitment; an arrangement is the structured
+#   payment plan.
+#
+# Endpoint set is A§17 verbatim plus the two additions the plan mandates:
+# `GET /v1/arrangements` (plan §6.6 — the Collector UI timeline) and the
+# promise resources (plan CON-4).
+#
+# Shared shapes (error body, Idempotency-Key, limit/cursor, canned error
+# responses, the X-Correlation-Id header) are referenced from
+# `./common.v1.yaml`; nothing here restates them.
+#
+# RELEASED FILE — IMMUTABLE once on main. A change a consumer could notice
+# ships as `arrangement.v2.yaml`. See contracts/README.md.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Arrangement Service
+  version: 1.0.0
+  description: >-
+    Promises-to-pay and payment arrangements (A§5.9, A§17, D§10). Creating an
+    arrangement generates its full installment schedule immediately and leaves
+    the arrangement in `DRAFT`; `confirm` is the command that makes it `ACTIVE`
+    and binding. Schedule validity is a domain invariant (A§11.5): a schedule
+    is only valid when every installment amount is a positive integer number of
+    minor units, the installment amounts sum exactly to `totalAmountMinor`, due
+    dates are strictly increasing at the requested `frequency`, and
+    `firstPaymentDate` is not in the past.
+    State machines are A§10.2 (promise) and A§10.3 (arrangement); both are
+    closed — a transition that is not drawn there is a `409`.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      Paths are relative to the service base URL. Domain services are reached
+      in-cluster and callers resolve the host from configuration, so no
+      absolute host is part of the contract.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: arrangements
+    description: >-
+      Structured payment plans: creation with a generated schedule, the A§10.3
+      lifecycle commands (`confirm`, `cancel`, `break`) and schedule reads.
+  - name: promises
+    description: >-
+      Promises-to-pay — a single dated commitment recorded against a case,
+      with the A§10.2 lifecycle.
+
+paths:
+  # --------------------------------------------------------- arrangements ----
+  /v1/arrangements:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createArrangement
+      summary: Create an arrangement and generate its schedule
+      description: >-
+        Creates an arrangement in `DRAFT` (A§10.3) and generates the whole
+        installment schedule from `totalAmountMinor`, `numInstallments`,
+        `frequency` and `firstPaymentDate`. Integer split: every installment is
+        `totalAmountMinor / numInstallments` rounded down and the remainder is
+        added to the **first** installment, so the amounts always sum exactly
+        to `totalAmountMinor` (A§11.5) and no fraction of a minor unit is ever
+        created. Nothing is collectable yet — call `confirm` to make the plan
+        `ACTIVE`.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key` (A§21): a retry with
+        the same key and body returns the original arrangement rather than
+        creating a duplicate.
+
+
+        Errors — `ARRANGEMENT_INVALID` (400) when the requested plan cannot
+        produce a valid schedule, with one `details[]` entry per offending
+        field, exactly as A§20:
+
+        ```json
+        {
+          "code": "ARRANGEMENT_INVALID",
+          "message": "Arrangement schedule is invalid",
+          "correlationId": "01M0MEKBHXV37E3S3E28JT97KB",
+          "details": [{ "field": "firstPaymentDate", "reason": "DATE_IN_PAST" }]
+        }
+        ```
+
+        `CASE_NOT_FOUND` / `ACCOUNT_NOT_FOUND` (404); `ARRANGEMENT_ALREADY_ACTIVE`
+        (409) when the account already has a `DRAFT` or `ACTIVE` arrangement;
+        `REQUEST_IN_PROGRESS` (409) and `IDEMPOTENCY_KEY_REUSED` (422) per A§21;
+        `CASE_NOT_ACTIVE` (422) when the case cannot take a new arrangement.
+      tags: [arrangements]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The plan to generate a schedule from.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateArrangementRequest'
+      responses:
+        '201':
+          description: >-
+            Arrangement created in `DRAFT` with its generated schedule. Replayed
+            verbatim for a duplicate `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Arrangement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+    get:
+      operationId: listArrangements
+      summary: List arrangements for an account or a case
+      description: >-
+        Paginated arrangement history, newest first (`arrangementId` descending
+        — ULIDs sort by creation time). Feeds the Collector UI case timeline
+        (plan §6.6). At least one of `accountId` or `caseId` must be supplied;
+        an unfiltered scan is not part of the contract.
+
+
+        Items are `ArrangementSummary`: the header fields without
+        `installments`, so a page stays small. Fetch
+        `GET /v1/arrangements/{arrangementId}` or its `/schedule` for the
+        installments.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for a missing filter
+        (`details[{field:"accountId", reason:"REQUIRED"}]`), an unknown `status`
+        value, or a `cursor` that does not belong to these filter arguments.
+      tags: [arrangements]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdQuery'
+        - $ref: '#/components/parameters/CaseIdQuery'
+        - $ref: '#/components/parameters/ArrangementStatusQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of arrangement summaries, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArrangementPage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/arrangements/{arrangementId}:
+    parameters:
+      - $ref: '#/components/parameters/ArrangementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getArrangement
+      summary: Get an arrangement
+      description: >-
+        Returns the arrangement with its full installment schedule and current
+        A§10.3 status.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `ARRANGEMENT_NOT_FOUND` (404).
+      tags: [arrangements]
+      responses:
+        '200':
+          description: The arrangement, including its installments.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Arrangement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/arrangements/{arrangementId}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/ArrangementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: confirmArrangement
+      summary: Confirm a draft arrangement (DRAFT to ACTIVE)
+      description: >-
+        Accepts the generated schedule as-is and moves the arrangement
+        `DRAFT` to `ACTIVE` (A§10.3), which is what makes installments
+        collectable and emits `ArrangementCreated`. There is no request body:
+        the schedule is confirmed exactly as returned by
+        `POST /v1/arrangements` — to change it, cancel and create a new
+        arrangement, so that every schedule a customer agreed to stays on the
+        record.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`; confirming an
+        already-`ACTIVE` arrangement with the same key replays the original
+        response.
+
+
+        Errors — `ARRANGEMENT_NOT_FOUND` (404);
+        `ARRANGEMENT_TRANSITION_INVALID` (409) from any state other than
+        `DRAFT`; `CASE_NOT_ACTIVE` (422).
+      tags: [arrangements]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: The arrangement, now `ACTIVE`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Arrangement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/arrangements/{arrangementId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ArrangementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: cancelArrangement
+      summary: Cancel an arrangement (DRAFT or ACTIVE to CANCELLED)
+      description: >-
+        Withdraws the plan by agreement or by operator decision — the benign
+        terminal state, as opposed to `break`. Legal from `DRAFT` and `ACTIVE`
+        (A§10.3). `PENDING` installments become void; installments already
+        `PAID` are untouched, because payment allocation history is
+        append-only.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `ARRANGEMENT_NOT_FOUND` (404);
+        `ARRANGEMENT_TRANSITION_INVALID` (409) from `COMPLETED`, `BROKEN` or
+        `CANCELLED`.
+      tags: [arrangements]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The reason the plan is being withdrawn.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelArrangementRequest'
+      responses:
+        '200':
+          description: The arrangement, now `CANCELLED`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Arrangement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/arrangements/{arrangementId}/break:
+    parameters:
+      - $ref: '#/components/parameters/ArrangementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: breakArrangement
+      summary: Record an arrangement as broken (ACTIVE to BROKEN)
+      description: >-
+        Records non-performance and emits `ArrangementBroken`. Normally raised
+        by arrangement-service's own breach tick when an installment passes its
+        due date unpaid; this endpoint exists for the operator-driven case
+        (e.g. the customer states they cannot continue) and for replaying a
+        breach detected out-of-band. Legal from `ACTIVE` only (A§10.3) — a
+        `DRAFT` was never binding, so it is cancelled, not broken.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `ARRANGEMENT_NOT_FOUND` (404);
+        `ARRANGEMENT_TRANSITION_INVALID` (409) from any state other than
+        `ACTIVE`.
+      tags: [arrangements]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The reason the plan is being recorded as broken.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BreakArrangementRequest'
+      responses:
+        '200':
+          description: The arrangement, now `BROKEN`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Arrangement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/arrangements/{arrangementId}/schedule:
+    parameters:
+      - $ref: '#/components/parameters/ArrangementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getArrangementSchedule
+      summary: Get an arrangement's installment schedule
+      description: >-
+        The schedule on its own (A§17), ordered by `seq` ascending. Same
+        installments as the ones embedded in the arrangement — this is the
+        focused projection for statement and reminder rendering, and it carries
+        the running totals a caller would otherwise have to compute:
+        `scheduledAmountMinor` (always equal to the arrangement's
+        `totalAmountMinor`, per A§11.5) and `paidAmountMinor`.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `ARRANGEMENT_NOT_FOUND` (404).
+      tags: [arrangements]
+      responses:
+        '200':
+          description: The installment schedule with its control totals.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArrangementSchedule'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  # ------------------------------------------------------------- promises ----
+  /v1/promises:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createPromise
+      summary: Record a promise-to-pay
+      description: >-
+        Records a single dated commitment the customer has given — typically
+        captured by a collector during a contact, which is why the resource is
+        created in `ACCEPTED` (D§10: "a promise is a customer commitment").
+        `PROPOSED` in A§10.2 is the promise the platform has offered but the
+        customer has not yet confirmed; it is reached only through
+        arrangement-service's own treatment-offer flow and is not settable
+        through this endpoint. `KEPT` and `BROKEN` are likewise never set by a
+        caller: payment matching and the due-date tick own them.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key` — the Collector UI and
+        treatment-service both retry.
+
+
+        Errors — `PROMISE_INVALID` (400) with `details[]` per field, e.g.
+        `[{ "field": "dueDate", "reason": "DATE_IN_PAST" }]`;
+        `CASE_NOT_FOUND` / `ACCOUNT_NOT_FOUND` (404);
+        `PROMISE_ALREADY_OPEN` (409) when the case already has an `ACCEPTED`
+        promise; `CASE_NOT_ACTIVE` (422).
+      tags: [promises]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The commitment the customer gave.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePromiseRequest'
+      responses:
+        '201':
+          description: >-
+            Promise recorded in `ACCEPTED`. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Promise'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+    get:
+      operationId: listPromises
+      summary: List promises for an account or a case
+      description: >-
+        Paginated promise history, newest first (`promiseId` descending). At
+        least one of `accountId` or `caseId` must be supplied. Broken-promise
+        counts computed from this history feed the decisioning context document
+        (`arrangement.brokenPromises90d`).
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for a missing filter, an unknown
+        `status` value, or a `cursor` that does not belong to these filter
+        arguments.
+      tags: [promises]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdQuery'
+        - $ref: '#/components/parameters/CaseIdQuery'
+        - $ref: '#/components/parameters/PromiseStatusQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of promises, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromisePage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/promises/{promiseId}:
+    parameters:
+      - $ref: '#/components/parameters/PromiseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getPromise
+      summary: Get a promise-to-pay
+      description: >-
+        Returns the promise and its current A§10.2 status.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `PROMISE_NOT_FOUND` (404).
+      tags: [promises]
+      responses:
+        '200':
+          description: The promise.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Promise'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/promises/{promiseId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/PromiseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: cancelPromise
+      summary: Cancel a promise-to-pay
+      description: >-
+        Withdraws an open promise — the customer retracts it, or it was
+        recorded in error. Legal from `PROPOSED` and `ACCEPTED` (A§10.2).
+        `CANCELLED` is deliberately distinct from `BROKEN`: only `BROKEN`
+        counts against the customer in decisioning, so cancelling must never be
+        a way to hide non-payment.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `PROMISE_NOT_FOUND` (404); `PROMISE_TRANSITION_INVALID` (409)
+        from `KEPT`, `BROKEN` or `CANCELLED`.
+      tags: [promises]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The reason the promise is being withdrawn.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelPromiseRequest'
+      responses:
+        '200':
+          description: The promise, now `CANCELLED`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Promise'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Cognito-issued JWT access token, validated by the service itself with
+        deny-by-default scope checks (A§62, A§64). The required scope is named
+        in every operation description; OpenAPI 3.0 cannot attach scopes to an
+        `http` scheme, so the description is normative.
+
+  parameters:
+    ArrangementIdPath:
+      name: arrangementId
+      in: path
+      required: true
+      description: Identifier of the arrangement (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+
+    PromiseIdPath:
+      name: promiseId
+      in: path
+      required: true
+      description: Identifier of the promise-to-pay (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKG7B2P4WQ8XSDT6HJ3KV
+
+    AccountIdQuery:
+      name: accountId
+      in: query
+      required: false
+      description: >-
+        Filter to one account. At least one of `accountId` or `caseId` must be
+        supplied.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-00012345
+
+    CaseIdQuery:
+      name: caseId
+      in: query
+      required: false
+      description: >-
+        Filter to one collection case. At least one of `accountId` or `caseId`
+        must be supplied.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKBHXV37E3S3E28JT97KB
+
+    ArrangementStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: >-
+        Filter to one A§10.3 status. Omit to return every arrangement,
+        including terminal ones.
+      schema:
+        $ref: '#/components/schemas/ArrangementStatus'
+
+    PromiseStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: >-
+        Filter to one A§10.2 status. Omit to return every promise, including
+        terminal ones.
+      schema:
+        $ref: '#/components/schemas/PromiseStatus'
+
+  schemas:
+    # ------------------------------------------------------ vocabularies ----
+    ArrangementStatus:
+      type: string
+      title: ArrangementStatus
+      description: >-
+        Arrangement lifecycle state (A§10.3). `DRAFT` has a generated schedule
+        but is not binding; `ACTIVE` is binding and collectable; `COMPLETED`,
+        `BROKEN` and `CANCELLED` are terminal.
+      enum:
+        - DRAFT
+        - ACTIVE
+        - COMPLETED
+        - BROKEN
+        - CANCELLED
+      example: ACTIVE
+
+    ArrangementFrequency:
+      type: string
+      title: ArrangementFrequency
+      description: >-
+        Spacing between consecutive installments. `MONTHLY` keeps the
+        day-of-month of `firstPaymentDate`, clamped to the last day of shorter
+        months (31 Jan then 28 Feb), so due dates stay strictly increasing.
+      enum:
+        - WEEKLY
+        - FORTNIGHTLY
+        - MONTHLY
+      example: MONTHLY
+
+    InstallmentStatus:
+      type: string
+      title: InstallmentStatus
+      description: >-
+        Installment settlement state. `PENDING` is not yet due or not yet paid;
+        `PAID` has been fully covered by allocated payments; `OVERDUE` is past
+        its due date with an outstanding balance.
+      enum:
+        - PENDING
+        - PAID
+        - OVERDUE
+      example: PENDING
+
+    PromiseStatus:
+      type: string
+      title: PromiseStatus
+      description: >-
+        Promise lifecycle state (A§10.2). `PROPOSED` was offered but not
+        confirmed; `ACCEPTED` is an open customer commitment; `KEPT`, `BROKEN`
+        and `CANCELLED` are terminal.
+      enum:
+        - PROPOSED
+        - ACCEPTED
+        - KEPT
+        - BROKEN
+        - CANCELLED
+      example: ACCEPTED
+
+    # ------------------------------------------------------- arrangements ----
+    CreateArrangementRequest:
+      type: object
+      title: CreateArrangementRequest
+      description: >-
+        The plan the customer agreed to, expressed as a total and a cadence.
+        The service derives the installments; a caller never supplies them, so
+        an invalid schedule cannot be introduced from outside (A§11.5).
+      additionalProperties: false
+      required:
+        - caseId
+        - accountId
+        - totalAmountMinor
+        - currency
+        - numInstallments
+        - frequency
+        - firstPaymentDate
+      properties:
+        caseId:
+          type: string
+          description: >-
+            Collection case this arrangement belongs to (ULID minted by
+            case-service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId:
+          type: string
+          description: >-
+            Account the arrangement settles. Source-system identifier, kept in
+            its source format and never re-minted (contracts/README.md §6).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        totalAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Total the plan collects, in minor units of `currency`. The
+            installments sum to exactly this value.
+          minimum: 1
+          example: 120000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this arrangement.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        numInstallments:
+          type: integer
+          format: int32
+          description: >-
+            Number of installments to generate. The contract bound is a sanity
+            limit; the operational cap is policy and a request beyond it is
+            rejected with 422 `ARRANGEMENT_TERM_EXCEEDS_POLICY`.
+          minimum: 1
+          maximum: 60
+          example: 6
+        frequency:
+          $ref: '#/components/schemas/ArrangementFrequency'
+        firstPaymentDate:
+          type: string
+          format: date
+          description: >-
+            Due date of installment 1, `YYYY-MM-DD`. Must not be in the past —
+            otherwise 400 `ARRANGEMENT_INVALID` with `details[{field:
+            "firstPaymentDate", reason: "DATE_IN_PAST"}]` (A§20).
+          example: '2026-09-01'
+      example:
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId: ACC-00012345
+        totalAmountMinor: 120000
+        currency: EUR
+        numInstallments: 6
+        frequency: MONTHLY
+        firstPaymentDate: '2026-09-01'
+
+    CancelArrangementRequest:
+      type: object
+      title: CancelArrangementRequest
+      description: >-
+        Why the plan is being withdrawn. Recorded on the case activity trail,
+        which is append-only (D§3.6), so the reason is mandatory.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Operator-supplied reason, retained verbatim for audit. Free text so
+            that a genuine reason is never forced into the wrong code; do not
+            put customer PII here.
+          minLength: 1
+          maxLength: 256
+          example: Customer refinanced the balance with a consolidation loan
+      example:
+        reason: Customer refinanced the balance with a consolidation loan
+
+    BreakArrangementRequest:
+      type: object
+      title: BreakArrangementRequest
+      description: Why the arrangement is being recorded as broken.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Operator-supplied reason, retained verbatim for audit. Do not put
+            customer PII here.
+          minLength: 1
+          maxLength: 256
+          example: Customer confirmed on call they cannot continue the plan
+        brokenAt:
+          type: string
+          format: date-time
+          description: >-
+            When the breach actually occurred, RFC3339 UTC. Supply it when
+            replaying a breach detected out-of-band so that analytics attribute
+            it to the right day; omit it and the service uses its own clock.
+          example: '2026-11-02T09:15:00Z'
+      example:
+        reason: Customer confirmed on call they cannot continue the plan
+
+    Installment:
+      type: object
+      title: Installment
+      description: One dated instalment of an arrangement schedule.
+      additionalProperties: false
+      required:
+        - installmentId
+        - seq
+        - dueDate
+        - amountMinor
+        - status
+      properties:
+        installmentId:
+          type: string
+          description: >-
+            Identifier of this installment (ULID, minted by this service).
+            Payment allocations target it by id, so it is stable for the life
+            of the arrangement.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+        seq:
+          type: integer
+          format: int32
+          description: >-
+            Position in the schedule, 1-based and contiguous. Ordering key for
+            the schedule and for allocation (oldest unpaid installment first).
+          minimum: 1
+          example: 1
+        dueDate:
+          type: string
+          format: date
+          description: Date this installment falls due, `YYYY-MM-DD`.
+          example: '2026-09-01'
+        amountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount due, in minor units of the arrangement's `currency`. Always
+            positive; installment 1 carries the integer-division remainder.
+          minimum: 1
+          example: 20000
+        status:
+          $ref: '#/components/schemas/InstallmentStatus'
+        paidAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Total allocated to this installment so far, in minor units.
+            Omitted when nothing has been allocated. Never exceeds
+            `amountMinor`: an overpayment spills to the next installment.
+          minimum: 0
+          example: 20000
+        paidAt:
+          type: string
+          format: date-time
+          description: >-
+            When the installment became fully paid, RFC3339 UTC. Present only
+            while `status` is `PAID`.
+          example: '2026-09-01T11:02:33Z'
+      example:
+        installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+        seq: 1
+        dueDate: '2026-09-01'
+        amountMinor: 20000
+        status: PENDING
+
+    Arrangement:
+      type: object
+      title: Arrangement
+      description: >-
+        A payment arrangement with its full generated schedule. Returned by the
+        create and lifecycle commands and by
+        `GET /v1/arrangements/{arrangementId}`.
+      additionalProperties: false
+      required:
+        - arrangementId
+        - caseId
+        - accountId
+        - status
+        - totalAmountMinor
+        - currency
+        - numInstallments
+        - frequency
+        - firstPaymentDate
+        - installments
+        - createdAt
+        - updatedAt
+      properties:
+        arrangementId:
+          type: string
+          description: Identifier of the arrangement (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        caseId:
+          type: string
+          description: Collection case this arrangement belongs to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId:
+          type: string
+          description: Account the arrangement settles (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        status:
+          $ref: '#/components/schemas/ArrangementStatus'
+        totalAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Total the plan collects, in minor units of `currency`. Equal to the
+            sum of `installments[].amountMinor` (A§11.5).
+          minimum: 1
+          example: 120000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this arrangement.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        numInstallments:
+          type: integer
+          format: int32
+          description: >-
+            Number of installments, equal to `installments.length` and to the
+            highest `seq`.
+          minimum: 1
+          maximum: 60
+          example: 6
+        frequency:
+          $ref: '#/components/schemas/ArrangementFrequency'
+        firstPaymentDate:
+          type: string
+          format: date
+          description: Due date of installment 1, `YYYY-MM-DD`.
+          example: '2026-09-01'
+        installments:
+          type: array
+          description: >-
+            The whole schedule, ordered by `seq` ascending. Generated when the
+            arrangement is created and never regenerated: changing a plan means
+            cancelling this arrangement and creating a new one.
+          items:
+            $ref: '#/components/schemas/Installment'
+          minItems: 1
+          maxItems: 60
+        createdAt:
+          type: string
+          format: date-time
+          description: When the arrangement was created in `DRAFT`, RFC3339 UTC.
+          example: '2026-08-22T10:00:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the arrangement last changed, RFC3339 UTC.
+          example: '2026-08-22T10:04:11Z'
+        activatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When `confirm` moved the arrangement to `ACTIVE`, RFC3339 UTC.
+            Omitted while it is still `DRAFT` or was cancelled from `DRAFT`.
+          example: '2026-08-22T10:04:11Z'
+        closedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the arrangement reached `COMPLETED`, `BROKEN` or `CANCELLED`,
+            RFC3339 UTC. Omitted while it is `DRAFT` or `ACTIVE`.
+          example: '2027-02-01T00:05:00Z'
+        closureReason:
+          type: string
+          description: >-
+            Reason recorded with `cancel` or `break`, verbatim. Omitted for
+            `COMPLETED` (paid in full needs no explanation) and while the
+            arrangement is open.
+          minLength: 1
+          maxLength: 256
+          example: Customer confirmed on call they cannot continue the plan
+      example:
+        arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId: ACC-00012345
+        status: DRAFT
+        totalAmountMinor: 120000
+        currency: EUR
+        numInstallments: 6
+        frequency: MONTHLY
+        firstPaymentDate: '2026-09-01'
+        installments:
+          - installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+            seq: 1
+            dueDate: '2026-09-01'
+            amountMinor: 20000
+            status: PENDING
+          - installmentId: 01M0MEKHFD6S8AWE9VGK5PC7RX
+            seq: 2
+            dueDate: '2026-10-01'
+            amountMinor: 20000
+            status: PENDING
+        createdAt: '2026-08-22T10:00:00Z'
+        updatedAt: '2026-08-22T10:00:00Z'
+
+    ArrangementSummary:
+      type: object
+      title: ArrangementSummary
+      description: >-
+        An arrangement without its installments — the list projection, so that
+        a page of 200 arrangements does not carry thousands of schedule rows.
+        Every field means exactly what it means on `Arrangement`.
+      additionalProperties: false
+      required:
+        - arrangementId
+        - caseId
+        - accountId
+        - status
+        - totalAmountMinor
+        - currency
+        - numInstallments
+        - frequency
+        - firstPaymentDate
+        - createdAt
+        - updatedAt
+      properties:
+        arrangementId:
+          type: string
+          description: Identifier of the arrangement (ULID).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        caseId:
+          type: string
+          description: Collection case this arrangement belongs to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId:
+          type: string
+          description: Account the arrangement settles (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        status:
+          $ref: '#/components/schemas/ArrangementStatus'
+        totalAmountMinor:
+          type: integer
+          format: int64
+          description: Total the plan collects, in minor units of `currency`.
+          minimum: 1
+          example: 120000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        numInstallments:
+          type: integer
+          format: int32
+          description: Number of installments in the schedule.
+          minimum: 1
+          maximum: 60
+          example: 6
+        frequency:
+          $ref: '#/components/schemas/ArrangementFrequency'
+        firstPaymentDate:
+          type: string
+          format: date
+          description: Due date of installment 1, `YYYY-MM-DD`.
+          example: '2026-09-01'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the arrangement was created, RFC3339 UTC.
+          example: '2026-08-22T10:00:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the arrangement last changed, RFC3339 UTC.
+          example: '2026-08-22T10:04:11Z'
+      example:
+        arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId: ACC-00012345
+        status: ACTIVE
+        totalAmountMinor: 120000
+        currency: EUR
+        numInstallments: 6
+        frequency: MONTHLY
+        firstPaymentDate: '2026-09-01'
+        createdAt: '2026-08-22T10:00:00Z'
+        updatedAt: '2026-08-22T10:04:11Z'
+
+    ArrangementPage:
+      type: object
+      title: ArrangementPage
+      description: One page of arrangement summaries (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: Arrangement summaries, newest first.
+          items:
+            $ref: '#/components/schemas/ArrangementSummary'
+          maxItems: 200
+        nextCursor:
+          type: string
+          description: >-
+            Opaque continuation token for the next page, or `null` on the last
+            page. Only valid with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJhIjoiMDFNME1FS0Y0VFE2WDFZQjdSQ04ifQ
+      example:
+        items:
+          - arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+            caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            accountId: ACC-00012345
+            status: ACTIVE
+            totalAmountMinor: 120000
+            currency: EUR
+            numInstallments: 6
+            frequency: MONTHLY
+            firstPaymentDate: '2026-09-01'
+            createdAt: '2026-08-22T10:00:00Z'
+            updatedAt: '2026-08-22T10:04:11Z'
+        nextCursor: null
+
+    ArrangementSchedule:
+      type: object
+      title: ArrangementSchedule
+      description: >-
+        An arrangement's installments with the control totals that make A§11.5
+        checkable without client-side arithmetic.
+      additionalProperties: false
+      required:
+        - arrangementId
+        - currency
+        - scheduledAmountMinor
+        - paidAmountMinor
+        - installments
+      properties:
+        arrangementId:
+          type: string
+          description: Arrangement the schedule belongs to (ULID).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount below.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        scheduledAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of `installments[].amountMinor`, in minor units. Always equal
+            to the arrangement's `totalAmountMinor` — a difference is an
+            A§11.5 violation and a defect.
+          minimum: 1
+          example: 120000
+        paidAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of amounts allocated to these installments so far, in minor
+            units.
+          minimum: 0
+          example: 20000
+        installments:
+          type: array
+          description: The schedule, ordered by `seq` ascending.
+          items:
+            $ref: '#/components/schemas/Installment'
+          minItems: 1
+          maxItems: 60
+      example:
+        arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        currency: EUR
+        scheduledAmountMinor: 120000
+        paidAmountMinor: 20000
+        installments:
+          - installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+            seq: 1
+            dueDate: '2026-09-01'
+            amountMinor: 20000
+            status: PAID
+            paidAmountMinor: 20000
+            paidAt: '2026-09-01T11:02:33Z'
+          - installmentId: 01M0MEKHFD6S8AWE9VGK5PC7RX
+            seq: 2
+            dueDate: '2026-10-01'
+            amountMinor: 20000
+            status: PENDING
+
+    # ----------------------------------------------------------- promises ----
+    CreatePromiseRequest:
+      type: object
+      title: CreatePromiseRequest
+      description: A single dated commitment the customer has given.
+      additionalProperties: false
+      required:
+        - caseId
+        - accountId
+        - amountMinor
+        - currency
+        - dueDate
+      properties:
+        caseId:
+          type: string
+          description: Collection case the promise was given on (ULID).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId:
+          type: string
+          description: Account the promise relates to (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        amountMinor:
+          type: integer
+          format: int64
+          description: Amount promised, in minor units of `currency`.
+          minimum: 1
+          example: 50000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of `amountMinor`.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        dueDate:
+          type: string
+          format: date
+          description: >-
+            Date the customer promised to pay by, `YYYY-MM-DD`. Must not be in
+            the past — otherwise 400 `PROMISE_INVALID` with `details[{field:
+            "dueDate", reason: "DATE_IN_PAST"}]`.
+          example: '2026-09-05'
+      example:
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId: ACC-00012345
+        amountMinor: 50000
+        currency: EUR
+        dueDate: '2026-09-05'
+
+    CancelPromiseRequest:
+      type: object
+      title: CancelPromiseRequest
+      description: >-
+        Why the promise is being withdrawn. Mandatory because `CANCELLED` and
+        `BROKEN` have different consequences in decisioning and the difference
+        has to be auditable.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Operator-supplied reason, retained verbatim for audit. Do not put
+            customer PII here.
+          minLength: 1
+          maxLength: 256
+          example: Recorded against the wrong case during the call
+      example:
+        reason: Recorded against the wrong case during the call
+
+    Promise:
+      type: object
+      title: Promise
+      description: A promise-to-pay and its A§10.2 lifecycle state.
+      additionalProperties: false
+      required:
+        - promiseId
+        - caseId
+        - accountId
+        - amountMinor
+        - currency
+        - dueDate
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        promiseId:
+          type: string
+          description: Identifier of the promise (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKG7B2P4WQ8XSDT6HJ3KV
+        caseId:
+          type: string
+          description: Collection case the promise was given on.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId:
+          type: string
+          description: Account the promise relates to (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        amountMinor:
+          type: integer
+          format: int64
+          description: Amount promised, in minor units of `currency`.
+          minimum: 1
+          example: 50000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of `amountMinor`.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        dueDate:
+          type: string
+          format: date
+          description: Date the customer promised to pay by, `YYYY-MM-DD`.
+          example: '2026-09-05'
+        status:
+          $ref: '#/components/schemas/PromiseStatus'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the promise was recorded, RFC3339 UTC.
+          example: '2026-08-22T10:00:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the promise last changed state, RFC3339 UTC.
+          example: '2026-09-05T09:00:00Z'
+        settledAt:
+          type: string
+          format: date-time
+          description: >-
+            When the promise reached `KEPT`, `BROKEN` or `CANCELLED`, RFC3339
+            UTC. Omitted while it is `PROPOSED` or `ACCEPTED`.
+          example: '2026-09-05T09:00:00Z'
+        settledReason:
+          type: string
+          description: >-
+            Reason recorded with `cancel`, verbatim. Omitted for `KEPT` and
+            `BROKEN`, which are derived from payment facts rather than from an
+            operator's words.
+          minLength: 1
+          maxLength: 256
+          example: Recorded against the wrong case during the call
+        arrangementId:
+          type: string
+          description: >-
+            Arrangement this promise was converted into, when a single
+            commitment became a structured plan. Omitted otherwise.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+      example:
+        promiseId: 01M0MEKG7B2P4WQ8XSDT6HJ3KV
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        accountId: ACC-00012345
+        amountMinor: 50000
+        currency: EUR
+        dueDate: '2026-09-05'
+        status: ACCEPTED
+        createdAt: '2026-08-22T10:00:00Z'
+        updatedAt: '2026-08-22T10:00:00Z'
+
+    PromisePage:
+      type: object
+      title: PromisePage
+      description: One page of promises (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: Promises, newest first.
+          items:
+            $ref: '#/components/schemas/Promise'
+          maxItems: 200
+        nextCursor:
+          type: string
+          description: >-
+            Opaque continuation token for the next page, or `null` on the last
+            page. Only valid with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJhIjoiMDFNME1FS0c3QjJQNFdROFhTRFQifQ
+      example:
+        items:
+          - promiseId: 01M0MEKG7B2P4WQ8XSDT6HJ3KV
+            caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            accountId: ACC-00012345
+            amountMinor: 50000
+            currency: EUR
+            dueDate: '2026-09-05'
+            status: ACCEPTED
+            createdAt: '2026-08-22T10:00:00Z'
+            updatedAt: '2026-08-22T10:00:00Z'
+        nextCursor: null

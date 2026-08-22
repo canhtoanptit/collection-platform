@@ -1,0 +1,939 @@
+# =============================================================================
+# Collections Platform — payment-service API (CON-4)
+# =============================================================================
+# A§5.10 is explicit that this service does NOT replace the bank's
+# authoritative payment system: it records payment *notifications* that arrive
+# from source systems, allocates them across arrangements and debts, and
+# publishes `PaymentReceived` / `PaymentAllocated` (A§23). The money itself
+# moves elsewhere.
+#
+# Payments reach the platform twice by design — intraday via the payment
+# webhook and again in the nightly CDC/file batch (plan §6.2, D§47). The
+# natural key `(sourceSystem, externalPaymentRef)` absorbs that overlap: a
+# duplicate intake is a 200 replay of the original payment, never a second
+# payment and never a second event.
+#
+# Shared shapes come from `./common.v1.yaml`; nothing here restates them.
+#
+# RELEASED FILE — IMMUTABLE once on main. A change a consumer could notice
+# ships as `payment.v2.yaml`. See contracts/README.md.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Payment Service
+  version: 1.0.0
+  description: >-
+    Payment intake, matching and allocation (A§5.10). Two invariants shape the
+    whole contract. **A§11.2 — a payment cannot be allocated more than once:**
+    at any instant exactly one allocation set is `EFFECTIVE` for a payment, and
+    its amounts sum to at most the payment amount. **Append-only audit
+    (D§3.6):** an allocation row is never updated or deleted, so an operator
+    correction writes a new `EFFECTIVE` set and marks the previous rows
+    `SUPERSEDED` — both stay readable forever.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      Paths are relative to the service base URL. Domain services are reached
+      in-cluster and callers resolve the host from configuration, so no
+      absolute host is part of the contract.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: payments
+    description: >-
+      Payment intake from source systems and payment reads, including the
+      per-account payment history.
+  - name: allocations
+    description: >-
+      How a payment was spread across arrangement installments and debts, plus
+      the operator re-allocation command.
+
+paths:
+  /v1/payments:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createPayment
+      summary: Record a payment notification from a source system
+      description: >-
+        Records that a payment happened in a source system and triggers
+        matching and automatic allocation. Callers are the ingestion webhook
+        receiver (intraday) and the canonicalizer for CDC/file batches
+        (nightly) — plan §6.2.
+
+
+        **Natural-key dedup.** `(sourceSystem, externalPaymentRef)` is unique.
+        A first notification returns **201** with the newly minted payment and
+        emits `PaymentReceived`. A notification whose natural key already
+        exists returns **200** with the **original** payment unchanged, emits
+        nothing, and allocates nothing — regardless of `Idempotency-Key`, and
+        even if the rest of the body differs (the source system is the
+        authority on its own payment; a mismatch is reported as a
+        reconciliation exception rather than silently overwriting). This is why
+        the same payment can arrive by webhook and again by batch without
+        double-counting.
+
+
+        `Idempotency-Key` (A§21) is required and solves the *different*
+        problem: a caller retrying a request whose response it never saw. Same
+        key + same body replays the stored response; same key + different body
+        is 422.
+
+
+        Scope: `payments:write`.
+
+
+        Errors — `PAYMENT_INVALID` (400) with `details[]` per field, e.g.
+        `[{ "field": "paidAt", "reason": "DATE_IN_FUTURE" }]`;
+        `ACCOUNT_NOT_FOUND` (404) when `accountId` is unknown to the platform;
+        `REQUEST_IN_PROGRESS` (409) and `IDEMPOTENCY_KEY_REUSED` (422) per
+        A§21.
+      tags: [payments]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The payment as the source system reported it.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '200':
+          description: >-
+            The natural key `(sourceSystem, externalPaymentRef)` was already
+            known: this is the **original** payment, unchanged. No event, no
+            allocation, no second side effect.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '201':
+          description: >-
+            Payment recorded for the first time. `PaymentReceived` is emitted
+            and automatic allocation runs.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/payments/{paymentId}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getPayment
+      summary: Get a payment
+      description: >-
+        Returns the payment as recorded, with its allocated and unallocated
+        totals.
+
+
+        Scope: `payments:read`.
+
+
+        Errors — `PAYMENT_NOT_FOUND` (404).
+      tags: [payments]
+      responses:
+        '200':
+          description: The payment.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/payments/{paymentId}/allocations:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getPaymentAllocations
+      summary: Get a payment's full allocation trail
+      description: >-
+        Returns **every** allocation ever written for the payment, ordered by
+        `allocatedAt` ascending — `EFFECTIVE` rows and `SUPERSEDED` ones
+        together, because the audit trail is the point (D§3.6). The totals on
+        the envelope count `EFFECTIVE` rows only, so
+        `allocatedAmountMinor + unallocatedAmountMinor == payment.amountMinor`
+        always holds.
+
+
+        Scope: `payments:read`.
+
+
+        Errors — `PAYMENT_NOT_FOUND` (404).
+      tags: [allocations]
+      responses:
+        '200':
+          description: >-
+            The allocation trail with effective totals. `allocations` is empty
+            only while automatic allocation has not yet run.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAllocations'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+    post:
+      operationId: reallocatePayment
+      summary: Re-allocate a payment (operator correction)
+      description: >-
+        Replaces the payment's effective allocation with the set supplied here.
+        This is the operator escape hatch for a payment the automatic allocator
+        put in the wrong place — a misapplied arrangement installment, a
+        payment that belonged to a different debt component.
+
+
+        **Full-audit semantics (D§3.6, CLAUDE.md hard rule 4).** Nothing is
+        updated and nothing is deleted. The command appends the new
+        `allocations[]` as `EFFECTIVE` rows with `origin: MANUAL` and stamps
+        every previously `EFFECTIVE` row `SUPERSEDED` with a `supersededAt` and
+        a `supersededByAllocationId`, so
+        `GET /v1/payments/{paymentId}/allocations` still shows the original
+        automatic allocation, who overrode it, when and why. `reason` is
+        mandatory for the same reason. Downstream effects (installment
+        statuses, debt balances) are recomputed from the new effective set and
+        a fresh `PaymentAllocated` is emitted.
+
+
+        A§11.2 — "a payment cannot be allocated more than once" — is preserved
+        exactly: the sum over `EFFECTIVE` rows never exceeds the payment
+        amount, and superseding is a replacement, not a second allocation.
+
+
+        Scope: `payments:admin` — deliberately narrower than every other
+        operation in this spec, because this endpoint can move recognised
+        recovery between accounts. Requires `Idempotency-Key`.
+
+
+        Errors — `PAYMENT_ALLOCATION_INVALID` (400) with `details[]` per entry,
+        e.g. `[{ "field": "allocations[1].installmentId", "reason": "REQUIRED" }]`;
+        `PAYMENT_NOT_FOUND` (404); `ALLOCATION_TARGET_NOT_FOUND` (404) for an
+        unknown `arrangementId`, `installmentId` or `debtId`;
+        `REQUEST_IN_PROGRESS` (409); `ALLOCATION_EXCEEDS_PAYMENT` (422) when
+        the entries sum above `amountMinor`; `ALLOCATION_TARGET_INVALID` (422)
+        when a target belongs to a different account, or `installmentId` is not
+        part of `arrangementId`; `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [allocations]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The allocation set that becomes effective, and why.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReallocatePaymentRequest'
+      responses:
+        '200':
+          description: >-
+            The full allocation trail after the correction: the new
+            `EFFECTIVE` rows plus every `SUPERSEDED` row that preceded them.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAllocations'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/accounts/{accountId}/payments:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: listAccountPayments
+      summary: List an account's payments
+      description: >-
+        Paginated payment history for one account, most recently paid first
+        (`paidAt` descending, `paymentId` descending as tie-break). Owned by
+        payment-service even though the URL nests under `/v1/accounts`: the
+        service that owns the data owns the path (A§7.3, contracts/README.md
+        path-ownership matrix).
+
+
+        Optional `paidFrom` / `paidTo` narrow the window on `paidAt`; both are
+        inclusive dates.
+
+
+        Scope: `payments:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for `paidFrom` after `paidTo` or a
+        `cursor` that does not belong to these filter arguments;
+        `ACCOUNT_NOT_FOUND` (404).
+      tags: [payments]
+      parameters:
+        - $ref: '#/components/parameters/PaidFromQuery'
+        - $ref: '#/components/parameters/PaidToQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of payments, most recently paid first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentPage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Cognito-issued JWT access token, validated by the service itself with
+        deny-by-default scope checks (A§62, A§64). The required scope is named
+        in every operation description; OpenAPI 3.0 cannot attach scopes to an
+        `http` scheme, so the description is normative.
+
+  parameters:
+    PaymentIdPath:
+      name: paymentId
+      in: path
+      required: true
+      description: Identifier of the payment (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        Account whose payments are being listed. Source-system identifier, kept
+        in its source format and never re-minted (contracts/README.md §6).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-00012345
+
+    PaidFromQuery:
+      name: paidFrom
+      in: query
+      required: false
+      description: >-
+        Earliest `paidAt` date to include, `YYYY-MM-DD`, inclusive. Omit for no
+        lower bound.
+      schema:
+        type: string
+        format: date
+        example: '2026-07-01'
+
+    PaidToQuery:
+      name: paidTo
+      in: query
+      required: false
+      description: >-
+        Latest `paidAt` date to include, `YYYY-MM-DD`, inclusive. Omit for no
+        upper bound.
+      schema:
+        type: string
+        format: date
+        example: '2026-08-31'
+
+  schemas:
+    # ------------------------------------------------------ vocabularies ----
+    AllocationTarget:
+      type: string
+      title: AllocationTarget
+      description: >-
+        What an allocation was applied to. `ARRANGEMENT_INSTALLMENT` requires
+        `arrangementId` and `installmentId`; `DEBT` requires `debtId`. Matches
+        the `PaymentAllocated` payload vocabulary (plan CON-2).
+      enum:
+        - ARRANGEMENT_INSTALLMENT
+        - DEBT
+      example: ARRANGEMENT_INSTALLMENT
+
+    AllocationOrigin:
+      type: string
+      title: AllocationOrigin
+      description: >-
+        Who wrote the allocation. `AUTOMATIC` is the allocator applying the
+        platform's documented waterfall; `MANUAL` is an operator correction
+        through `POST /v1/payments/{paymentId}/allocations`.
+      enum:
+        - AUTOMATIC
+        - MANUAL
+      example: AUTOMATIC
+
+    AllocationStatus:
+      type: string
+      title: AllocationStatus
+      description: >-
+        Whether the row still counts. `EFFECTIVE` rows determine installment
+        statuses, debt balances and recognised recovery; `SUPERSEDED` rows are
+        retained purely as audit history and are never counted twice (A§11.2).
+      enum:
+        - EFFECTIVE
+        - SUPERSEDED
+      example: EFFECTIVE
+
+    # -------------------------------------------------------- payment ------
+    CreatePaymentRequest:
+      type: object
+      title: CreatePaymentRequest
+      description: >-
+        A payment as the source system reported it. Every field except the
+        platform's own `paymentId` comes from the source; the platform never
+        invents or adjusts payment facts.
+      additionalProperties: false
+      required:
+        - sourceSystem
+        - externalPaymentRef
+        - accountId
+        - amountMinor
+        - currency
+        - paidAt
+        - channel
+      properties:
+        sourceSystem:
+          type: string
+          description: >-
+            Registered code of the system that reported the payment, e.g.
+            `COREBANK`. First half of the `(sourceSystem,
+            externalPaymentRef)` natural key, so it must be stable across the
+            webhook and batch paths for the same underlying system —
+            otherwise dedup cannot work.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: COREBANK
+        externalPaymentRef:
+          type: string
+          description: >-
+            The source system's own reference for this payment. Kept verbatim,
+            never re-minted (contracts/README.md §6). Second half of the
+            natural key.
+          minLength: 1
+          maxLength: 64
+          example: CB-PAY-2026-0008812
+        accountId:
+          type: string
+          description: >-
+            Account the payment settles. Source-system identifier, kept in its
+            source format.
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        amountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount paid, in minor units of `currency`. Positive: reversals and
+            refunds are separate source events, not negative payments.
+          minimum: 1
+          example: 20000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of `amountMinor`.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        paidAt:
+          type: string
+          format: date-time
+          description: >-
+            When the customer paid, per the source system, RFC3339 UTC. This is
+            the business date analytics attribute the payment to — not the time
+            the notification reached the platform. A value in the future is
+            rejected.
+          example: '2026-09-01T11:02:33Z'
+        channel:
+          type: string
+          description: >-
+            How the payment was made, as coded by the source system, e.g.
+            `DIRECT_DEBIT`, `CARD`, `BANK_TRANSFER`, `CASH`, `AGENCY`. Left as
+            a constrained string rather than a closed enum because the source
+            systems own this vocabulary: a new channel appearing in corebank
+            must not require a new contract version.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: DIRECT_DEBIT
+      example:
+        sourceSystem: COREBANK
+        externalPaymentRef: CB-PAY-2026-0008812
+        accountId: ACC-00012345
+        amountMinor: 20000
+        currency: EUR
+        paidAt: '2026-09-01T11:02:33Z'
+        channel: DIRECT_DEBIT
+
+    Payment:
+      type: object
+      title: Payment
+      description: >-
+        A recorded payment notification with its effective allocation totals.
+      additionalProperties: false
+      required:
+        - paymentId
+        - sourceSystem
+        - externalPaymentRef
+        - accountId
+        - amountMinor
+        - currency
+        - paidAt
+        - channel
+        - receivedAt
+        - allocatedAmountMinor
+        - unallocatedAmountMinor
+      properties:
+        paymentId:
+          type: string
+          description: >-
+            Identifier of the payment (ULID, minted by this service on first
+            intake and stable for every later replay of the same natural key).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        sourceSystem:
+          type: string
+          description: Code of the system that reported the payment.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: COREBANK
+        externalPaymentRef:
+          type: string
+          description: The source system's own reference for this payment, verbatim.
+          minLength: 1
+          maxLength: 64
+          example: CB-PAY-2026-0008812
+        accountId:
+          type: string
+          description: Account the payment settles (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        amountMinor:
+          type: integer
+          format: int64
+          description: Amount paid, in minor units of `currency`.
+          minimum: 1
+          example: 20000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this payment.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        paidAt:
+          type: string
+          format: date-time
+          description: When the customer paid, per the source system, RFC3339 UTC.
+          example: '2026-09-01T11:02:33Z'
+        channel:
+          type: string
+          description: How the payment was made, as coded by the source system.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: DIRECT_DEBIT
+        receivedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the platform recorded the notification, RFC3339 UTC. The gap
+            to `paidAt` is intake latency; reconciliation reports on it.
+          example: '2026-09-01T11:04:02Z'
+        allocatedAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of the `EFFECTIVE` allocations, in minor units. Zero until
+            allocation has run.
+          minimum: 0
+          example: 20000
+        unallocatedAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            `amountMinor - allocatedAmountMinor`, in minor units. Non-zero
+            means money has arrived that the platform could not attribute — an
+            operations queue, not an error.
+          minimum: 0
+          example: 0
+      example:
+        paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        sourceSystem: COREBANK
+        externalPaymentRef: CB-PAY-2026-0008812
+        accountId: ACC-00012345
+        amountMinor: 20000
+        currency: EUR
+        paidAt: '2026-09-01T11:02:33Z'
+        channel: DIRECT_DEBIT
+        receivedAt: '2026-09-01T11:04:02Z'
+        allocatedAmountMinor: 20000
+        unallocatedAmountMinor: 0
+
+    PaymentPage:
+      type: object
+      title: PaymentPage
+      description: One page of payments (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: Payments, most recently paid first.
+          items:
+            $ref: '#/components/schemas/Payment'
+          maxItems: 200
+        nextCursor:
+          type: string
+          description: >-
+            Opaque continuation token for the next page, or `null` on the last
+            page. Only valid with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJwIjoiMDFNME1FS001Sjh0MlhDVjZCRlIifQ
+      example:
+        items:
+          - paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+            sourceSystem: COREBANK
+            externalPaymentRef: CB-PAY-2026-0008812
+            accountId: ACC-00012345
+            amountMinor: 20000
+            currency: EUR
+            paidAt: '2026-09-01T11:02:33Z'
+            channel: DIRECT_DEBIT
+            receivedAt: '2026-09-01T11:04:02Z'
+            allocatedAmountMinor: 20000
+            unallocatedAmountMinor: 0
+        nextCursor: null
+
+    # ----------------------------------------------------- allocations ------
+    AllocationEntry:
+      type: object
+      title: AllocationEntry
+      description: >-
+        One requested allocation. Exactly the fields the caller controls; the
+        service adds the identity and audit fields.
+      additionalProperties: false
+      required:
+        - target
+        - amountMinor
+      properties:
+        target:
+          $ref: '#/components/schemas/AllocationTarget'
+        arrangementId:
+          type: string
+          description: >-
+            Arrangement the installment belongs to. Required when `target` is
+            `ARRANGEMENT_INSTALLMENT`, forbidden otherwise.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        installmentId:
+          type: string
+          description: >-
+            Installment to credit. Required when `target` is
+            `ARRANGEMENT_INSTALLMENT`, forbidden otherwise, and must belong to
+            `arrangementId`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+        debtId:
+          type: string
+          description: >-
+            Debt to credit. Required when `target` is `DEBT`, forbidden
+            otherwise. Identifier as published by debt-service, which takes it
+            from the source system, so it is not a ULID.
+          minLength: 1
+          maxLength: 64
+          example: DBT-00012345-01
+        amountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount to apply to this target, in minor units of the payment's
+            currency. Positive; the entries must sum to at most the payment
+            amount.
+          minimum: 1
+          example: 20000
+      example:
+        target: ARRANGEMENT_INSTALLMENT
+        arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+        amountMinor: 20000
+
+    ReallocatePaymentRequest:
+      type: object
+      title: ReallocatePaymentRequest
+      description: >-
+        The allocation set that becomes `EFFECTIVE`, replacing whatever is
+        effective now. Supply the complete intended set: this is a replacement,
+        not a delta, so an omitted target is dropped from the effective set
+        (its old row survives as `SUPERSEDED`).
+      additionalProperties: false
+      required:
+        - allocations
+        - reason
+      properties:
+        allocations:
+          type: array
+          description: >-
+            The complete intended allocation. May be empty to un-allocate the
+            payment entirely — a legitimate correction when money turns out to
+            belong to a different account and must go back to the
+            unattributed queue.
+          items:
+            $ref: '#/components/schemas/AllocationEntry'
+          maxItems: 100
+        reason:
+          type: string
+          description: >-
+            Why the automatic allocation is being overridden, retained verbatim
+            on every row this command writes. Mandatory: an override with no
+            recorded reason is not auditable. Do not put customer PII here.
+          minLength: 1
+          maxLength: 256
+          example: Payment belonged to installment 3, not installment 2 (customer call CX-88123)
+      example:
+        allocations:
+          - target: ARRANGEMENT_INSTALLMENT
+            arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+            installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+            amountMinor: 20000
+        reason: Payment belonged to installment 3, not installment 2 (customer call CX-88123)
+
+    Allocation:
+      type: object
+      title: Allocation
+      description: >-
+        One allocation row. Immutable once written: a correction appends new
+        rows and marks these `SUPERSEDED` (D§3.6).
+      additionalProperties: false
+      required:
+        - allocationId
+        - paymentId
+        - target
+        - amountMinor
+        - currency
+        - origin
+        - status
+        - allocatedAt
+      properties:
+        allocationId:
+          type: string
+          description: Identifier of this allocation row (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKN9P3V6ZBD4XSK8TJ2QR
+        paymentId:
+          type: string
+          description: Payment this row allocates from.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        target:
+          $ref: '#/components/schemas/AllocationTarget'
+        arrangementId:
+          type: string
+          description: >-
+            Arrangement the credited installment belongs to. Present only when
+            `target` is `ARRANGEMENT_INSTALLMENT`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        installmentId:
+          type: string
+          description: >-
+            Installment credited. Present only when `target` is
+            `ARRANGEMENT_INSTALLMENT`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+        debtId:
+          type: string
+          description: Debt credited. Present only when `target` is `DEBT`.
+          minLength: 1
+          maxLength: 64
+          example: DBT-00012345-01
+        amountMinor:
+          type: integer
+          format: int64
+          description: Amount applied to the target, in minor units of `currency`.
+          minimum: 1
+          example: 20000
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency, always the payment's currency — the
+            platform never converts.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        origin:
+          $ref: '#/components/schemas/AllocationOrigin'
+        status:
+          $ref: '#/components/schemas/AllocationStatus'
+        allocatedAt:
+          type: string
+          format: date-time
+          description: When this row was written, RFC3339 UTC.
+          example: '2026-09-01T11:04:03Z'
+        reason:
+          type: string
+          description: >-
+            The operator's reason, copied from the re-allocation command.
+            Present only when `origin` is `MANUAL`.
+          minLength: 1
+          maxLength: 256
+          example: Payment belonged to installment 3, not installment 2 (customer call CX-88123)
+        supersededAt:
+          type: string
+          format: date-time
+          description: >-
+            When this row stopped being effective, RFC3339 UTC. Present only
+            when `status` is `SUPERSEDED`.
+          example: '2026-09-03T14:22:10Z'
+        supersededByAllocationId:
+          type: string
+          description: >-
+            The `allocationId` of the row that replaced this one, or of the
+            first row of the replacing set when the shape changed. Present only
+            when `status` is `SUPERSEDED`; absent when the correction left the
+            payment un-allocated.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKP2R7W9CFE5YTM6VK3XS
+      example:
+        allocationId: 01M0MEKN9P3V6ZBD4XSK8TJ2QR
+        paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        target: ARRANGEMENT_INSTALLMENT
+        arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+        installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+        amountMinor: 20000
+        currency: EUR
+        origin: AUTOMATIC
+        status: EFFECTIVE
+        allocatedAt: '2026-09-01T11:04:03Z'
+
+    PaymentAllocations:
+      type: object
+      title: PaymentAllocations
+      description: >-
+        A payment's complete allocation trail plus the totals derived from its
+        `EFFECTIVE` rows.
+      additionalProperties: false
+      required:
+        - paymentId
+        - currency
+        - amountMinor
+        - allocatedAmountMinor
+        - unallocatedAmountMinor
+        - allocations
+      properties:
+        paymentId:
+          type: string
+          description: Payment the trail belongs to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount below.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        amountMinor:
+          type: integer
+          format: int64
+          description: The payment amount, in minor units, repeated here so the trail reconciles standalone.
+          minimum: 1
+          example: 20000
+        allocatedAmountMinor:
+          type: integer
+          format: int64
+          description: Sum over `EFFECTIVE` rows, in minor units.
+          minimum: 0
+          example: 20000
+        unallocatedAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            `amountMinor - allocatedAmountMinor`, in minor units. The identity
+            always holds: `SUPERSEDED` rows never contribute.
+          minimum: 0
+          example: 0
+        allocations:
+          type: array
+          description: >-
+            Every allocation ever written for this payment, `EFFECTIVE` and
+            `SUPERSEDED` alike, ordered by `allocatedAt` ascending.
+          items:
+            $ref: '#/components/schemas/Allocation'
+          maxItems: 1000
+      example:
+        paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        currency: EUR
+        amountMinor: 20000
+        allocatedAmountMinor: 20000
+        unallocatedAmountMinor: 0
+        allocations:
+          - allocationId: 01M0MEKN9P3V6ZBD4XSK8TJ2QR
+            paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+            target: ARRANGEMENT_INSTALLMENT
+            arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+            installmentId: 01M0MEKH2C5R7ZVD8TFJ4NB6QW
+            amountMinor: 20000
+            currency: EUR
+            origin: AUTOMATIC
+            status: SUPERSEDED
+            allocatedAt: '2026-09-01T11:04:03Z'
+            supersededAt: '2026-09-03T14:22:10Z'
+            supersededByAllocationId: 01M0MEKP2R7W9CFE5YTM6VK3XS
+          - allocationId: 01M0MEKP2R7W9CFE5YTM6VK3XS
+            paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+            target: ARRANGEMENT_INSTALLMENT
+            arrangementId: 01M0MEKF4TQ6X1YB7RCN9GZ2AH
+            installmentId: 01M0MEKQ4S8X1DGF6ZVN7WK4YT
+            amountMinor: 20000
+            currency: EUR
+            origin: MANUAL
+            status: EFFECTIVE
+            allocatedAt: '2026-09-03T14:22:10Z'
+            reason: Payment belonged to installment 3, not installment 2 (customer call CX-88123)

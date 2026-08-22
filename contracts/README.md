@@ -240,6 +240,8 @@ this table before adding a path to their spec.
 | `GET /v1/customers/{customerId}/contacts` | **contact-service** | `contact.v1.yaml` |
 | `GET /v1/accounts/{accountId}`, `…/balance`, `…/history` | account-service | `account.v1.yaml` |
 | `GET /v1/accounts/{accountId}/debt` | **debt-service** | `debt.v1.yaml` |
+| `GET /v1/accounts/{accountId}/payments` | **payment-service** | `payment.v1.yaml` |
+| `GET /v1/accounts/{accountId}/recoveries` | **recovery-service** | `recovery.v1.yaml` |
 | `GET /v1/accounts/{accountId}/delinquency*`, `GET\|PUT /v1/delinquency/bucket-configs` | **delinquency-service** | `delinquency.v1.yaml` |
 | `/v1/cases`, `/v1/cases/{caseId}`, `…/assign\|suspend\|resume\|close\|reopen\|activities` | case-service | `case.v1.yaml` |
 | `GET /v1/cases/{caseId}/legal` | **legal-service** | `legal.v1.yaml` |

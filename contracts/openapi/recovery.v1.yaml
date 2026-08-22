@@ -1,0 +1,837 @@
+# =============================================================================
+# Collections Platform — recovery-service API (CON-4)
+# =============================================================================
+# A§5.11 / D§11. recovery-service answers "how much did we actually get back,
+# from which route, at what cost" — the attribution layer over payments,
+# agency remittances and legal enforcement receipts. It emits
+# `RecoveryRecorded` (A§23).
+#
+# Most recovery records are created automatically from `PaymentAllocated`;
+# `POST /v1/recoveries` is the manual path for money the allocation chain
+# cannot see (a direct settlement, an agency remittance reconciled by hand).
+#
+# Shared shapes come from `./common.v1.yaml`; nothing here restates them.
+#
+# RELEASED FILE — IMMUTABLE once on main. A change a consumer could notice
+# ships as `recovery.v2.yaml`. See contracts/README.md.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Recovery Service
+  version: 1.0.0
+  description: >-
+    Recovery records and recovery performance metrics (A§5.11, D§11). Every
+    recovery carries its attribution — which route produced it, which payment
+    or placement or legal case it came from — because "we recovered X" is only
+    a useful number when you can say who recovered it and what it cost. Rates
+    are reported alongside the integer totals they were computed from, so a
+    caller can reconcile them rather than trust them (D§38).
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      Paths are relative to the service base URL. Domain services are reached
+      in-cluster and callers resolve the host from configuration, so no
+      absolute host is part of the contract.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: recoveries
+    description: >-
+      Individual recovery records: what came back, from which route, at what
+      cost.
+  - name: recovery-metrics
+    description: >-
+      Aggregated recovery performance for a period — the D§11 metric set.
+
+paths:
+  /v1/recoveries:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createRecovery
+      summary: Record a recovery manually
+      description: >-
+        Records money recovered that the automatic attribution chain cannot
+        derive from a `PaymentAllocated` event: a direct settlement negotiated
+        off-platform, an agency remittance reconciled by hand, proceeds of legal
+        enforcement. Emits `RecoveryRecorded`.
+
+
+        Attribution is mandatory in substance, not just in form: `source`
+        `AGENCY` requires `placementId`, `source` `LEGAL` requires
+        `legalCaseId`, and any recovery derived from a platform payment should
+        carry `paymentId`. Without those links, agency performance and legal
+        outcome reporting cannot be produced, and the recovery is
+        double-countable against the automatic record.
+
+
+        Scope: `recovery:write` — deliberately separate from `cases:write`,
+        because recording recovery moves reported performance numbers and is an
+        operations-and-finance action rather than a collector action. Requires
+        `Idempotency-Key`.
+
+
+        Errors — `RECOVERY_INVALID` (400) with `details[]` per field, e.g.
+        `[{ "field": "placementId", "reason": "REQUIRED" }]` when `source` is
+        `AGENCY`; `ACCOUNT_NOT_FOUND` / `CASE_NOT_FOUND` /
+        `PAYMENT_NOT_FOUND` / `PLACEMENT_NOT_FOUND` /
+        `LEGAL_CASE_NOT_FOUND` (404); `REQUEST_IN_PROGRESS` (409);
+        `RECOVERY_ALREADY_RECORDED_FOR_PAYMENT` (409) when `paymentId` already
+        has a recovery record — the guard against counting the same money
+        twice; `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [recoveries]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The recovery to record, with its attribution.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecoveryRequest'
+      responses:
+        '201':
+          description: >-
+            Recovery recorded. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/recoveries/{recoveryId}:
+    parameters:
+      - $ref: '#/components/parameters/RecoveryIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getRecovery
+      summary: Get a recovery record
+      description: >-
+        Returns the recovery with its attribution links and recognition status.
+
+
+        Scope: `recovery:read`.
+
+
+        Errors — `RECOVERY_NOT_FOUND` (404).
+      tags: [recoveries]
+      responses:
+        '200':
+          description: The recovery record.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/accounts/{accountId}/recoveries:
+    parameters:
+      - $ref: '#/components/parameters/AccountIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: listAccountRecoveries
+      summary: List an account's recoveries
+      description: >-
+        Paginated recovery history for one account, newest first (`recoveryId`
+        descending). Owned by recovery-service even though the URL nests under
+        `/v1/accounts`: the service that owns the data owns the path (A§7.3,
+        contracts/README.md path-ownership matrix).
+
+
+        `REVERSED` records are included — a reversal that vanished from the
+        history would make the account's recovery total unexplainable. Filter
+        with `status` if you only want recognised money.
+
+
+        Scope: `recovery:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for an unknown `status` or `source`
+        value, or a `cursor` that does not belong to these filter arguments;
+        `ACCOUNT_NOT_FOUND` (404).
+      tags: [recoveries]
+      parameters:
+        - $ref: '#/components/parameters/RecoveryStatusQuery'
+        - $ref: '#/components/parameters/RecoverySourceQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of recovery records, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryPage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/recovery-metrics:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getRecoveryMetrics
+      summary: Get recovery performance metrics for a period
+      description: >-
+        The D§11 metric set for a closed date window, optionally narrowed to
+        one product. `from` and `to` are both required and inclusive: an
+        unbounded metric window is not part of the contract, because the answer
+        would change every night and could not be reconciled against a
+        published figure.
+
+
+        Every rate ships with the integers it was computed from
+        (`openingBalanceMinor` for `recoveryRate`, `casesEnteringCount` and
+        `casesCuredCount` for `cureRate`), so a caller reconciles rather than
+        trusts (D§38). `netRecoveryMinor` is `grossRecoveryMinor` less
+        `costToCollectMinor`; only `RECOGNISED` recoveries count, so a reversal
+        inside the window reduces both.
+
+
+        This is the operational read. The authoritative reporting figures come
+        from the Snowflake marts (`fct_payment`, `fct_collection_case`); the two
+        agree once the day is reconciled, and a divergence is a reconciliation
+        exception, not a rounding difference.
+
+
+        Scope: `recovery:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for a missing `from`/`to`, `from`
+        after `to`, a window longer than 366 days, or an unknown
+        `productCode`.
+      tags: [recovery-metrics]
+      parameters:
+        - $ref: '#/components/parameters/FromQuery'
+        - $ref: '#/components/parameters/ToQuery'
+        - $ref: '#/components/parameters/ProductCodeQuery'
+      responses:
+        '200':
+          description: >-
+            Recovery metrics for the requested window. All-zero totals are a
+            valid answer for a window with no activity, not an error.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryMetrics'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Cognito-issued JWT access token, validated by the service itself with
+        deny-by-default scope checks (A§62, A§64). The required scope is named
+        in every operation description; OpenAPI 3.0 cannot attach scopes to an
+        `http` scheme, so the description is normative.
+
+  parameters:
+    RecoveryIdPath:
+      name: recoveryId
+      in: path
+      required: true
+      description: Identifier of the recovery record (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKT7W2A4GKJ8ZYR6BP9DQ
+
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        Account whose recoveries are being listed. Source-system identifier,
+        kept in its source format and never re-minted (contracts/README.md §6).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: ACC-00012345
+
+    RecoveryStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: Filter to one recognition status. Omit for all statuses.
+      schema:
+        $ref: '#/components/schemas/RecoveryStatus'
+
+    RecoverySourceQuery:
+      name: source
+      in: query
+      required: false
+      description: Filter to one attribution source. Omit for all sources.
+      schema:
+        $ref: '#/components/schemas/RecoverySource'
+
+    FromQuery:
+      name: from
+      in: query
+      required: true
+      description: >-
+        First date of the metric window, `YYYY-MM-DD`, inclusive. Compared
+        against `recoveredAt`.
+      schema:
+        type: string
+        format: date
+        example: '2026-07-01'
+
+    ToQuery:
+      name: to
+      in: query
+      required: true
+      description: >-
+        Last date of the metric window, `YYYY-MM-DD`, inclusive. Must not be
+        earlier than `from`, and the window must not exceed 366 days.
+      schema:
+        type: string
+        format: date
+        example: '2026-07-31'
+
+    ProductCodeQuery:
+      name: productCode
+      in: query
+      required: false
+      description: >-
+        Narrow the metrics to one product, using the product code as published
+        by account-service. Omit for the whole portfolio.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 32
+        example: PL_UNSECURED
+
+  schemas:
+    # ------------------------------------------------------ vocabularies ----
+    RecoverySource:
+      type: string
+      title: RecoverySource
+      description: >-
+        Which collection route produced the money — the attribution that makes
+        agency and legal performance measurable (A§5.11, A§5.12). `INTERNAL` is
+        the bank's own collections activity, including arrangement and promise
+        payments. `OTHER` is for money that genuinely belongs to none of the
+        routes (an insurance payout, a third-party settlement) and must never be
+        used to avoid choosing.
+      enum:
+        - INTERNAL
+        - AGENCY
+        - LEGAL
+        - OTHER
+      example: INTERNAL
+
+    RecoveryStatus:
+      type: string
+      title: RecoveryStatus
+      description: >-
+        Recognition state. `PROVISIONAL` is recorded but not yet reconciled
+        against the source system, so it is excluded from reported metrics;
+        `RECOGNISED` has been reconciled and counts; `REVERSED` means the
+        underlying payment was reversed or the attribution was withdrawn, and
+        the record is retained rather than deleted so the change is auditable
+        (D§3.6).
+      enum:
+        - PROVISIONAL
+        - RECOGNISED
+        - REVERSED
+      example: RECOGNISED
+
+    # --------------------------------------------------------- recovery -----
+    CreateRecoveryRequest:
+      type: object
+      title: CreateRecoveryRequest
+      description: >-
+        A recovery to record manually, with the links that make it
+        attributable.
+      additionalProperties: false
+      required:
+        - accountId
+        - amountMinor
+        - currency
+        - recoveredAt
+        - source
+      properties:
+        accountId:
+          type: string
+          description: >-
+            Account the money came back on. Source-system identifier, kept in
+            its source format.
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: >-
+            Collection case the recovery is attributed to (ULID minted by
+            case-service). Omitted when the account had no open case — a
+            customer who settled before a case was raised still produced
+            recovery.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        amountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Gross amount recovered, in minor units of `currency`, before cost.
+          minimum: 1
+          example: 50000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this record.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        costMinor:
+          type: integer
+          format: int64
+          description: >-
+            Direct cost of obtaining this recovery, in minor units — agency
+            commission, court and enforcement fees. Omitted when there was no
+            attributable direct cost; zero and omitted mean the same thing, and
+            omitting is preferred (contracts/README.md: optional fields are
+            omitted, never null).
+          minimum: 0
+          example: 7500
+        recoveredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the money was recovered, RFC3339 UTC. This is the date the
+            metric window is evaluated against, so it must be the business
+            event date, not the time the record was keyed in. Must not be in
+            the future.
+          example: '2026-07-15T08:00:00Z'
+        source:
+          $ref: '#/components/schemas/RecoverySource'
+        channel:
+          type: string
+          description: >-
+            How the money arrived, as coded by the source system, e.g.
+            `DIRECT_DEBIT`, `BANK_TRANSFER`, `AGENCY`. Mirrors the payment's
+            channel and uses the same open vocabulary, because the source
+            systems own it. Distinct from `source`, which is attribution rather
+            than mechanism.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: BANK_TRANSFER
+        paymentId:
+          type: string
+          description: >-
+            Payment this recovery is derived from (ULID minted by
+            payment-service). Supply it whenever the money came in through a
+            platform-recorded payment: it is the guard against recording the
+            same money twice, and a second recovery for the same `paymentId` is
+            rejected with 409.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        placementId:
+          type: string
+          description: >-
+            Agency placement that produced the recovery (ULID minted by
+            agency-service). Required when `source` is `AGENCY`, forbidden
+            otherwise — agency performance is computed from this link.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        legalCaseId:
+          type: string
+          description: >-
+            Legal case that produced the recovery (ULID minted by
+            legal-service). Required when `source` is `LEGAL`, forbidden
+            otherwise.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        productCode:
+          type: string
+          description: >-
+            Product of the account at the time of recovery, as published by
+            account-service. Denormalised onto the record so that
+            `GET /v1/recovery-metrics?productCode=` stays answerable after the
+            account's product changes.
+          minLength: 1
+          maxLength: 32
+          example: PL_UNSECURED
+        notes:
+          type: string
+          description: >-
+            Free text explaining a manual record — why it was keyed by hand,
+            which remittance file it came from. Do not put customer PII here.
+          minLength: 1
+          maxLength: 1000
+          example: Agency remittance 2026-07 line 44, reconciled against statement
+      example:
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        amountMinor: 50000
+        currency: EUR
+        costMinor: 7500
+        recoveredAt: '2026-07-15T08:00:00Z'
+        source: AGENCY
+        channel: BANK_TRANSFER
+        placementId: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        productCode: PL_UNSECURED
+        notes: Agency remittance 2026-07 line 44, reconciled against statement
+
+    Recovery:
+      type: object
+      title: Recovery
+      description: A recorded recovery with its attribution and recognition state.
+      additionalProperties: false
+      required:
+        - recoveryId
+        - accountId
+        - amountMinor
+        - currency
+        - recoveredAt
+        - source
+        - status
+        - createdAt
+      properties:
+        recoveryId:
+          type: string
+          description: Identifier of the recovery record (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKT7W2A4GKJ8ZYR6BP9DQ
+        accountId:
+          type: string
+          description: Account the money came back on (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: >-
+            Collection case the recovery is attributed to. Omitted when the
+            account had no open case.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        amountMinor:
+          type: integer
+          format: int64
+          description: Gross amount recovered, in minor units of `currency`.
+          minimum: 1
+          example: 50000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this record.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        costMinor:
+          type: integer
+          format: int64
+          description: >-
+            Direct cost of obtaining this recovery, in minor units. Omitted
+            when there was no attributable direct cost.
+          minimum: 0
+          example: 7500
+        netAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            `amountMinor - costMinor`, in minor units, computed by the service
+            so that every consumer nets the same way. Equal to `amountMinor`
+            when there was no cost.
+          example: 42500
+        recoveredAt:
+          type: string
+          format: date-time
+          description: When the money was recovered, RFC3339 UTC.
+          example: '2026-07-15T08:00:00Z'
+        source:
+          $ref: '#/components/schemas/RecoverySource'
+        status:
+          $ref: '#/components/schemas/RecoveryStatus'
+        channel:
+          type: string
+          description: How the money arrived, as coded by the source system.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: BANK_TRANSFER
+        paymentId:
+          type: string
+          description: Payment this recovery is derived from, when there was one.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        placementId:
+          type: string
+          description: >-
+            Agency placement that produced the recovery. Present exactly when
+            `source` is `AGENCY`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        legalCaseId:
+          type: string
+          description: >-
+            Legal case that produced the recovery. Present exactly when
+            `source` is `LEGAL`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        productCode:
+          type: string
+          description: Product of the account at the time of recovery.
+          minLength: 1
+          maxLength: 32
+          example: PL_UNSECURED
+        notes:
+          type: string
+          description: Free text recorded with a manual entry, if any.
+          minLength: 1
+          maxLength: 1000
+          example: Agency remittance 2026-07 line 44, reconciled against statement
+        createdAt:
+          type: string
+          format: date-time
+          description: When the record was written, RFC3339 UTC.
+          example: '2026-07-16T06:12:00Z'
+        recognisedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the record reached `RECOGNISED`, RFC3339 UTC. Omitted while it
+            is `PROVISIONAL`.
+          example: '2026-07-17T04:35:00Z'
+        reversedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the record was reversed, RFC3339 UTC. Present only when
+            `status` is `REVERSED`.
+          example: '2026-08-02T09:00:00Z'
+      example:
+        recoveryId: 01M0MEKT7W2A4GKJ8ZYR6BP9DQ
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        amountMinor: 50000
+        currency: EUR
+        costMinor: 7500
+        netAmountMinor: 42500
+        recoveredAt: '2026-07-15T08:00:00Z'
+        source: AGENCY
+        status: RECOGNISED
+        channel: BANK_TRANSFER
+        placementId: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        productCode: PL_UNSECURED
+        createdAt: '2026-07-16T06:12:00Z'
+        recognisedAt: '2026-07-17T04:35:00Z'
+
+    RecoveryPage:
+      type: object
+      title: RecoveryPage
+      description: One page of recovery records (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: Recovery records, newest first.
+          items:
+            $ref: '#/components/schemas/Recovery'
+          maxItems: 200
+        nextCursor:
+          type: string
+          description: >-
+            Opaque continuation token for the next page, or `null` on the last
+            page. Only valid with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJyIjoiMDFNME1FS1Q3VzJBNEdLSjhaWVIifQ
+      example:
+        items:
+          - recoveryId: 01M0MEKT7W2A4GKJ8ZYR6BP9DQ
+            accountId: ACC-00012345
+            amountMinor: 50000
+            currency: EUR
+            netAmountMinor: 42500
+            recoveredAt: '2026-07-15T08:00:00Z'
+            source: AGENCY
+            status: RECOGNISED
+            createdAt: '2026-07-16T06:12:00Z'
+        nextCursor: null
+
+    # ---------------------------------------------------------- metrics -----
+    MetricPeriod:
+      type: object
+      title: MetricPeriod
+      description: >-
+        The closed, inclusive date window the metrics were computed over —
+        echoed back so a stored response is self-describing.
+      additionalProperties: false
+      required:
+        - from
+        - to
+      properties:
+        from:
+          type: string
+          format: date
+          description: First date of the window, `YYYY-MM-DD`, inclusive.
+          example: '2026-07-01'
+        to:
+          type: string
+          format: date
+          description: Last date of the window, `YYYY-MM-DD`, inclusive.
+          example: '2026-07-31'
+      example:
+        from: '2026-07-01'
+        to: '2026-07-31'
+
+    RecoveryMetrics:
+      type: object
+      title: RecoveryMetrics
+      description: >-
+        The D§11 recovery metric set for one window, computed from `RECOGNISED`
+        records only. Rates are ratios in the range 0–1, never percentages, and
+        each ships with the integers it was derived from.
+      additionalProperties: false
+      required:
+        - period
+        - currency
+        - grossRecoveryMinor
+        - netRecoveryMinor
+        - costToCollectMinor
+        - openingBalanceMinor
+        - recoveryRate
+        - casesEnteringCount
+        - casesCuredCount
+        - cureRate
+      properties:
+        period:
+          $ref: '#/components/schemas/MetricPeriod'
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency of every amount below. A window spanning
+            more than one currency is rejected rather than summed — the
+            platform never converts.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        productCode:
+          type: string
+          description: >-
+            The `productCode` filter that was applied, echoed back. Omitted
+            when the metrics cover the whole portfolio.
+          minLength: 1
+          maxLength: 32
+          example: PL_UNSECURED
+        grossRecoveryMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of `amountMinor` over `RECOGNISED` recoveries in the window, in
+            minor units.
+          minimum: 0
+          example: 4820000
+        netRecoveryMinor:
+          type: integer
+          format: int64
+          description: >-
+            `grossRecoveryMinor - costToCollectMinor`, in minor units. Can be
+            negative in a window where cost exceeded recovery, which is exactly
+            the signal an agency review needs, so it is not clamped at zero.
+          example: 4358000
+        costToCollectMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of `costMinor` over the same recoveries, in minor units — the
+            D§11 cost-to-collect for the window.
+          minimum: 0
+          example: 462000
+        openingBalanceMinor:
+          type: integer
+          format: int64
+          description: >-
+            Collectable balance in scope at the start of the window, in minor
+            units. The denominator of `recoveryRate`, published so the rate can
+            be reconciled instead of trusted.
+          minimum: 0
+          example: 52000000
+        recoveryRate:
+          type: number
+          format: double
+          description: >-
+            `netRecoveryMinor / openingBalanceMinor` as a ratio in 0–1 (0.0838
+            means 8.38%). Zero when `openingBalanceMinor` is zero.
+          minimum: 0
+          maximum: 1
+          example: 0.0838
+        casesEnteringCount:
+          type: integer
+          format: int64
+          description: >-
+            Cases that were in collection during the window — the denominator
+            of `cureRate`.
+          minimum: 0
+          example: 1840
+        casesCuredCount:
+          type: integer
+          format: int64
+          description: >-
+            Cases from that population that returned to current within the
+            window — the numerator of `cureRate`.
+          minimum: 0
+          example: 517
+        cureRate:
+          type: number
+          format: double
+          description: >-
+            `casesCuredCount / casesEnteringCount` as a ratio in 0–1. Zero when
+            `casesEnteringCount` is zero.
+          minimum: 0
+          maximum: 1
+          example: 0.281
+      example:
+        period:
+          from: '2026-07-01'
+          to: '2026-07-31'
+        currency: EUR
+        productCode: PL_UNSECURED
+        grossRecoveryMinor: 4820000
+        netRecoveryMinor: 4358000
+        costToCollectMinor: 462000
+        openingBalanceMinor: 52000000
+        recoveryRate: 0.0838
+        casesEnteringCount: 1840
+        casesCuredCount: 517
+        cureRate: 0.281

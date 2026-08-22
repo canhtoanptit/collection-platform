@@ -1,0 +1,935 @@
+# =============================================================================
+# Collections Platform — legal-service API (CON-4)
+# =============================================================================
+# A§5.13 / D§13. Legal recovery is a separate bounded capability that
+# integrates "through APIs/events rather than coupling legal workflows into the
+# core case service" (D§13) — which is why the legal view of a collection case
+# lives here, at `GET /v1/cases/{caseId}/legal`, and not in `case.v1.yaml`.
+# Emits `LegalStatusChanged` (A§23), keyed by `legalCaseId`.
+#
+# This spec carries the mirror half of invariant A§11.6: a referral is refused
+# while an agency placement is active (409 REFERRAL_PLACEMENT_CONFLICT), just
+# as `agency.v1.yaml` refuses a placement while a legal case is active (409
+# PLACEMENT_LEGAL_CONFLICT). Both checks run inside their own service's
+# transaction; neither assumes the other looked.
+#
+# Shared shapes come from `./common.v1.yaml`; nothing here restates them.
+#
+# RELEASED FILE — IMMUTABLE once on main. A change a consumer could notice
+# ships as `legal.v2.yaml`. See contracts/README.md.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Legal Service
+  version: 1.0.0
+  description: >-
+    Legal referrals, legal cases and legal status (A§5.13, D§13). Two resources
+    with deliberately different characters. A **referral** is a request for
+    legal review: the bank asks, the legal team or external provider decides,
+    and the answer is `ACCEPTED` or `REJECTED`. A **legal case** is live
+    litigation, created only from an accepted referral, and its whole history is
+    an append-only trail of status changes — never an updated status column
+    (D§3.6), because "when did this become a judgment" is a question a court
+    can ask years later.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      Paths are relative to the service base URL. Domain services are reached
+      in-cluster and callers resolve the host from configuration, so no
+      absolute host is part of the contract.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: legal-referrals
+    description: >-
+      Requesting legal review of an account and reading the decision.
+  - name: legal-cases
+    description: >-
+      Live legal actions, their append-only status history, and the legal view
+      of a collection case.
+
+paths:
+  /v1/legal-referrals:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createLegalReferral
+      summary: Refer an account for legal review
+      description: >-
+        Asks for legal review of an account and creates the referral in
+        `REQUESTED`. The decision — `ACCEPTED` or `REJECTED` — is made by the
+        legal team or the external legal provider and arrives through
+        legal-service's provider integration, not through this API: v1
+        deliberately exposes no accept/reject command, because the deciding
+        party is outside the platform and its answer must land with the
+        provider's own reference attached.
+
+
+        **A§11.6 is enforced here.** The request is rejected with 409
+        `REFERRAL_PLACEMENT_CONFLICT` while the account has an agency placement
+        that is `REQUESTED`, `PLACED` or `RECALL_REQUESTED`. Recall the
+        placement first and wait for the agency to confirm: an account being
+        chased by an agency and sued by the bank at the same time is the
+        conflict this invariant exists to prevent. `agency.v1.yaml` holds the
+        mirror check.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `REFERRAL_INVALID` (400) with `details[]` per field;
+        `ACCOUNT_NOT_FOUND` / `CASE_NOT_FOUND` (404);
+        `REFERRAL_PLACEMENT_CONFLICT` (409) per A§11.6;
+        `REFERRAL_ALREADY_OPEN` (409) when the account already has a
+        `REQUESTED` or `ACCEPTED` referral; `LEGAL_CASE_ALREADY_ACTIVE` (409)
+        when the account already has a legal case that is not `CLOSED`;
+        `REQUEST_IN_PROGRESS` (409); `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [legal-referrals]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The account to refer and why.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLegalReferralRequest'
+      responses:
+        '201':
+          description: >-
+            Referral created in `REQUESTED`. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalReferral'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/legal-referrals/{referralId}:
+    parameters:
+      - $ref: '#/components/parameters/ReferralIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getLegalReferral
+      summary: Get a legal referral
+      description: >-
+        Returns the referral and, once the reviewing party has answered, the
+        decision and its reason.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `REFERRAL_NOT_FOUND` (404).
+      tags: [legal-referrals]
+      responses:
+        '200':
+          description: The referral.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalReferral'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/legal-cases:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createLegalCase
+      summary: Open a legal case from an accepted referral
+      description: >-
+        Opens litigation against the account named by an accepted referral. The
+        case is created `OPEN` with the first entry already in its status
+        history, and emits `LegalStatusChanged`.
+
+
+        `accountId` and `caseId` are taken from the referral rather than
+        re-supplied, so a legal case can never point at a different account
+        from the review that authorised it. The referral must be `ACCEPTED`: a
+        legal case built on a `REQUESTED` referral would mean the bank started
+        proceedings before legal review finished.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `LEGAL_CASE_INVALID` (400) with `details[]` per field;
+        `REFERRAL_NOT_FOUND` (404); `LEGAL_CASE_ALREADY_EXISTS_FOR_REFERRAL`
+        (409) — one referral authorises one case; `REQUEST_IN_PROGRESS` (409);
+        `REFERRAL_NOT_ACCEPTED` (422) when the referral is `REQUESTED` or
+        `REJECTED`; `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [legal-cases]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The accepted referral to act on, and the claim being pursued.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLegalCaseRequest'
+      responses:
+        '201':
+          description: >-
+            Legal case opened. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalCase'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/legal-cases/{legalCaseId}:
+    parameters:
+      - $ref: '#/components/parameters/LegalCaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getLegalCase
+      summary: Get a legal case
+      description: >-
+        Returns the legal case with its complete status history, oldest first.
+        The history is the record: `status` is a convenience field equal to the
+        `toStatus` of the last entry.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `LEGAL_CASE_NOT_FOUND` (404).
+      tags: [legal-cases]
+      responses:
+        '200':
+          description: The legal case and its status history.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalCase'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/legal-cases/{legalCaseId}/status-changes:
+    parameters:
+      - $ref: '#/components/parameters/LegalCaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createLegalCaseStatusChange
+      summary: Record a legal case status change
+      description: >-
+        Appends a status change and emits `LegalStatusChanged`. The status
+        column is never updated in place — the trail is the truth (D§3.6), so
+        a mistaken entry is corrected by appending the right one, with a reason
+        that says so.
+
+
+        Legal transitions, all forward except closure:
+
+        * `OPEN` to `IN_PROCEEDINGS` or `CLOSED`
+
+        * `IN_PROCEEDINGS` to `JUDGMENT` or `CLOSED`
+
+        * `JUDGMENT` to `ENFORCEMENT` or `CLOSED`
+
+        * `ENFORCEMENT` to `CLOSED`
+
+        * `CLOSED` is terminal — a new action needs a new referral and a new
+          case
+
+
+        `CLOSED` is reachable from every live state because an action can be
+        withdrawn, settled or dismissed at any point, and `reason` is what
+        records which of those happened.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `LEGAL_STATUS_CHANGE_INVALID` (400) with `details[]` per
+        field, e.g. `[{ "field": "occurredAt", "reason": "DATE_IN_FUTURE" }]`;
+        `LEGAL_CASE_NOT_FOUND` (404); `LEGAL_STATUS_TRANSITION_INVALID` (409)
+        for any pair not listed above, including `toStatus` equal to the
+        current status; `REQUEST_IN_PROGRESS` (409);
+        `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [legal-cases]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The status the case is moving to, and why.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLegalCaseStatusChangeRequest'
+      responses:
+        '201':
+          description: >-
+            Status change appended. The response is the whole legal case,
+            including the new entry at the end of its history.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalCase'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/cases/{caseId}/legal:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getCaseLegal
+      summary: Get the legal view of a collection case
+      description: >-
+        Everything legal about one collection case: every referral ever raised
+        and every legal case ever opened, oldest first, plus
+        `activeLegalCaseId` when litigation is currently live. Owned by
+        legal-service even though the URL nests under `/v1/cases` — legal
+        workflows are deliberately not coupled into case-service (D§13, A§7.3).
+
+
+        `activeLegalCaseId` is the field agency-service's A§11.6 guard reads
+        before accepting a placement: present means "in legal, do not place".
+        Not paginated — the collections lifetime of one account produces a
+        handful of these, not a stream.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `CASE_NOT_FOUND` (404). A case with no legal activity is a
+        200 with two empty arrays, not a 404.
+      tags: [legal-cases]
+      responses:
+        '200':
+          description: >-
+            The case's referrals and legal cases. Empty arrays mean the case
+            has never been referred.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseLegalView'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Cognito-issued JWT access token, validated by the service itself with
+        deny-by-default scope checks (A§62, A§64). The required scope is named
+        in every operation description; OpenAPI 3.0 cannot attach scopes to an
+        `http` scheme, so the description is normative.
+
+  parameters:
+    ReferralIdPath:
+      name: referralId
+      in: path
+      required: true
+      description: Identifier of the legal referral (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+
+    LegalCaseIdPath:
+      name: legalCaseId
+      in: path
+      required: true
+      description: >-
+        Identifier of the legal case (ULID, minted by this service). The
+        partition key of `LegalStatusChanged` (A§23).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+
+    CaseIdPath:
+      name: caseId
+      in: path
+      required: true
+      description: >-
+        Collection case whose legal view is being read (ULID minted by
+        case-service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKBHXV37E3S3E28JT97KB
+
+  schemas:
+    # ------------------------------------------------------ vocabularies ----
+    LegalReferralStatus:
+      type: string
+      title: LegalReferralStatus
+      description: >-
+        Where the legal review stands. `REQUESTED` — awaiting the legal team or
+        external provider. `ACCEPTED` — review passed; a legal case may be
+        opened. `REJECTED` — review failed, the account returns to normal
+        collection treatment and an agency placement becomes possible again.
+        Both decisions are terminal: a second attempt is a new referral, so the
+        history shows every time the bank asked.
+      enum:
+        - REQUESTED
+        - ACCEPTED
+        - REJECTED
+      example: ACCEPTED
+
+    LegalCaseStatus:
+      type: string
+      title: LegalCaseStatus
+      description: >-
+        Stage of the legal action. `OPEN` — case opened, papers not yet filed.
+        `IN_PROCEEDINGS` — filed and before the court. `JUDGMENT` — judgment
+        obtained. `ENFORCEMENT` — enforcing the judgment (attachment,
+        instalment order). `CLOSED` — terminal, whether by settlement,
+        withdrawal, dismissal or exhausted enforcement; the closing entry's
+        `reason` records which.
+      enum:
+        - OPEN
+        - IN_PROCEEDINGS
+        - JUDGMENT
+        - ENFORCEMENT
+        - CLOSED
+      example: IN_PROCEEDINGS
+
+    # --------------------------------------------------------- referrals ----
+    CreateLegalReferralRequest:
+      type: object
+      title: CreateLegalReferralRequest
+      description: A request for legal review of an account.
+      additionalProperties: false
+      required:
+        - accountId
+        - caseId
+        - reason
+      properties:
+        accountId:
+          type: string
+          description: >-
+            Account being referred. Source-system identifier, kept in its
+            source format and never re-minted (contracts/README.md §6).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: >-
+            Collection case being escalated (ULID minted by case-service).
+            Required: legal action is always an escalation of a case, and the
+            case carries the escalation on its activity trail.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        reason:
+          type: string
+          description: >-
+            Why the bank believes legal action is warranted, retained verbatim
+            — this is what the reviewer reads. Free text so a genuine
+            justification is never squeezed into a code. Do not put customer
+            PII here beyond what the case already holds.
+          minLength: 1
+          maxLength: 1000
+          example: Arrangement broken twice, no contact in 90 days, balance above legal threshold
+      example:
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        reason: Arrangement broken twice, no contact in 90 days, balance above legal threshold
+
+    LegalReferral:
+      type: object
+      title: LegalReferral
+      description: A request for legal review and its decision.
+      additionalProperties: false
+      required:
+        - referralId
+        - accountId
+        - caseId
+        - reason
+        - status
+        - requestedAt
+      properties:
+        referralId:
+          type: string
+          description: Identifier of the referral (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+        accountId:
+          type: string
+          description: Account referred (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: Collection case that was escalated.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        reason:
+          type: string
+          description: The bank's stated justification, verbatim.
+          minLength: 1
+          maxLength: 1000
+          example: Arrangement broken twice, no contact in 90 days, balance above legal threshold
+        status:
+          $ref: '#/components/schemas/LegalReferralStatus'
+        requestedAt:
+          type: string
+          format: date-time
+          description: When the referral was raised, RFC3339 UTC.
+          example: '2026-07-28T11:00:00Z'
+        decidedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the reviewing party answered, RFC3339 UTC. Omitted while
+            `REQUESTED`. The gap to `requestedAt` is legal review turnaround.
+          example: '2026-08-04T15:30:00Z'
+        decisionReason:
+          type: string
+          description: >-
+            The reviewer's stated reason, verbatim — mandatory in practice for
+            `REJECTED`, since the collections team needs to know what to fix.
+            Omitted while `REQUESTED`.
+          minLength: 1
+          maxLength: 1000
+          example: Documentation complete, proceed to proceedings
+        provider:
+          type: string
+          description: >-
+            Code of the external legal provider that reviewed the referral, as
+            registered with legal-service. Omitted when the review was internal.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: MCCARTHY_LEGAL
+        providerReference:
+          type: string
+          description: >-
+            The provider's own reference for the review, kept verbatim so the
+            two sides can reconcile correspondence. Omitted when the review was
+            internal.
+          minLength: 1
+          maxLength: 64
+          example: ML-2026-0771
+        legalCaseId:
+          type: string
+          description: >-
+            Legal case opened from this referral. Present only once
+            `POST /v1/legal-cases` has acted on it; one referral authorises at
+            most one case.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+      example:
+        referralId: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        reason: Arrangement broken twice, no contact in 90 days, balance above legal threshold
+        status: ACCEPTED
+        requestedAt: '2026-07-28T11:00:00Z'
+        decidedAt: '2026-08-04T15:30:00Z'
+        decisionReason: Documentation complete, proceed to proceedings
+        provider: MCCARTHY_LEGAL
+        providerReference: ML-2026-0771
+
+    # ------------------------------------------------------- legal cases ----
+    CreateLegalCaseRequest:
+      type: object
+      title: CreateLegalCaseRequest
+      description: >-
+        The accepted referral to act on and the claim being pursued. The
+        account and collection case come from the referral, never from the
+        caller.
+      additionalProperties: false
+      required:
+        - referralId
+        - claimAmountMinor
+        - currency
+      properties:
+        referralId:
+          type: string
+          description: >-
+            The referral authorising this action. Must be `ACCEPTED` and must
+            not already have a legal case.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+        claimAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount claimed, in minor units of `currency`, as pleaded. Frozen on
+            the case: later movement on the account does not restate what was
+            filed with the court.
+          minimum: 1
+          example: 250000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of the claim.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        provider:
+          type: string
+          description: >-
+            Code of the external legal provider conducting the action, as
+            registered with legal-service. Omitted when conducted in-house.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: MCCARTHY_LEGAL
+        courtReference:
+          type: string
+          description: >-
+            Court's own case reference, once allocated. Usually unknown at
+            creation and recorded later with the `IN_PROCEEDINGS` status change,
+            so it is optional here.
+          minLength: 1
+          maxLength: 64
+          example: 2026/04412/CC
+      example:
+        referralId: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+        claimAmountMinor: 250000
+        currency: EUR
+        provider: MCCARTHY_LEGAL
+
+    CreateLegalCaseStatusChangeRequest:
+      type: object
+      title: CreateLegalCaseStatusChangeRequest
+      description: A status change to append to a legal case's history.
+      additionalProperties: false
+      required:
+        - toStatus
+        - reason
+      properties:
+        toStatus:
+          $ref: '#/components/schemas/LegalCaseStatus'
+        reason:
+          type: string
+          description: >-
+            What happened, verbatim — the entry a reader relies on years later,
+            and the only place the nature of a closure (settled, withdrawn,
+            dismissed, enforcement exhausted) is recorded. Mandatory.
+          minLength: 1
+          maxLength: 1000
+          example: Judgment granted in full at hearing on 12 October
+        occurredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the change actually happened, RFC3339 UTC — the hearing date,
+            the date of the order. Supply it whenever the entry is recorded
+            after the fact, which is normal for court events; omit it and the
+            service uses its own clock. Must not be in the future, and must not
+            precede the previous entry.
+          example: '2026-10-12T10:00:00Z'
+        courtReference:
+          type: string
+          description: >-
+            Court reference to record or update on the case, typically supplied
+            with the move to `IN_PROCEEDINGS`. Omitted leaves any existing
+            value untouched.
+          minLength: 1
+          maxLength: 64
+          example: 2026/04412/CC
+      example:
+        toStatus: JUDGMENT
+        reason: Judgment granted in full at hearing on 12 October
+        occurredAt: '2026-10-12T10:00:00Z'
+
+    LegalCaseStatusChange:
+      type: object
+      title: LegalCaseStatusChange
+      description: >-
+        One entry in a legal case's append-only status history. Immutable: a
+        mistake is corrected by appending, never by editing (D§3.6).
+      additionalProperties: false
+      required:
+        - statusChangeId
+        - toStatus
+        - reason
+        - occurredAt
+        - recordedAt
+      properties:
+        statusChangeId:
+          type: string
+          description: Identifier of this history entry (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEM04C8G1PSR5DFY3JV7KX
+        fromStatus:
+          $ref: '#/components/schemas/LegalCaseStatus'
+        toStatus:
+          $ref: '#/components/schemas/LegalCaseStatus'
+        reason:
+          type: string
+          description: What happened, verbatim.
+          minLength: 1
+          maxLength: 1000
+          example: Judgment granted in full at hearing on 12 October
+        occurredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the change happened, RFC3339 UTC. Entries are ordered by this
+            value, and it is what analytics measure stage durations from.
+          example: '2026-10-12T10:00:00Z'
+        recordedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the entry was written, RFC3339 UTC. Later than `occurredAt`
+            for court events recorded after the fact; the gap is recording lag.
+          example: '2026-10-13T08:15:00Z'
+      example:
+        statusChangeId: 01M0MEM04C8G1PSR5DFY3JV7KX
+        fromStatus: IN_PROCEEDINGS
+        toStatus: JUDGMENT
+        reason: Judgment granted in full at hearing on 12 October
+        occurredAt: '2026-10-12T10:00:00Z'
+        recordedAt: '2026-10-13T08:15:00Z'
+
+    LegalCase:
+      type: object
+      title: LegalCase
+      description: >-
+        A legal action with its complete append-only status history. `status`
+        is derived — it is the `toStatus` of the newest `statusHistory` entry —
+        and the design deliberately publishes no separate legal-outcome
+        vocabulary: the stages the case reached plus the closing entry's
+        `reason` are the outcome, and a parallel enum would be a second version
+        of the truth to keep in step.
+      additionalProperties: false
+      required:
+        - legalCaseId
+        - referralId
+        - accountId
+        - caseId
+        - status
+        - claimAmountMinor
+        - currency
+        - openedAt
+        - statusHistory
+      properties:
+        legalCaseId:
+          type: string
+          description: Identifier of the legal case (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        referralId:
+          type: string
+          description: The accepted referral that authorised this action.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+        accountId:
+          type: string
+          description: >-
+            Account the action is against, copied from the referral
+            (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: Collection case that was escalated, copied from the referral.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        status:
+          $ref: '#/components/schemas/LegalCaseStatus'
+        claimAmountMinor:
+          type: integer
+          format: int64
+          description: Amount claimed as pleaded, in minor units of `currency`, frozen.
+          minimum: 1
+          example: 250000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of the claim.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        provider:
+          type: string
+          description: >-
+            External legal provider conducting the action. Omitted when
+            in-house.
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: MCCARTHY_LEGAL
+        courtReference:
+          type: string
+          description: Court's own case reference. Omitted until allocated.
+          minLength: 1
+          maxLength: 64
+          example: 2026/04412/CC
+        openedAt:
+          type: string
+          format: date-time
+          description: When the case was opened, RFC3339 UTC.
+          example: '2026-08-05T09:00:00Z'
+        closedAt:
+          type: string
+          format: date-time
+          description: >-
+            `occurredAt` of the entry that moved the case to `CLOSED`, RFC3339
+            UTC. Present only when `status` is `CLOSED`.
+          example: '2027-01-20T00:00:00Z'
+        statusHistory:
+          type: array
+          description: >-
+            Every status change, oldest first. Always non-empty: opening the
+            case writes the first entry, whose `fromStatus` is omitted because
+            there was no prior state.
+          items:
+            $ref: '#/components/schemas/LegalCaseStatusChange'
+          minItems: 1
+          maxItems: 200
+      example:
+        legalCaseId: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        referralId: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        status: JUDGMENT
+        claimAmountMinor: 250000
+        currency: EUR
+        provider: MCCARTHY_LEGAL
+        courtReference: 2026/04412/CC
+        openedAt: '2026-08-05T09:00:00Z'
+        statusHistory:
+          - statusChangeId: 01M0MEM15D9H2QTS6EGZ4KW8MY
+            toStatus: OPEN
+            reason: Case opened from accepted referral
+            occurredAt: '2026-08-05T09:00:00Z'
+            recordedAt: '2026-08-05T09:00:00Z'
+          - statusChangeId: 01M0MEM26E1J3RVT7FHA5MX9NZ
+            fromStatus: OPEN
+            toStatus: IN_PROCEEDINGS
+            reason: Summons issued and served
+            occurredAt: '2026-08-28T00:00:00Z'
+            recordedAt: '2026-08-29T07:40:00Z'
+          - statusChangeId: 01M0MEM04C8G1PSR5DFY3JV7KX
+            fromStatus: IN_PROCEEDINGS
+            toStatus: JUDGMENT
+            reason: Judgment granted in full at hearing on 12 October
+            occurredAt: '2026-10-12T10:00:00Z'
+            recordedAt: '2026-10-13T08:15:00Z'
+
+    CaseLegalView:
+      type: object
+      title: CaseLegalView
+      description: >-
+        Everything legal about one collection case — the answer to "is this
+        account in legal, and what happened before".
+      additionalProperties: false
+      required:
+        - caseId
+        - referrals
+        - legalCases
+      properties:
+        caseId:
+          type: string
+          description: The collection case this view describes.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        activeLegalCaseId:
+          type: string
+          description: >-
+            The one legal case that is not `CLOSED`, when there is one. Present
+            means the account is in legal and no agency placement may be made
+            (A§11.6); absent means placement is not blocked by legal state.
+            This is the field agency-service's guard reads.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        referrals:
+          type: array
+          description: >-
+            Every referral raised on this case, oldest first, including
+            rejected ones — a rejection is exactly the history a later reviewer
+            needs.
+          items:
+            $ref: '#/components/schemas/LegalReferral'
+          maxItems: 100
+        legalCases:
+          type: array
+          description: >-
+            Every legal case opened on this collection case, oldest first,
+            each with its full status history. More than one is legitimate: a
+            withdrawn action followed by a fresh referral and a new case.
+          items:
+            $ref: '#/components/schemas/LegalCase'
+          maxItems: 100
+      example:
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        activeLegalCaseId: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        referrals:
+          - referralId: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+            accountId: ACC-00012345
+            caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            reason: Arrangement broken twice, no contact in 90 days, balance above legal threshold
+            status: ACCEPTED
+            requestedAt: '2026-07-28T11:00:00Z'
+            decidedAt: '2026-08-04T15:30:00Z'
+            legalCaseId: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+        legalCases:
+          - legalCaseId: 01M0MEKW9Y4C6JNM1ZBT8DR3FS
+            referralId: 01M0MEKZ3B7F9NRQ4CEX2HT6JW
+            accountId: ACC-00012345
+            caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            status: IN_PROCEEDINGS
+            claimAmountMinor: 250000
+            currency: EUR
+            openedAt: '2026-08-05T09:00:00Z'
+            statusHistory:
+              - statusChangeId: 01M0MEM15D9H2QTS6EGZ4KW8MY
+                toStatus: OPEN
+                reason: Case opened from accepted referral
+                occurredAt: '2026-08-05T09:00:00Z'
+                recordedAt: '2026-08-05T09:00:00Z'

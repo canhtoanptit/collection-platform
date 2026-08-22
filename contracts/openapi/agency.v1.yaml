@@ -1,0 +1,1155 @@
+# =============================================================================
+# Collections Platform — agency-service API (CON-4)
+# =============================================================================
+# A§5.12 / A§18 / D§12. Owns the agency register, debt placement and recall,
+# agency fees and agency performance. Emits `DebtPlaced` and `DebtRecalled`
+# (A§23), keyed by `placementId`.
+#
+# The load-bearing rule here is invariant A§11.6 — a debt placement cannot be
+# active simultaneously with an incompatible legal ownership state. It is
+# enforced on BOTH sides: this spec rejects a placement while an active legal
+# case exists (409 PLACEMENT_LEGAL_CONFLICT) and `legal.v1.yaml` rejects a
+# referral while an active placement exists (409 REFERRAL_PLACEMENT_CONFLICT).
+# Neither side may assume the other checked.
+#
+# Shared shapes come from `./common.v1.yaml`; nothing here restates them.
+#
+# RELEASED FILE — IMMUTABLE once on main. A change a consumer could notice
+# ships as `agency.v2.yaml`. See contracts/README.md.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Agency Service
+  version: 1.0.0
+  description: >-
+    Debt collection agency management (A§5.12, A§18, D§12): the agency
+    register with its commercial terms, placement and recall of accounts, the
+    fees a placement accrues, and agency performance. An account is with at
+    most one agency at a time and never with an agency while it is in legal
+    proceedings (A§11.6) — two accounts collecting the same debt is the failure
+    mode this service exists to prevent.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      Paths are relative to the service base URL. Domain services are reached
+      in-cluster and callers resolve the host from configuration, so no
+      absolute host is part of the contract.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: placements
+    description: >-
+      Placing an account with an agency, recalling it, and the fees the
+      placement accrued.
+  - name: agencies
+    description: >-
+      The agency register — commercial terms, eligibility status and
+      performance.
+
+paths:
+  /v1/placements:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createPlacement
+      summary: Place an account with an agency
+      description: >-
+        Hands an account to a collection agency and emits `DebtPlaced`. The
+        placement is created `REQUESTED` with `placedAt` set to the moment of
+        handover — that is when the account leaves internal treatment, whether
+        or not the agency has acknowledged the file yet. It becomes `PLACED`
+        when the agency confirms receipt through the outbound placement file
+        acknowledgement; there is no API command for that transition because
+        the agency, not an operator, causes it.
+
+
+        **A§11.6 is enforced here.** The request is rejected with 409
+        `PLACEMENT_LEGAL_CONFLICT` when the account has an active legal case:
+        an agency chasing an account that is simultaneously in proceedings
+        produces contradictory customer contact and legal exposure. The mirror
+        check lives in `legal.v1.yaml`, and both are evaluated inside their own
+        service's transaction — neither trusts the other to have looked.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `PLACEMENT_INVALID` (400) with `details[]` per field;
+        `AGENCY_NOT_FOUND` / `ACCOUNT_NOT_FOUND` / `CASE_NOT_FOUND` (404);
+        `PLACEMENT_ALREADY_ACTIVE` (409) when the account already has a
+        `REQUESTED`, `PLACED` or `RECALL_REQUESTED` placement — recall the
+        existing one first; `PLACEMENT_LEGAL_CONFLICT` (409) per A§11.6;
+        `REQUEST_IN_PROGRESS` (409); `AGENCY_NOT_ACTIVE` (422) when the
+        agency's `status` is not `ACTIVE`; `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [placements]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The account to place and the agency to place it with.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlacementRequest'
+      responses:
+        '201':
+          description: >-
+            Placement created in `REQUESTED`. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Placement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/placements/{placementId}:
+    parameters:
+      - $ref: '#/components/parameters/PlacementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getPlacement
+      summary: Get a placement
+      description: >-
+        Returns the placement with its current status and lifecycle
+        timestamps.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `PLACEMENT_NOT_FOUND` (404).
+      tags: [placements]
+      responses:
+        '200':
+          description: The placement.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Placement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/placements/{placementId}/recall:
+    parameters:
+      - $ref: '#/components/parameters/PlacementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: recallPlacement
+      summary: Recall a placed account from an agency
+      description: >-
+        Asks the agency to stop work and return the account, moving the
+        placement to `RECALL_REQUESTED` and emitting `DebtRecalled`. It reaches
+        `RECALLED` when the agency confirms it has ceased activity — again an
+        agency-driven transition with no API command. Recall is what unblocks a
+        legal referral: `legal.v1.yaml` rejects a referral until the placement
+        is `RECALLED` or `CLOSED` (A§11.6).
+
+
+        Legal from `REQUESTED` and `PLACED`. Recalling twice is a 409 rather
+        than a silent no-op, because the second caller usually believes the
+        first recall did not happen and needs to be told it did.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `PLACEMENT_NOT_FOUND` (404); `PLACEMENT_TRANSITION_INVALID`
+        (409) from `RECALL_REQUESTED`, `RECALLED` or `CLOSED`;
+        `REQUEST_IN_PROGRESS` (409); `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [placements]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: Why the account is being recalled.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecallPlacementRequest'
+      responses:
+        '200':
+          description: The placement, now `RECALL_REQUESTED`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Placement'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/placements/{placementId}/fees:
+    parameters:
+      - $ref: '#/components/parameters/PlacementIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getPlacementFees
+      summary: Get the fees a placement accrued
+      description: >-
+        Every commission line the placement produced, one per attributed
+        payment, ordered by `accruedAt` ascending, with the total. Fee lines are
+        append-only: a correction is a new line, never an edit (D§3.6).
+
+
+        Each line publishes both the recovered amount and the commission rate
+        it was calculated at, so the arithmetic is checkable — the fee is
+        `floor(recoveredAmountMinor * commissionBps / 10000)`, integer
+        arithmetic with the sub-minor-unit remainder retained by the bank. That
+        rounding rule is part of the contract: an agency reconciling its
+        invoice must arrive at the same number.
+
+
+        Scope: `agency:read`.
+
+
+        Errors — `PLACEMENT_NOT_FOUND` (404).
+      tags: [placements]
+      responses:
+        '200':
+          description: >-
+            The placement's fee lines and total. An empty list means the
+            placement has produced no attributed recovery yet.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacementFees'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/agencies:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createAgency
+      summary: Register a collection agency
+      description: >-
+        Adds an agency to the register with its commercial terms, created
+        `ACTIVE` and immediately eligible for placement. Commercial due
+        diligence and contract signature happen outside the platform; this
+        record exists so that placement, fee calculation and performance
+        reporting have terms to work from.
+
+
+        `contract.commissionBps` is frozen on every fee line at the moment the
+        fee accrues, so renegotiating terms later never restates historical
+        invoices.
+
+
+        Scope: `agency:admin` — narrower than the placement commands, because
+        creating an agency defines what the bank will pay. Requires
+        `Idempotency-Key`.
+
+
+        Errors — `AGENCY_INVALID` (400) with `details[]` per field, e.g.
+        `[{ "field": "contract.commissionBps", "reason": "OUT_OF_RANGE" }]`;
+        `AGENCY_NAME_ALREADY_EXISTS` (409); `REQUEST_IN_PROGRESS` (409);
+        `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [agencies]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The agency and its commercial terms.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgencyRequest'
+      responses:
+        '201':
+          description: >-
+            Agency registered and `ACTIVE`. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agency'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+    get:
+      operationId: listAgencies
+      summary: List registered agencies
+      description: >-
+        Paginated agency register, newest first (`agencyId` descending).
+        Filter by `status` to get the agencies a placement may currently go to.
+
+
+        Scope: `agency:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for an unknown `status` value or a
+        `cursor` that does not belong to these filter arguments.
+      tags: [agencies]
+      parameters:
+        - $ref: '#/components/parameters/AgencyStatusQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of agencies, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgencyPage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/agencies/{agencyId}:
+    parameters:
+      - $ref: '#/components/parameters/AgencyIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getAgency
+      summary: Get an agency
+      description: >-
+        Returns the agency register entry, including its current commercial
+        terms.
+
+
+        Scope: `agency:read`.
+
+
+        Errors — `AGENCY_NOT_FOUND` (404).
+      tags: [agencies]
+      responses:
+        '200':
+          description: The agency.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agency'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/agencies/{agencyId}/performance:
+    parameters:
+      - $ref: '#/components/parameters/AgencyIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getAgencyPerformance
+      summary: Get an agency's performance
+      description: >-
+        Placement and recovery performance for one agency (A§18). `from` and
+        `to` are optional and inclusive; omit both for the agency's whole
+        history. The window is applied to `placedAt`, so a placement is
+        measured together with the recovery it eventually produced rather than
+        being split across periods — which is why a recent window can show a
+        low `recoveryRate` that is simply not mature yet.
+
+
+        `recoveryRate` ships with the integers behind it
+        (`totalPlacedMinor`, `totalRecoveredMinor`), so a caller reconciles the
+        ratio instead of trusting it (D§38). `avgDaysToFirstPayment` measures
+        agency responsiveness — it is the mean over placements that have
+        produced at least one payment, and is omitted entirely when none have.
+
+
+        Scope: `agency:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for `from` after `to`;
+        `AGENCY_NOT_FOUND` (404).
+      tags: [agencies]
+      parameters:
+        - $ref: '#/components/parameters/FromQuery'
+        - $ref: '#/components/parameters/ToQuery'
+      responses:
+        '200':
+          description: >-
+            The agency's performance over the window. All-zero totals are a
+            valid answer for an agency with no placements, not an error.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgencyPerformance'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Cognito-issued JWT access token, validated by the service itself with
+        deny-by-default scope checks (A§62, A§64). The required scope is named
+        in every operation description; OpenAPI 3.0 cannot attach scopes to an
+        `http` scheme, so the description is normative.
+
+  parameters:
+    PlacementIdPath:
+      name: placementId
+      in: path
+      required: true
+      description: Identifier of the placement (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+
+    AgencyIdPath:
+      name: agencyId
+      in: path
+      required: true
+      description: Identifier of the agency (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+
+    AgencyStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: Filter to one agency status. Omit for the whole register.
+      schema:
+        $ref: '#/components/schemas/AgencyStatus'
+
+    FromQuery:
+      name: from
+      in: query
+      required: false
+      description: >-
+        First `placedAt` date to include, `YYYY-MM-DD`, inclusive. Omit for no
+        lower bound.
+      schema:
+        type: string
+        format: date
+        example: '2026-01-01'
+
+    ToQuery:
+      name: to
+      in: query
+      required: false
+      description: >-
+        Last `placedAt` date to include, `YYYY-MM-DD`, inclusive. Must not be
+        earlier than `from`. Omit for no upper bound.
+      schema:
+        type: string
+        format: date
+        example: '2026-06-30'
+
+  schemas:
+    # ------------------------------------------------------ vocabularies ----
+    PlacementStatus:
+      type: string
+      title: PlacementStatus
+      description: >-
+        Placement lifecycle. `REQUESTED` — handed over, awaiting the agency's
+        acknowledgement. `PLACED` — the agency has confirmed and is working the
+        account. `RECALL_REQUESTED` — the bank has asked for it back but the
+        agency has not yet confirmed it stopped. `RECALLED` — the agency has
+        confirmed; the account is back under internal treatment and a legal
+        referral is unblocked (A§11.6). `CLOSED` — the placement ended on its
+        own terms, because the debt was settled or the agency's term expired.
+        The two agency-driven transitions (`REQUESTED` to `PLACED`,
+        `RECALL_REQUESTED` to `RECALLED`) have no API command: they are caused
+        by the agency file acknowledgement, not by an operator.
+      enum:
+        - REQUESTED
+        - PLACED
+        - RECALL_REQUESTED
+        - RECALLED
+        - CLOSED
+      example: PLACED
+
+    AgencyStatus:
+      type: string
+      title: AgencyStatus
+      description: >-
+        Whether the agency may receive placements. `ACTIVE` may; `SUSPENDED`
+        may not but keeps its existing placements running; `TERMINATED` may not
+        and its placements are recalled. v1 of this contract exposes creation
+        only — an agency is created `ACTIVE`, and suspension or termination is
+        administered out of band. The states are part of the contract because
+        placement eligibility branches on them and reports group by them.
+      enum:
+        - ACTIVE
+        - SUSPENDED
+        - TERMINATED
+      example: ACTIVE
+
+    # -------------------------------------------------------- placements ----
+    CreatePlacementRequest:
+      type: object
+      title: CreatePlacementRequest
+      description: The account to place, the agency to place it with, and the balance handed over.
+      additionalProperties: false
+      required:
+        - agencyId
+        - accountId
+        - caseId
+        - placedAmountMinor
+        - currency
+      properties:
+        agencyId:
+          type: string
+          description: Agency to place the account with. Must be `ACTIVE`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        accountId:
+          type: string
+          description: >-
+            Account being placed. Source-system identifier, kept in its source
+            format and never re-minted (contracts/README.md §6).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: >-
+            Collection case being escalated to the agency (ULID minted by
+            case-service). Required: a placement is always an escalation of a
+            case, and the case is what carries the escalation on its activity
+            trail.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        placedAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Balance handed to the agency, in minor units of `currency`, as at
+            `placedAt`. Frozen on the placement: it is the denominator of
+            agency recovery rate, so later movement on the account must not
+            restate it.
+          minimum: 1
+          example: 250000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this placement.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+      example:
+        agencyId: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        placedAmountMinor: 250000
+        currency: EUR
+
+    RecallPlacementRequest:
+      type: object
+      title: RecallPlacementRequest
+      description: >-
+        Why the account is coming back. Mandatory: recall is a commercial event
+        an agency may dispute, so the bank's stated reason is part of the
+        record.
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: >-
+            Operator-supplied reason, retained verbatim for audit — for
+            example preparing a legal referral, an SLA breach, or a customer
+            complaint. Do not put customer PII here.
+          minLength: 1
+          maxLength: 256
+          example: Recalling to prepare a legal referral
+      example:
+        reason: Recalling to prepare a legal referral
+
+    Placement:
+      type: object
+      title: Placement
+      description: An account placed with a collection agency.
+      additionalProperties: false
+      required:
+        - placementId
+        - agencyId
+        - accountId
+        - caseId
+        - status
+        - placedAmountMinor
+        - currency
+        - placedAt
+      properties:
+        placementId:
+          type: string
+          description: >-
+            Identifier of the placement (ULID, minted by this service). The
+            partition key of `DebtPlaced` and `DebtRecalled` (A§23).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        agencyId:
+          type: string
+          description: Agency holding the placement.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        accountId:
+          type: string
+          description: Account placed (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: ACC-00012345
+        caseId:
+          type: string
+          description: Collection case that was escalated.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        status:
+          $ref: '#/components/schemas/PlacementStatus'
+        placedAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Balance handed to the agency at `placedAt`, in minor units. Frozen
+            for the life of the placement.
+          minimum: 1
+          example: 250000
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount on this placement.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        commissionBps:
+          type: integer
+          format: int32
+          description: >-
+            Commission rate in basis points, copied from the agency's contract
+            at `placedAt` and frozen. Fee lines are calculated from this value,
+            not from the agency's current terms, so renegotiation never
+            restates history.
+          minimum: 0
+          maximum: 10000
+          example: 1500
+        slaDays:
+          type: integer
+          format: int32
+          description: >-
+            The agency's committed working period in days, copied from its
+            contract at `placedAt`. A placement still `PLACED` beyond this is
+            an SLA breach and a recall candidate.
+          minimum: 1
+          maximum: 365
+          example: 90
+        placedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the account was handed over, RFC3339 UTC — the moment it left
+            internal treatment. Set on creation, before the agency
+            acknowledges, because that is the business event.
+          example: '2026-05-04T08:00:00Z'
+        confirmedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the agency acknowledged receipt and the placement became
+            `PLACED`, RFC3339 UTC. Omitted while `REQUESTED`. The gap to
+            `placedAt` is agency onboarding latency.
+          example: '2026-05-05T06:30:00Z'
+        recallRequestedAt:
+          type: string
+          format: date-time
+          description: >-
+            When recall was requested, RFC3339 UTC. Omitted unless recall has
+            been requested.
+          example: '2026-07-20T10:00:00Z'
+        recallReason:
+          type: string
+          description: >-
+            The reason supplied with recall, verbatim. Omitted unless recall
+            has been requested.
+          minLength: 1
+          maxLength: 256
+          example: Recalling to prepare a legal referral
+        recalledAt:
+          type: string
+          format: date-time
+          description: >-
+            When the agency confirmed it had ceased activity and the placement
+            became `RECALLED`, RFC3339 UTC. Omitted until then. A legal referral
+            is only unblocked once this is set (A§11.6).
+          example: '2026-07-24T09:00:00Z'
+        closedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the placement ended on its own terms — debt settled or agency
+            term expired — RFC3339 UTC. Present only when `status` is
+            `CLOSED`.
+          example: '2026-08-02T00:05:00Z'
+      example:
+        placementId: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        agencyId: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        accountId: ACC-00012345
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        status: PLACED
+        placedAmountMinor: 250000
+        currency: EUR
+        commissionBps: 1500
+        slaDays: 90
+        placedAt: '2026-05-04T08:00:00Z'
+        confirmedAt: '2026-05-05T06:30:00Z'
+
+    # -------------------------------------------------------------- fees ----
+    Fee:
+      type: object
+      title: Fee
+      description: >-
+        One commission line, accrued against a single attributed payment.
+        Immutable once written; a correction is a new line (D§3.6).
+      additionalProperties: false
+      required:
+        - feeId
+        - placementId
+        - paymentId
+        - recoveredAmountMinor
+        - commissionBps
+        - amountMinor
+        - currency
+        - accruedAt
+      properties:
+        feeId:
+          type: string
+          description: Identifier of the fee line (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKY2A6E8MQP3BDW1GT5HV
+        placementId:
+          type: string
+          description: Placement the fee was accrued under.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        paymentId:
+          type: string
+          description: >-
+            Payment the commission was calculated on (ULID minted by
+            payment-service). One fee line per payment: the pair
+            `(placementId, paymentId)` is unique, which is what stops a
+            reprocessed remittance being billed twice.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        recoveredAmountMinor:
+          type: integer
+          format: int64
+          description: >-
+            Amount attributed to the agency from that payment, in minor units —
+            the base the commission was applied to.
+          minimum: 1
+          example: 50000
+        commissionBps:
+          type: integer
+          format: int32
+          description: >-
+            Commission rate in basis points as frozen on the placement, e.g.
+            `1500` = 15.00%. Published on every line so the arithmetic can be
+            reproduced.
+          minimum: 0
+          maximum: 10000
+          example: 1500
+        amountMinor:
+          type: integer
+          format: int64
+          description: >-
+            The fee itself, in minor units:
+            `floor(recoveredAmountMinor * commissionBps / 10000)`. Integer
+            arithmetic; the sub-minor-unit remainder is retained by the bank.
+          minimum: 0
+          example: 7500
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency, always the placement's currency — the
+            platform never converts.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        accruedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the fee was accrued, RFC3339 UTC — driven by the payment's
+            attribution, not by the invoicing run.
+          example: '2026-06-02T04:10:00Z'
+      example:
+        feeId: 01M0MEKY2A6E8MQP3BDW1GT5HV
+        placementId: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+        recoveredAmountMinor: 50000
+        commissionBps: 1500
+        amountMinor: 7500
+        currency: EUR
+        accruedAt: '2026-06-02T04:10:00Z'
+
+    PlacementFees:
+      type: object
+      title: PlacementFees
+      description: A placement's commission lines and their total.
+      additionalProperties: false
+      required:
+        - placementId
+        - currency
+        - totalFeesMinor
+        - fees
+      properties:
+        placementId:
+          type: string
+          description: Placement the fee lines belong to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        currency:
+          type: string
+          description: ISO-4217 alpha-3 currency of every amount below.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        totalFeesMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of `fees[].amountMinor`, in minor units. Summed from the
+            already-rounded lines, so it matches an invoice built line by line.
+          minimum: 0
+          example: 7500
+        fees:
+          type: array
+          description: Commission lines, ordered by `accruedAt` ascending.
+          items:
+            $ref: '#/components/schemas/Fee'
+          maxItems: 1000
+      example:
+        placementId: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+        currency: EUR
+        totalFeesMinor: 7500
+        fees:
+          - feeId: 01M0MEKY2A6E8MQP3BDW1GT5HV
+            placementId: 01M0MEKV8X3B5HMK9ZAS7CQ2ER
+            paymentId: 01M0MEKM5J8T2XCV6BFR4NQ7WD
+            recoveredAmountMinor: 50000
+            commissionBps: 1500
+            amountMinor: 7500
+            currency: EUR
+            accruedAt: '2026-06-02T04:10:00Z'
+
+    # ---------------------------------------------------------- agencies ----
+    AgencyContract:
+      type: object
+      title: AgencyContract
+      description: >-
+        The commercial terms the bank works an agency under. Both values are
+        integers on purpose: a commission held as a float would eventually
+        produce an invoice neither side can reproduce.
+      additionalProperties: false
+      required:
+        - commissionBps
+        - slaDays
+      properties:
+        commissionBps:
+          type: integer
+          format: int32
+          description: >-
+            Commission in basis points of recovered amount, e.g. `1500` =
+            15.00%. `0` is legal — some placements are cost-recovery only.
+          minimum: 0
+          maximum: 10000
+          example: 1500
+        slaDays:
+          type: integer
+          format: int32
+          description: >-
+            Days the agency commits to work an account before it is a recall
+            candidate. Copied onto each placement at handover.
+          minimum: 1
+          maximum: 365
+          example: 90
+      example:
+        commissionBps: 1500
+        slaDays: 90
+
+    CreateAgencyRequest:
+      type: object
+      title: CreateAgencyRequest
+      description: An agency to add to the register, with its commercial terms.
+      additionalProperties: false
+      required:
+        - name
+        - contract
+      properties:
+        name:
+          type: string
+          description: >-
+            Legal name of the agency. Unique in the register: two entries for
+            the same agency would split its performance figures and its
+            invoices.
+          minLength: 1
+          maxLength: 200
+          example: Northgate Recoveries Ltd
+        contract:
+          $ref: '#/components/schemas/AgencyContract'
+      example:
+        name: Northgate Recoveries Ltd
+        contract:
+          commissionBps: 1500
+          slaDays: 90
+
+    Agency:
+      type: object
+      title: Agency
+      description: A registered collection agency.
+      additionalProperties: false
+      required:
+        - agencyId
+        - name
+        - status
+        - contract
+        - createdAt
+      properties:
+        agencyId:
+          type: string
+          description: Identifier of the agency (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        name:
+          type: string
+          description: Legal name of the agency, unique in the register.
+          minLength: 1
+          maxLength: 200
+          example: Northgate Recoveries Ltd
+        status:
+          $ref: '#/components/schemas/AgencyStatus'
+        contract:
+          $ref: '#/components/schemas/AgencyContract'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the agency was registered, RFC3339 UTC.
+          example: '2026-03-01T09:00:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the register entry last changed, RFC3339 UTC. Omitted while it
+            has never changed since creation.
+          example: '2026-04-11T14:20:00Z'
+      example:
+        agencyId: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        name: Northgate Recoveries Ltd
+        status: ACTIVE
+        contract:
+          commissionBps: 1500
+          slaDays: 90
+        createdAt: '2026-03-01T09:00:00Z'
+
+    AgencyPage:
+      type: object
+      title: AgencyPage
+      description: One page of agencies (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: Agencies, newest first.
+          items:
+            $ref: '#/components/schemas/Agency'
+          maxItems: 200
+        nextCursor:
+          type: string
+          description: >-
+            Opaque continuation token for the next page, or `null` on the last
+            page. Only valid with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJnIjoiMDFNME1FS1gxWjVEN0tQTjJBQ1YifQ
+      example:
+        items:
+          - agencyId: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+            name: Northgate Recoveries Ltd
+            status: ACTIVE
+            contract:
+              commissionBps: 1500
+              slaDays: 90
+            createdAt: '2026-03-01T09:00:00Z'
+        nextCursor: null
+
+    AgencyPerformance:
+      type: object
+      title: AgencyPerformance
+      description: >-
+        Placement and recovery performance for one agency over a window (A§18),
+        published with the integers behind every ratio so it can be reconciled
+        (D§38).
+      additionalProperties: false
+      required:
+        - agencyId
+        - currency
+        - placementCount
+        - totalPlacedMinor
+        - totalRecoveredMinor
+        - recoveryRate
+        - feesMinor
+      properties:
+        agencyId:
+          type: string
+          description: Agency the figures describe.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        period:
+          type: object
+          description: >-
+            The `placedAt` window the figures cover, echoed back. Omitted when
+            neither `from` nor `to` was supplied, which means the agency's whole
+            history.
+          additionalProperties: false
+          required:
+            - from
+            - to
+          properties:
+            from:
+              type: string
+              format: date
+              description: >-
+                First `placedAt` date included, `YYYY-MM-DD`. Equal to the
+                agency's first placement date when only `to` was supplied.
+              example: '2026-01-01'
+            to:
+              type: string
+              format: date
+              description: >-
+                Last `placedAt` date included, `YYYY-MM-DD`. Equal to today when
+                only `from` was supplied.
+              example: '2026-06-30'
+          example:
+            from: '2026-01-01'
+            to: '2026-06-30'
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency of every amount below. A window spanning
+            more than one currency is rejected rather than summed — the platform
+            never converts.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+        placementCount:
+          type: integer
+          format: int64
+          description: >-
+            Placements made in the window. The denominator of
+            `avgDaysToFirstPayment` is a subset of this — only placements that
+            produced a payment.
+          minimum: 0
+          example: 412
+        totalPlacedMinor:
+          type: integer
+          format: int64
+          description: >-
+            Sum of `placedAmountMinor` over those placements, in minor units.
+            The denominator of `recoveryRate`.
+          minimum: 0
+          example: 103000000
+        totalRecoveredMinor:
+          type: integer
+          format: int64
+          description: >-
+            Recovery attributed to those placements, in minor units, gross of
+            fees. Recovery arriving after the window still counts against the
+            placement that produced it.
+          minimum: 0
+          example: 14420000
+        recoveryRate:
+          type: number
+          format: double
+          description: >-
+            `totalRecoveredMinor / totalPlacedMinor` as a ratio in 0–1 (0.14
+            means 14%). Zero when `totalPlacedMinor` is zero.
+          minimum: 0
+          maximum: 1
+          example: 0.14
+        avgDaysToFirstPayment:
+          type: number
+          format: double
+          description: >-
+            Mean days from `placedAt` to the first attributed payment,
+            over placements that produced at least one. Omitted when none have
+            — a zero would read as instant collection, which is the opposite of
+            the truth.
+          minimum: 0
+          example: 23.4
+        feesMinor:
+          type: integer
+          format: int64
+          description: >-
+            Commission accrued on those placements, in minor units — summed
+            from the individual fee lines, so it matches the invoices.
+          minimum: 0
+          example: 2163000
+      example:
+        agencyId: 01M0MEKX1Z5D7KPN2ACV9FS4GT
+        period:
+          from: '2026-01-01'
+          to: '2026-06-30'
+        currency: EUR
+        placementCount: 412
+        totalPlacedMinor: 103000000
+        totalRecoveredMinor: 14420000
+        recoveryRate: 0.14
+        avgDaysToFirstPayment: 23.4
+        feesMinor: 2163000

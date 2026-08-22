@@ -1,0 +1,693 @@
+# =============================================================================
+# Collections Platform — contact-service API (CON-4)
+# =============================================================================
+# contact-service is the SINGLE producer of `ContactAttempted` and
+# `ContactCompleted` (A§7.2, plan §6.4). treatment-service does not emit them:
+# on dispatch it calls `POST /v1/contacts`, and when the provider webhook
+# lands it calls `POST /v1/contacts/{contactId}/outcome`. The Collector
+# workbench records manual contacts through exactly the same two endpoints, so
+# there is one contact history and one event stream regardless of who acted.
+#
+# Both callers retry, which is why `Idempotency-Key` is required on both
+# commands.
+#
+# Shared shapes come from `./common.v1.yaml`; nothing here restates them.
+#
+# RELEASED FILE — IMMUTABLE once on main. A change a consumer could notice
+# ships as `contact.v2.yaml`. See contracts/README.md.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Contact Service
+  version: 1.0.0
+  description: >-
+    Customer contact attempts and their outcomes. A contact has exactly two
+    states: `ATTEMPTED` when it is recorded (emitting `ContactAttempted`) and
+    `COMPLETED` once its outcome is known (emitting `ContactCompleted`). The
+    outcome is written once and never revised — contact history is audit
+    evidence for regulators and for the decisioning guardrails that cap contact
+    frequency, so a correction is a new contact record, not an edit.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      Paths are relative to the service base URL. Domain services are reached
+      in-cluster and callers resolve the host from configuration, so no
+      absolute host is part of the contract.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: contacts
+    description: >-
+      Recording contact attempts, recording their outcomes, and reading contact
+      history by customer or by case.
+
+paths:
+  /v1/contacts:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: createContact
+      summary: Record a contact attempt
+      description: >-
+        Records that the platform reached out to a customer, or that a customer
+        reached in, and emits `ContactAttempted`. The contact starts
+        `ATTEMPTED`; call `POST /v1/contacts/{contactId}/outcome` when the
+        result is known.
+
+
+        Callers: treatment-service on dispatch (supplying `treatmentId` so the
+        contact can be attributed back to a decision), and the Collector
+        workbench for a manual call or letter. Contact-frequency guardrails read
+        this history, so a contact that is not recorded here is invisible to the
+        caps that protect customers — recording is not optional.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key` (A§21): both
+        treatment-service and the UI retry, and a duplicate must not produce a
+        second `ContactAttempted` or a second entry against the frequency cap.
+
+
+        Errors — `CONTACT_INVALID` (400) with `details[]` per field;
+        `CUSTOMER_NOT_FOUND` / `CASE_NOT_FOUND` (404);
+        `REQUEST_IN_PROGRESS` (409); `CASE_CUSTOMER_MISMATCH` (422) when
+        `caseId` does not belong to `customerId`; `IDEMPOTENCY_KEY_REUSED`
+        (422).
+      tags: [contacts]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The contact attempt to record.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContactRequest'
+      responses:
+        '201':
+          description: >-
+            Contact recorded in `ATTEMPTED`. Replayed verbatim for a duplicate
+            `Idempotency-Key` carrying the same body.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contact'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/contacts/{contactId}:
+    parameters:
+      - $ref: '#/components/parameters/ContactIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: getContact
+      summary: Get a contact
+      description: >-
+        Returns the contact attempt and, once recorded, its outcome.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `CONTACT_NOT_FOUND` (404).
+      tags: [contacts]
+      responses:
+        '200':
+          description: The contact.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contact'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/contacts/{contactId}/outcome:
+    parameters:
+      - $ref: '#/components/parameters/ContactIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    post:
+      operationId: recordContactOutcome
+      summary: Record a contact's outcome
+      description: >-
+        Completes the contact and emits `ContactCompleted`. Written once: a
+        contact whose outcome is already recorded returns 409. If the recorded
+        outcome turns out to be wrong, record a new contact — contact history is
+        append-only evidence (D§3.6).
+
+
+        Callers: treatment-service when a provider delivery webhook lands, and
+        the Collector workbench when a collector finishes a call.
+
+
+        `PROMISE_MADE` describes the *conversation*; it does not create a
+        promise. The collector (or treatment-service) records the commitment
+        itself with `POST /v1/promises` on arrangement-service, which owns
+        promises (A§23). Recording the outcome here and forgetting the promise
+        leaves the case with no dated commitment.
+
+
+        Valid `outcome` values depend on `channel`:
+
+        * `DELIVERED`, `FAILED` — dispatch results; valid on every channel.
+
+        * `ANSWERED`, `NO_ANSWER` — `CALL` only.
+
+        * `PROMISE_MADE`, `DISPUTED` — channels that can carry a customer
+          response: `CALL`, `EMAIL`, `DIGITAL`, and any `INBOUND` contact.
+
+        * `WRONG_NUMBER` — `SMS` and `CALL` only. A returned letter is
+          `FAILED`.
+
+
+        Scope: `cases:write`. Requires `Idempotency-Key`.
+
+
+        Errors — `CONTACT_OUTCOME_INVALID` (400) with `details[]` per field,
+        e.g. `[{ "field": "occurredAt", "reason": "DATE_IN_FUTURE" }]`;
+        `CONTACT_NOT_FOUND` (404); `CONTACT_OUTCOME_ALREADY_RECORDED` (409);
+        `CONTACT_OUTCOME_NOT_VALID_FOR_CHANNEL` (422) per the table above;
+        `IDEMPOTENCY_KEY_REUSED` (422).
+      tags: [contacts]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: What happened, and when.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordContactOutcomeRequest'
+      responses:
+        '200':
+          description: The contact, now `COMPLETED` and carrying its outcome.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contact'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.v1.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common.v1.yaml#/components/responses/UnprocessableEntity' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/customers/{customerId}/contacts:
+    parameters:
+      - $ref: '#/components/parameters/CustomerIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: listCustomerContacts
+      summary: List a customer's contacts
+      description: >-
+        Paginated contact history for one customer across every case and
+        channel, newest first (`contactId` descending — ULIDs sort by creation
+        time). This is the A§13 customer-contacts endpoint, owned by
+        contact-service because it owns the data (A§7.3,
+        contracts/README.md path-ownership matrix).
+
+
+        The optional `channel`, `attemptedFrom` and `attemptedTo` filters are
+        what the decisioning context builder uses to compute
+        `contactHistory.contacts7d`, `contacts30d` and `byChannel7d`, and what
+        the guardrail evaluator uses to enforce frequency caps.
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for `attemptedFrom` after
+        `attemptedTo`, an unknown `channel`, or a `cursor` that does not belong
+        to these filter arguments; `CUSTOMER_NOT_FOUND` (404).
+      tags: [contacts]
+      parameters:
+        - $ref: '#/components/parameters/ChannelQuery'
+        - $ref: '#/components/parameters/AttemptedFromQuery'
+        - $ref: '#/components/parameters/AttemptedToQuery'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of the customer's contacts, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactPage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+  /v1/cases/{caseId}/contacts:
+    parameters:
+      - $ref: '#/components/parameters/CaseIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+
+    get:
+      operationId: listCaseContacts
+      summary: List a case's contacts
+      description: >-
+        Paginated contact history for one collection case, newest first — the
+        Collector workbench case timeline. Owned by contact-service even though
+        the URL nests under `/v1/cases` (A§7.3).
+
+
+        Scope: `cases:read`.
+
+
+        Errors — `VALIDATION_FAILED` (400) for a `cursor` that does not belong
+        to these filter arguments; `CASE_NOT_FOUND` (404).
+      tags: [contacts]
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of the case's contacts, newest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactPage'
+        '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common.v1.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common.v1.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common.v1.yaml#/components/responses/NotFound' }
+        '500': { $ref: './common.v1.yaml#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Cognito-issued JWT access token, validated by the service itself with
+        deny-by-default scope checks (A§62, A§64). The required scope is named
+        in every operation description; OpenAPI 3.0 cannot attach scopes to an
+        `http` scheme, so the description is normative.
+
+  parameters:
+    ContactIdPath:
+      name: contactId
+      in: path
+      required: true
+      description: Identifier of the contact (ULID, minted by this service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKR6T9Y2EHG7ZWP5XM8BN
+
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      description: >-
+        Customer whose contacts are being listed. Source-system identifier,
+        kept in its source format and never re-minted (contracts/README.md §6).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        example: CUS-0004417
+
+    CaseIdPath:
+      name: caseId
+      in: path
+      required: true
+      description: >-
+        Collection case whose contacts are being listed (ULID minted by
+        case-service).
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKBHXV37E3S3E28JT97KB
+
+    ChannelQuery:
+      name: channel
+      in: query
+      required: false
+      description: Filter to one channel. Omit for every channel.
+      schema:
+        $ref: '#/components/schemas/ContactChannel'
+
+    AttemptedFromQuery:
+      name: attemptedFrom
+      in: query
+      required: false
+      description: >-
+        Earliest `attemptedAt` date to include, `YYYY-MM-DD`, inclusive. Omit
+        for no lower bound.
+      schema:
+        type: string
+        format: date
+        example: '2026-08-01'
+
+    AttemptedToQuery:
+      name: attemptedTo
+      in: query
+      required: false
+      description: >-
+        Latest `attemptedAt` date to include, `YYYY-MM-DD`, inclusive. Omit for
+        no upper bound.
+      schema:
+        type: string
+        format: date
+        example: '2026-08-22'
+
+  schemas:
+    # ------------------------------------------------------ vocabularies ----
+    ContactChannel:
+      type: string
+      title: ContactChannel
+      description: >-
+        How the contact was carried. `DIGITAL` covers in-app and web-portal
+        messaging — anything the customer reads inside an authenticated
+        channel, as distinct from `EMAIL` and `SMS`, which leave the bank's
+        perimeter and are therefore subject to different consent rules.
+      enum:
+        - SMS
+        - EMAIL
+        - LETTER
+        - CALL
+        - DIGITAL
+      example: SMS
+
+    ContactDirection:
+      type: string
+      title: ContactDirection
+      description: >-
+        Who initiated the contact. `OUTBOUND` counts against contact-frequency
+        caps and contact windows; `INBOUND` never does — the platform must not
+        penalise a customer for getting in touch.
+      enum:
+        - OUTBOUND
+        - INBOUND
+      example: OUTBOUND
+
+    ContactStatus:
+      type: string
+      title: ContactStatus
+      description: >-
+        Contact lifecycle. `ATTEMPTED` is recorded and awaiting its result
+        (`ContactAttempted` emitted); `COMPLETED` carries an outcome
+        (`ContactCompleted` emitted). There is no failed-to-record state: if
+        the command did not return 2xx, no contact exists.
+      enum:
+        - ATTEMPTED
+        - COMPLETED
+      example: COMPLETED
+
+    ContactOutcome:
+      type: string
+      title: ContactOutcome
+      description: >-
+        What the contact achieved. `DELIVERED` and `FAILED` are dispatch facts
+        from the provider; the rest describe what the customer did.
+        `PROMISE_MADE` records that a commitment was given during the contact —
+        the commitment itself is created on arrangement-service, not here.
+        `DISPUTED` means the customer contests the debt, which suspends
+        collection activity. Which values are legal depends on `channel`; see
+        the operation description.
+      enum:
+        - DELIVERED
+        - FAILED
+        - ANSWERED
+        - NO_ANSWER
+        - PROMISE_MADE
+        - DISPUTED
+        - WRONG_NUMBER
+      example: ANSWERED
+
+    # ---------------------------------------------------------- contact -----
+    CreateContactRequest:
+      type: object
+      title: CreateContactRequest
+      description: A contact attempt to record.
+      additionalProperties: false
+      required:
+        - customerId
+        - channel
+        - direction
+      properties:
+        customerId:
+          type: string
+          description: >-
+            Customer contacted. Source-system identifier, kept in its source
+            format. Required even when `caseId` is supplied, so contact history
+            is queryable for a customer whose cases have closed.
+          minLength: 1
+          maxLength: 64
+          example: CUS-0004417
+        caseId:
+          type: string
+          description: >-
+            Collection case this contact belongs to (ULID minted by
+            case-service). Omitted for contact that is not case-driven — a
+            pre-delinquency courtesy reminder, or an inbound call about an
+            account with no open case.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        channel:
+          $ref: '#/components/schemas/ContactChannel'
+        direction:
+          $ref: '#/components/schemas/ContactDirection'
+        treatmentId:
+          type: string
+          description: >-
+            Treatment execution that caused this contact (ULID minted by
+            treatment-service). Supplied by treatment-service on dispatch and
+            omitted for manual contact; it is the link that lets analytics
+            attribute an outcome back to the decision that chose the treatment.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKS8V1Z3FJH9YXQ6ZN7CP
+        attemptedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the contact was actually attempted, RFC3339 UTC. Supply it
+            when recording after the fact — a letter posted yesterday, a call
+            logged at the end of a shift — so frequency caps and contact
+            windows are evaluated against the real time. Omit it and the
+            service uses its own clock. A value in the future is rejected.
+          example: '2026-08-22T09:30:00Z'
+        notes:
+          type: string
+          description: >-
+            Operator free text about the attempt, retained verbatim. Treated as
+            customer data: never written to logs or events, and masked in
+            non-production copies. Do not use it to carry structured facts —
+            those belong in `outcome`.
+          minLength: 1
+          maxLength: 2000
+          example: Left voicemail on mobile, will retry after 18:00
+      example:
+        customerId: CUS-0004417
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        channel: CALL
+        direction: OUTBOUND
+        treatmentId: 01M0MEKS8V1Z3FJH9YXQ6ZN7CP
+
+    RecordContactOutcomeRequest:
+      type: object
+      title: RecordContactOutcomeRequest
+      description: The result of a contact attempt.
+      additionalProperties: false
+      required:
+        - outcome
+        - occurredAt
+      properties:
+        outcome:
+          $ref: '#/components/schemas/ContactOutcome'
+        occurredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the outcome happened, RFC3339 UTC — the provider's delivery
+            timestamp, or the moment the call ended. Required rather than
+            derived, because a provider webhook can arrive minutes or hours
+            late and analytics must attribute the outcome to when it really
+            happened. Must not be earlier than the contact's `attemptedAt`, and
+            must not be in the future.
+          example: '2026-08-22T09:34:12Z'
+        detail:
+          type: string
+          description: >-
+            Free-text elaboration — the provider's failure reason, or the
+            collector's note on what the customer said. Treated as customer
+            data: never written to logs or events, and masked in non-production
+            copies.
+          minLength: 1
+          maxLength: 2000
+          example: Customer will pay EUR 500 on 5 September
+      example:
+        outcome: PROMISE_MADE
+        occurredAt: '2026-08-22T09:34:12Z'
+        detail: Customer will pay EUR 500 on 5 September
+
+    Contact:
+      type: object
+      title: Contact
+      description: A contact attempt and, once known, its outcome.
+      additionalProperties: false
+      required:
+        - contactId
+        - customerId
+        - channel
+        - direction
+        - status
+        - attemptedAt
+        - createdAt
+      properties:
+        contactId:
+          type: string
+          description: Identifier of the contact (ULID, minted by this service).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKR6T9Y2EHG7ZWP5XM8BN
+        customerId:
+          type: string
+          description: Customer contacted (source-system identifier).
+          minLength: 1
+          maxLength: 64
+          example: CUS-0004417
+        caseId:
+          type: string
+          description: >-
+            Collection case this contact belongs to. Omitted when the contact
+            was not case-driven.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        channel:
+          $ref: '#/components/schemas/ContactChannel'
+        direction:
+          $ref: '#/components/schemas/ContactDirection'
+        status:
+          $ref: '#/components/schemas/ContactStatus'
+        treatmentId:
+          type: string
+          description: >-
+            Treatment execution that caused this contact. Omitted for manual
+            contact.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKS8V1Z3FJH9YXQ6ZN7CP
+        attemptedAt:
+          type: string
+          format: date-time
+          description: When the contact was attempted, RFC3339 UTC.
+          example: '2026-08-22T09:30:00Z'
+        createdAt:
+          type: string
+          format: date-time
+          description: >-
+            When the platform recorded the attempt, RFC3339 UTC. Equal to
+            `attemptedAt` for live dispatch; later when a contact was logged
+            after the fact.
+          example: '2026-08-22T09:30:01Z'
+        outcome:
+          $ref: '#/components/schemas/ContactOutcome'
+        occurredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the outcome happened, RFC3339 UTC. Present only once the
+            outcome has been recorded.
+          example: '2026-08-22T09:34:12Z'
+        detail:
+          type: string
+          description: >-
+            Free-text elaboration recorded with the outcome. Present only once
+            the outcome has been recorded, and only if supplied.
+          minLength: 1
+          maxLength: 2000
+          example: Customer will pay EUR 500 on 5 September
+        notes:
+          type: string
+          description: >-
+            Operator free text recorded with the attempt, if any.
+          minLength: 1
+          maxLength: 2000
+          example: Left voicemail on mobile, will retry after 18:00
+      example:
+        contactId: 01M0MEKR6T9Y2EHG7ZWP5XM8BN
+        customerId: CUS-0004417
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        channel: CALL
+        direction: OUTBOUND
+        status: COMPLETED
+        treatmentId: 01M0MEKS8V1Z3FJH9YXQ6ZN7CP
+        attemptedAt: '2026-08-22T09:30:00Z'
+        createdAt: '2026-08-22T09:30:01Z'
+        outcome: PROMISE_MADE
+        occurredAt: '2026-08-22T09:34:12Z'
+        detail: Customer will pay EUR 500 on 5 September
+
+    ContactPage:
+      type: object
+      title: ContactPage
+      description: One page of contacts (contracts/README.md §10).
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: Contacts, newest first.
+          items:
+            $ref: '#/components/schemas/Contact'
+          maxItems: 200
+        nextCursor:
+          type: string
+          description: >-
+            Opaque continuation token for the next page, or `null` on the last
+            page. Only valid with identical filter arguments.
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          example: eyJjIjoiMDFNME1FS1I2VDlZMkVIRzdaV1AifQ
+      example:
+        items:
+          - contactId: 01M0MEKR6T9Y2EHG7ZWP5XM8BN
+            customerId: CUS-0004417
+            caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            channel: CALL
+            direction: OUTBOUND
+            status: COMPLETED
+            attemptedAt: '2026-08-22T09:30:00Z'
+            createdAt: '2026-08-22T09:30:01Z'
+            outcome: PROMISE_MADE
+            occurredAt: '2026-08-22T09:34:12Z'
+        nextCursor: null
