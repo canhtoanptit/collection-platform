@@ -244,7 +244,7 @@ Conventions (CON-1, enforced by CON-7): every schema `additionalProperties:false
 - Accept: cluster ACTIVE; topics listed via IAM-auth `kafka-topics.sh` from an in-cluster pod.
 
 **FND-6 — Cognito — S** · deps: FND-1 · parallel: FND-2..5
-- User pool `colx-dev` + hosted domain; resource server `colx-api` scopes (`ingestion/read`, `ingestion/write`, `webhook/write`, `cases/read`, `cases/write`, `decisions/read`, `decisions/write`, `strategy/author`, `payments/admin`, …); groups `strategy-author, business-approver, risk-approver, admin, collector, ops-admin, analyst`; M2M clients `platform-services`, `simulator` (secrets → Secrets Manager). SPA client deferred to Phase 12 (callback URLs unknown).
+- User pool `colx-dev` + hosted domain; resource server `colx-api`. SCOPE-FORMAT RULING (freeze review): contracts and services use provider-neutral logical scopes in colon form (`cases:read`, `payments:admin`, `delinquency:admin`, …) — `platform/authn` maps provider claim formats to logical scopes (Cognito emits `colx-api/cases.read`; the middleware strips the resource-server prefix and maps `.`→`:`). Cognito scope names are therefore declared in dot form (`cases.read`, `ingestion.write`, `webhook.write`, `decisions.read`, `strategy.author`, …); groups `strategy-author, business-approver, risk-approver, admin, collector, ops-admin, analyst`; M2M clients `platform-services`, `simulator` (secrets → Secrets Manager). SPA client deferred to Phase 12 (callback URLs unknown).
 - Accept: client-credentials token minted via curl contains expected scope.
 
 **FND-7 — EKS + IRSA + addons — L (decompose: cluster / access+addons / IRSA map)** · deps: FND-2,3 · parallel: FND-4/5/6

@@ -169,13 +169,17 @@ CON-6:
   - "scripts/verify/CON-6.sh"
 
 # Contracts CI: schema/example/asyncapi checker, vacuum ruleset, immutability gate.
+# Also absorbs two FND-0 follow-ups (lead ruling): the Helm chart CI job and
+# the missing FND-0 verification script.
 CON-7:
   - ".github/workflows/contracts-ci.yml"
+  - ".github/workflows/charts-ci.yml"
   - "tools/contractcheck/**"
   - "contracts/vacuum-ruleset.yaml"
   - "scripts/ci/check-contract-immutability.sh"
   - "scripts/ci/contracts-check.sh"
   - "scripts/verify/CON-7.sh"
+  - "scripts/verify/FND-0.sh"
 
 # Decisioning JSON Schemas, decisioning event contexts, registries, golden
 # vectors. (DEC-1 was split by the lead into 1A schemas / 1B OpenAPI so the two
