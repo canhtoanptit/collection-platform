@@ -1,0 +1,849 @@
+# =============================================================================
+# Collections Platform — model scoring contract (DEC-1)
+# =============================================================================
+# Owns `POST /v1/models/{modelId}/versions/{version}/score`
+# (contracts/README.md "URL path-ownership matrix").
+#
+# THIS IS THE MODEL CONTRACT of A§56 / D§42, and it is the whole point of the
+# file: decision-service must not know or care whether a model is Python,
+# XGBoost, a neural network, an internal service or an external provider. It
+# calls this one endpoint. `services/model-stub` implements this spec in dev
+# (deterministic scores, plan DEC-8) and the real model server implements the
+# same spec in ML-4; switching between them is a base-URL change in
+# decision-service configuration and nothing else — no code change, no redeploy
+# of the decision pipeline, no new contract. If a future model needs a different
+# request or response shape, that is a `model.v2.yaml`, not a special case in a
+# caller.
+#
+# CUSTOM-VERB PATH — DELIBERATE DIVERGENCE FROM THE PLAN SKETCH.
+# The plan and contracts/README.md write this path with a colon custom verb:
+#   POST /v1/models/{modelId}/versions/{version}:score
+# That form is NOT usable here. Go's `net/http.ServeMux` (Go 1.22+ patterns)
+# rejects `{version}:score` outright — a wildcard must be an entire path
+# segment — and panics at registration:
+#   `bad wildcard segment (must end with '}')`
+# oapi-codegen happily generates the route, so the failure is at server start
+# rather than at build time, which is the worst place for it. The path is
+# therefore the sub-resource form `.../versions/{version}/score`, which every
+# router accepts and which reads the same. Verified in
+# `scripts/verify/DEC-1B.sh`. The path-ownership row in contracts/README.md
+# still shows the colon form and should be corrected to match this file.
+#
+# Source: A§56 (model integration / model contract), A§58 (explainability —
+# reason codes come back from the model, not from the caller's imagination),
+# D§42 (ML platform integration), plan §7 DEC-1 and DEC-8.
+#
+# SELF-CONTAINED BY DESIGN: the context document is declared inline rather than
+# `$ref`-ing `contracts/schemas/decisioning/context-document.v1.json`, because
+# oapi-codegen cannot follow a JSON-Schema `$ref` out of an OpenAPI document and
+# the strict-server contract must be a compile-time artefact (CLAUDE.md §4). The
+# shape is byte-for-byte the same as the `ContextDocument` in
+# `decision.v1.yaml`: the model scores exactly the document the decision was
+# made on, which is what makes a recorded score reproducible from the recorded
+# input snapshot. A divergence between the two is a bug.
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `model.v2.yaml`. See contracts/README.md §1.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Model Scoring Contract
+  version: 1.0.0
+  description: >-
+    The model contract (A§56, D§42): score one subject's context document with
+    one pinned model version, and return a probability, a band and the reason
+    codes that explain it.
+
+
+    Implementations are swappable by construction. Dev runs
+    `services/model-stub`, whose scores are a deterministic function of
+    `(accountId, modelId, version)` plus a fixture-override file, so tests are
+    reproducible without any ML infrastructure; production runs the real model
+    server. Both implement this document, and decision-service is configured
+    with a base URL rather than a provider (plan DEC-8).
+
+
+    The endpoint is a **pure function with no side effect**, and that is a
+    contractual property, not an implementation detail: the same request must
+    return the same response. It therefore takes no `Idempotency-Key` —
+    contracts/README.md §8 requires the header only on POSTs that create a side
+    effect, and a scoring call creates none. A caller retrying a timeout is
+    scoring again, not risking a duplicate.
+
+
+    Conventions (normative: `contracts/README.md`): A§20 error body on every
+    non-2xx response, `X-Correlation-Id` accepted on every request and echoed on
+    every response (A§97), RFC3339 UTC timestamps.
+
+
+    The request body is a decisioning **context document**, and it is the only
+    place monetary values appear on this API: decimal strings in *major* units
+    (`"500.00"`, not `50000`). That is the platform's single documented
+    departure from int64 minor units, made once by the context builder so that
+    business rules and model features read the numbers the business states
+    (contracts/README.md §4, plan §2/§6.8).
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. This
+    is a service-to-service call: the required scope is `decisions:write`,
+    because scoring exists only as a step in producing a decision, and `admin`
+    is additionally accepted so an operator can probe a model version directly
+    when investigating a score.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the model server is reached directly at
+      the base URL decision-service is configured with.
+  - url: http://localhost:8081
+    description: Local development (`services/model-stub`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: models
+    description: >-
+      Scoring one subject against one pinned model version — the whole of the
+      A§56 model contract.
+
+paths:
+  /v1/models/{modelId}/versions/{version}/score:
+    parameters:
+      - $ref: '#/components/parameters/ModelIdPath'
+      - $ref: '#/components/parameters/ModelVersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: scoreModelVersion
+      summary: Score a context document with one model version
+      description: >-
+        Scores the supplied context document with the named model version and
+        returns a probability in [0,1], the band it falls in, and the reason
+        codes that explain it.
+
+
+        Required scope: `decisions:write` (or `admin`).
+
+
+        **Determinism is part of the contract.** The same context document
+        scored twice against the same model version must return the same score.
+        Decision-service records the score and the model version in the decision
+        audit and never re-scores when explaining a decision; a model that
+        drifted between two calls with the same input would make every recorded
+        explanation unreliable. A model that needs to change behaviour publishes
+        a new version.
+
+
+        **Versions are pinned, never resolved.** There is no "latest": the
+        strategy document names `modelId` and `version` explicitly, and an
+        unknown pair is 404 `MODEL_VERSION_NOT_FOUND` rather than a silent
+        fallback. Serving a different model than the one a strategy was
+        approved with would defeat strategy governance entirely.
+
+
+        **Timeouts are the caller's, and are reported as 503.** The strategy's
+        `modelRefs[].timeoutMs` bounds how long decision-service waits; when
+        this endpoint cannot answer in time — its own upstream inference call
+        hanging, a cold model — it responds **503 `MODEL_TIMEOUT`**. HTTP 504 is
+        deliberately not used: 504 belongs to a gateway reporting on something
+        behind it, whereas this is the addressed service saying it could not
+        complete in the time available. Decision-service then follows the
+        strategy's declared `onError` behaviour — substitute `defaultScore` and
+        record a reason code, or fail the decision — so the *strategy* decides
+        how much a missing score matters, rather than the model client guessing
+        (A§56, plan DEC-7/DEC-8).
+
+
+        **Reason codes come from the model.** A§58 requires a decision to be
+        explainable, and "the model said 0.72" is not an explanation. Every
+        response carries at least one reason code from
+        `contracts/registries/reason-codes.v1.json`, which decision-service
+        merges into the decision's reason codes in the models stage.
+      tags:
+        - models
+      requestBody:
+        required: true
+        description: >-
+          The context document to score — exactly the document the decision is
+          being made on.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContextDocument'
+      responses:
+        '200':
+          description: The score, its band and the reason codes explaining it.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelScore'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated by `platform/authn` against
+        the configured issuer's JWKS. Authorization is deny-by-default: the one
+        operation here requires `decisions:write` (or `admin`), and a token
+        without either is rejected with 403. In dev the caller is
+        decision-service's own service identity; the model server never sees an
+        end-user token.
+
+  responses:
+    ServiceUnavailable:
+      description: >-
+        503 — the model could not produce a score in the time available, or is
+        temporarily unable to serve this version (loading, upstream inference
+        unavailable). The body is the standard A§20 `Error` from
+        `common.v1.yaml`, with `code` `MODEL_TIMEOUT` for the timeout case and
+        `MODEL_UNAVAILABLE` for the rest. Retryable.
+
+
+        This response is declared locally rather than referenced from
+        `common.v1.yaml` only because that file — which is released and
+        immutable — has no 503 among its canned responses. The *body schema* is
+        still the shared `Error`: no operation in this repository defines its
+        own error schema (contracts/README.md §7). CON-1 should add a
+        `ServiceUnavailable` response to the common components; when it does,
+        this local copy becomes a `$ref` in `model.v2.yaml`.
+      headers:
+        X-Correlation-Id:
+          $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: './common.v1.yaml#/components/schemas/Error'
+          example:
+            code: MODEL_TIMEOUT
+            message: Model PAYMENT_PROPENSITY version 8 did not respond within the time available
+            correlationId: 01M0MEKBHXV37E3S3E28JT97KB
+
+  parameters:
+    ModelIdPath:
+      name: modelId
+      in: path
+      required: true
+      description: >-
+        Model identifier as registered with the model server, matching the
+        `modelRefs[].modelId` of the strategy that is scoring. Reference data
+        owned by the ML platform, so a pattern rather than a contract enum —
+        registering a model must not require a new spec version.
+      schema:
+        type: string
+        pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+        example: PAYMENT_PROPENSITY
+    ModelVersionPath:
+      name: version
+      in: path
+      required: true
+      description: >-
+        Model version, pinned by the strategy document. A string rather than an
+        integer because model versions belong to the ML platform's numbering,
+        not to the platform's own monotonic version counters — A§16 shows `"8"`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 32
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$'
+        example: '8'
+
+  schemas:
+    Channel:
+      type: string
+      title: Channel
+      description: >-
+        Contact channel. The closed set implemented by treatment-service's
+        channel adapters; identical to `Channel` in `customer.v1.yaml`,
+        `strategy.v1.yaml`, `decision.v1.yaml` and `treatment.v1.yaml`.
+      enum:
+        - SMS
+        - EMAIL
+        - LETTER
+        - DIGITAL
+      example: SMS
+
+    ReasonCodeValue:
+      type: string
+      title: ReasonCodeValue
+      description: >-
+        Stable reason code from `contracts/registries/reason-codes.v1.json`.
+        Clients and analytics branch on these; `message` text never carries
+        meaning (A§20, A§58).
+      pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+      example: PAYMENT_PROPENSITY_0_72
+
+    DecimalAmount:
+      type: string
+      title: DecimalAmount
+      description: >-
+        Monetary amount as a decimal string in **major** units — `"500"` and
+        `"500.00"` both mean five hundred, not five. The platform's single
+        documented departure from int64 minor units, made once by the context
+        builder so that business rules and model features read the numbers the
+        business states rather than `50000` (contracts/README.md §4, plan
+        §2/§6.8). Currency travels as `delinquency.currency`; an amount is never
+        interpretable on its own.
+      pattern: '^-?(0|[1-9][0-9]{0,15})(\.[0-9]{1,2})?$'
+      example: '500.00'
+
+    Probability:
+      type: string
+      title: Probability
+      description: >-
+        A probability in [0,1] as a decimal string with up to six decimal
+        places. A string rather than a JSON number for the same reason monetary
+        amounts are strings: the value is compared against thresholds authored
+        by humans, is written verbatim into the decision audit, and must
+        round-trip exactly. `"0.5"` and `"0.500000"` are the same probability;
+        `"1.0000001"` is not a probability and is rejected.
+      pattern: '^(0(\.[0-9]{1,6})?|1(\.0{1,6})?)$'
+      example: '0.72'
+
+    DecisionSubject:
+      type: object
+      title: DecisionSubject
+      description: >-
+        Who the context document is about. `customerId` and `accountId` are
+        source-system identifiers kept in their source format
+        (contracts/README.md §6); `caseId` is a platform-minted ULID, present
+        when the decision is being made inside an open collection case.
+      additionalProperties: false
+      required:
+        - customerId
+        - accountId
+      properties:
+        customerId:
+          type: string
+          description: Source-system customer identifier.
+          minLength: 1
+          maxLength: 64
+          example: C123
+        accountId:
+          type: string
+          description: >-
+            Source-system account identifier (account number). The stub model
+            derives its deterministic score from this value, so a fixture
+            account always scores the same.
+          minLength: 1
+          maxLength: 64
+          example: A123
+        caseId:
+          type: string
+          description: >-
+            Collection case the decision belongs to. Omitted when deciding
+            outside a case.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+      example:
+        customerId: C123
+        accountId: A123
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+
+    ContextDelinquency:
+      type: object
+      title: ContextDelinquency
+      description: >-
+        Delinquency features (A§52). `amountOverdue` is a decimal string in
+        major units — see `DecimalAmount` — and always travels with `currency`.
+      additionalProperties: false
+      required:
+        - dpd
+        - bucket
+        - amountOverdue
+        - currency
+      properties:
+        dpd:
+          type: integer
+          format: int32
+          description: >-
+            Days past due, computed by delinquency-service as
+            `asOf - oldestUnpaidDueDate`. Zero means current.
+          minimum: 0
+          maximum: 36500
+          example: 35
+        bucket:
+          type: string
+          description: >-
+            Delinquency bucket code from the delinquency-service bucket
+            configuration. Reference data, not a contract enum, because D§5
+            requires the buckets to be configurable rather than hard-coded.
+          pattern: '^[A-Z0-9][A-Z0-9_+-]{0,31}$'
+          example: 31-60
+        amountOverdue:
+          $ref: '#/components/schemas/DecimalAmount'
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency of every monetary field in this document.
+            An account has exactly one currency.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+      example:
+        dpd: 35
+        bucket: 31-60
+        amountOverdue: '500.00'
+        currency: EUR
+
+    ContextAccount:
+      type: object
+      title: ContextAccount
+      description: >-
+        Account features. `currentBalance` is a decimal string in major units,
+        in the currency named by `delinquency.currency`.
+      additionalProperties: false
+      required:
+        - productCode
+        - currentBalance
+        - status
+      properties:
+        productCode:
+          type: string
+          description: >-
+            Collections-facing product code normalised by the ingestion
+            canonicalizer — reference data owned by account-service, hence a
+            pattern rather than an enum.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PERSONAL_LOAN
+        currentBalance:
+          $ref: '#/components/schemas/DecimalAmount'
+        status:
+          type: string
+          description: >-
+            Normalised collections status of the account — the closed set
+            `account.v1.yaml` publishes, mapped from the source system's own
+            richer vocabulary by the canonicalizer.
+          enum:
+            - ACTIVE
+            - SUSPENDED
+            - CLOSED
+            - WRITTEN_OFF
+          example: ACTIVE
+      example:
+        productCode: PERSONAL_LOAN
+        currentBalance: '4820.55'
+        status: ACTIVE
+
+    ContextCustomer:
+      type: object
+      title: ContextCustomer
+      description: >-
+        Customer features. `doNotContact` and `vulnerabilityFlag` are policy
+        inputs; a model may read them, but nothing a model returns can widen
+        what policy allows (A§54, CLAUDE.md hard rule 2).
+      additionalProperties: false
+      required:
+        - contactability
+        - doNotContact
+        - vulnerabilityFlag
+        - segment
+      properties:
+        contactability:
+          type: string
+          description: >-
+            Derived contactability band, computed by the context builder from
+            contact history and available channels. A band rather than a raw
+            score so that features stay stable when the derivation is tuned;
+            `UNKNOWN` when there is not enough history to say.
+          enum:
+            - HIGH
+            - MEDIUM
+            - LOW
+            - UNKNOWN
+          example: HIGH
+        preferredChannel:
+          $ref: '#/components/schemas/Channel'
+        doNotContact:
+          type: boolean
+          description: >-
+            True when the customer must not be contacted on any channel. A
+            global suppression, not a preference.
+          example: false
+        vulnerabilityFlag:
+          type: boolean
+          description: >-
+            True when a vulnerability or assistance indicator applies. The
+            underlying reason is deliberately not carried into the context
+            document.
+          example: false
+        segment:
+          type: string
+          description: >-
+            Collections segment the customer currently falls in, matching the
+            `segments[].name` vocabulary of the strategy documents.
+            Unsegmented customers carry `DEFAULT`.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_LOW_RISK
+      example:
+        contactability: HIGH
+        preferredChannel: SMS
+        doNotContact: false
+        vulnerabilityFlag: false
+        segment: EARLY_STAGE_LOW_RISK
+
+    ContextArrangement:
+      type: object
+      title: ContextArrangement
+      description: >-
+        Whether the customer already has a payment plan or a live promise —
+        among the strongest features a payment-propensity model has, and the
+        reason these three flags are first-class context rather than something a
+        model has to infer.
+      additionalProperties: false
+      required:
+        - hasActiveArrangement
+        - hasOpenPromise
+        - brokenPromises90d
+      properties:
+        hasActiveArrangement:
+          type: boolean
+          description: True when an arrangement is ACTIVE for this account.
+          example: false
+        hasOpenPromise:
+          type: boolean
+          description: True when a promise to pay is open and not yet due or broken.
+          example: false
+        brokenPromises90d:
+          type: integer
+          format: int32
+          description: >-
+            Promises broken in the last 90 days. A count rather than a boolean
+            because "broke one" and "broke four" are different situations.
+          minimum: 0
+          maximum: 1000
+          example: 0
+      example:
+        hasActiveArrangement: false
+        hasOpenPromise: false
+        brokenPromises90d: 0
+
+    ContextChannelCounts:
+      type: object
+      title: ContextChannelCounts
+      description: >-
+        Contact attempts in the last 7 days by channel. Every channel is
+        present with an explicit count, zero included, so the canonical JSON of
+        a context document — and therefore its content hash, and therefore a
+        deterministic score — does not depend on which channels happened to be
+        used.
+
+
+        One property per member of the `Channel` enum, named in the platform's
+        lowerCamelCase property convention.
+      additionalProperties: false
+      required:
+        - sms
+        - email
+        - letter
+        - digital
+      properties:
+        sms:
+          type: integer
+          format: int32
+          description: '`SMS` attempts in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 1
+        email:
+          type: integer
+          format: int32
+          description: '`EMAIL` attempts in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 0
+        letter:
+          type: integer
+          format: int32
+          description: '`LETTER` dispatches in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 0
+        digital:
+          type: integer
+          format: int32
+          description: '`DIGITAL` notifications in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 0
+      example:
+        sms: 1
+        email: 0
+        letter: 0
+        digital: 0
+
+    ContextContactHistory:
+      type: object
+      title: ContextContactHistory
+      description: >-
+        Recent contact pressure — a contact-propensity model's main input, and
+        the reason the platform can tell "unreachable" apart from "not yet
+        tried".
+      additionalProperties: false
+      required:
+        - contacts7d
+        - contacts30d
+        - byChannel7d
+      properties:
+        contacts7d:
+          type: integer
+          format: int32
+          description: Total contact attempts in the last 7 days, all channels.
+          minimum: 0
+          maximum: 10000
+          example: 1
+        contacts30d:
+          type: integer
+          format: int32
+          description: Total contact attempts in the last 30 days, all channels.
+          minimum: 0
+          maximum: 10000
+          example: 2
+        byChannel7d:
+          $ref: '#/components/schemas/ContextChannelCounts'
+        lastContactAt:
+          type: string
+          format: date-time
+          description: >-
+            When the most recent contact attempt was made, RFC3339 UTC. Omitted
+            when the customer has never been contacted.
+          example: '2026-08-19T09:14:00Z'
+      example:
+        contacts7d: 1
+        contacts30d: 2
+        byChannel7d:
+          sms: 1
+          email: 0
+          letter: 0
+          digital: 0
+        lastContactAt: '2026-08-19T09:14:00Z'
+
+    ContextProvenance:
+      type: object
+      title: ContextProvenance
+      description: >-
+        Where one section of the context document came from and how fresh it
+        was. Carried into scoring — rather than stripped as "not a feature" —
+        because a model server investigating an odd score needs to know whether
+        it was handed six-hour-old data.
+      additionalProperties: false
+      required:
+        - path
+        - source
+        - asOf
+      properties:
+        path:
+          type: string
+          description: >-
+            Dotted path of the context section or field this entry describes,
+            e.g. `delinquency` or `contactHistory.byChannel7d`.
+          pattern: '^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){0,4}$'
+          example: delinquency
+        source:
+          type: string
+          description: >-
+            Which upstream produced the value — a service name for an API
+            fetch, `population-line` when a batch supplied it verbatim,
+            `caller` when a test or simulation request did.
+          pattern: '^[a-z][a-z0-9-]{1,63}$'
+          example: delinquency-service
+        asOf:
+          type: string
+          format: date-time
+          description: >-
+            As-of timestamp of the upstream data, RFC3339 UTC — not the fetch
+            time.
+          example: '2026-08-22T06:00:00Z'
+      example:
+        path: delinquency
+        source: delinquency-service
+        asOf: '2026-08-22T06:00:00Z'
+
+    ContextDocument:
+      type: object
+      title: ContextDocument
+      description: >-
+        The complete input to a decision, and therefore to a score (A§52).
+        Identical to the `ContextDocument` of `decision.v1.yaml` and normatively
+        defined by `schemas/decisioning/context-document.v1.json`; the field
+        catalogue `schemas/decisioning/context-field-catalogue.v1.json` records
+        the type and unit of every member.
+
+
+        The model receives the whole document rather than a hand-picked feature
+        vector, which is what keeps this contract stable as models change: a new
+        model that needs `arrangement.brokenPromises90d` needs no contract
+        change, and decision-service needs no knowledge of which features any
+        model uses (A§56, D§42).
+      additionalProperties: false
+      required:
+        - subject
+        - delinquency
+        - account
+        - customer
+        - arrangement
+        - contactHistory
+        - provenance
+      properties:
+        subject:
+          $ref: '#/components/schemas/DecisionSubject'
+        delinquency:
+          $ref: '#/components/schemas/ContextDelinquency'
+        account:
+          $ref: '#/components/schemas/ContextAccount'
+        customer:
+          $ref: '#/components/schemas/ContextCustomer'
+        arrangement:
+          $ref: '#/components/schemas/ContextArrangement'
+        contactHistory:
+          $ref: '#/components/schemas/ContextContactHistory'
+        provenance:
+          type: array
+          description: >-
+            One entry per context section, in a stable order. Never empty: a
+            context document with no provenance cannot be audited.
+          items:
+            $ref: '#/components/schemas/ContextProvenance'
+          minItems: 1
+          maxItems: 100
+      example:
+        subject:
+          customerId: C123
+          accountId: A123
+          caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        delinquency:
+          dpd: 35
+          bucket: 31-60
+          amountOverdue: '500.00'
+          currency: EUR
+        account:
+          productCode: PERSONAL_LOAN
+          currentBalance: '4820.55'
+          status: ACTIVE
+        customer:
+          contactability: HIGH
+          preferredChannel: SMS
+          doNotContact: false
+          vulnerabilityFlag: false
+          segment: EARLY_STAGE_LOW_RISK
+        arrangement:
+          hasActiveArrangement: false
+          hasOpenPromise: false
+          brokenPromises90d: 0
+        contactHistory:
+          contacts7d: 1
+          contacts30d: 2
+          byChannel7d:
+            sms: 1
+            email: 0
+            letter: 0
+            digital: 0
+          lastContactAt: '2026-08-19T09:14:00Z'
+        provenance:
+          - path: delinquency
+            source: delinquency-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: account
+            source: account-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: customer
+            source: customer-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: arrangement
+            source: arrangement-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: contactHistory
+            source: contact-service
+            asOf: '2026-08-22T06:00:00Z'
+
+    ModelScore:
+      type: object
+      title: ModelScore
+      description: >-
+        The result of scoring one context document with one model version. The
+        model echoes `modelId` and `version` back: decision-service records
+        them in the audit row from the *response*, not from what it asked for,
+        so a model server that served something other than the pinned version
+        is detectable rather than invisible.
+      additionalProperties: false
+      required:
+        - modelId
+        - version
+        - score
+        - band
+        - reasonCodes
+      properties:
+        modelId:
+          type: string
+          description: >-
+            Model that produced the score — must equal the `{modelId}` path
+            parameter.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAYMENT_PROPENSITY
+        version:
+          type: string
+          description: >-
+            Model version that produced the score — must equal the `{version}`
+            path parameter. Carried into the decision audit's `model_versions`
+            and into the A§16 `modelReferences` of the decision response.
+          minLength: 1
+          maxLength: 32
+          example: '8'
+        score:
+          $ref: '#/components/schemas/Probability'
+        band:
+          type: string
+          description: >-
+            The band the score falls in, e.g. `HIGH`. Bands are a closed
+            vocabulary published with each model version rather than a contract
+            enum, because a risk model's bands and a propensity model's bands
+            are different sets and adding an enum member to a released contract
+            is a breaking change. Rules compare against bands rather than raw
+            scores wherever possible — a threshold moves when a model is
+            retrained, a band does not (A§58, plan DEC-8).
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+          example: HIGH
+        reasonCodes:
+          type: array
+          description: >-
+            Why the model produced this score, as codes from
+            `contracts/registries/reason-codes.v1.json`. Never empty: A§58
+            requires every decision to be explainable, and a score with no
+            stated reason cannot contribute to an explanation. Merged into the
+            decision's reason codes at the models stage, in the order returned.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          minItems: 1
+          maxItems: 20
+      example:
+        modelId: PAYMENT_PROPENSITY
+        version: '8'
+        score: '0.72'
+        band: HIGH
+        reasonCodes:
+          - PAYMENT_PROPENSITY_0_72
+          - NO_ACTIVE_ARRANGEMENT

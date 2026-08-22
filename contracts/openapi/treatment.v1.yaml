@@ -1,0 +1,920 @@
+# =============================================================================
+# Collections Platform — treatment-service API (DEC-1)
+# =============================================================================
+# Owns `/v1/treatments*` and the provider delivery-status webhook path
+# (contracts/README.md "URL path-ownership matrix"). Decisioning — which
+# treatment to apply — lives in `decision.v1.yaml`; guardrail configuration in
+# `strategy.v1.yaml`.
+#
+# Source: D§9 (decision/treatment separation, channel abstraction), A§54 (policy
+# precedence), A§5.8 (treatment-service responsibilities), plan §7 DEC-1 and
+# DEC-14/15/16/17.
+#
+# Treatment-service is the *execution* half of the split D§9 insists on:
+# decisioning selects, execution performs. Almost every treatment arrives by
+# consuming `TreatmentSelected` from `collections.decision`, not through this
+# API; `POST /v1/treatments` exists for the manual and operational cases (a
+# collector acting outside a decision, a replay after an incident).
+#
+# NOTE ON CONTACT EVENTS: treatment-service does *not* emit
+# `ContactAttempted`/`ContactCompleted`. It calls contact-service's
+# `POST /v1/contacts` on dispatch and posts the outcome on delivery, because
+# A§7.2 gives contact-service sole ownership of contact events (plan §6.4).
+#
+# SELF-CONTAINED BY DESIGN: component schemas are declared inline rather than
+# `$ref`-ing `contracts/schemas/**`, because oapi-codegen cannot follow a
+# JSON-Schema `$ref` out of an OpenAPI document and the strict-server contract
+# must be a compile-time artefact (CLAUDE.md §4). Shapes are kept identical to
+# the decisioning artefacts they mirror, which remain normative:
+#
+#   contracts/schemas/decisioning/guardrail-config.v1.json
+#     — the contact windows and frequency caps re-evaluated before dispatch;
+#       authored and published through strategy.v1.yaml, enforced here.
+#   contracts/schemas/decisioning/strategy-document.v1.json
+#     — `treatments[]` is where `treatmentCode`, `type`, `channel` and `params`
+#       originate; a treatment record is the execution of one of those entries.
+#   contracts/registries/reason-codes.v1.json
+#     — the closed vocabulary `suppressionReasons[]` draws from.
+#
+# A divergence between this file and those is a bug in whichever drifted.
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `treatment.v2.yaml`. See contracts/README.md §1.
+#
+# Vocabulary policy (same as the wave-A specs): closed state machines defined by
+# the design pack are `enum`s; vocabularies that are reference data owned by a
+# service (treatment codes, reason codes, provider names) are
+# pattern-constrained strings, because adding an enum member to a released
+# contract is a breaking change.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Treatment Service API
+  version: 1.0.0
+  description: >-
+    Execution of the treatments decisioning selects (D§9): the treatment
+    record and its state machine, reads for the workbench and the case view,
+    and the provider delivery-status webhook that closes the loop from a
+    channel back to the platform.
+
+
+    The state machine is
+    `REQUESTED -> VALIDATED -> DISPATCHED -> DELIVERED | FAILED`, with
+    `-> SUPPRESSED` reachable from `REQUESTED` and `VALIDATED`. Every
+    transition is audited, and an illegal transition is a 409 rather than a
+    silent no-op.
+
+
+    **Guardrails are re-evaluated immediately before dispatch, and they fail
+    closed.** A fresh customer-policy fetch, the published contact windows and
+    the frequency caps are all checked again at execution time, because minutes
+    or hours may have passed since the decision: a do-not-contact flag set in
+    that window must suppress the treatment, and an unavailable policy service
+    means `SUPPRESSED` with `POLICY_RECHECK_UNAVAILABLE`, never a dispatch
+    (A§54, CLAUDE.md hard rule 2, plan DEC-16). A treatment blocked only by a
+    contact window is not dropped — it is scheduled for the next opening.
+
+
+    Conventions (normative: `contracts/README.md`): A§20 error body on every
+    non-2xx response, `Idempotency-Key` on every POST command (A§21),
+    `X-Correlation-Id` accepted on every request and echoed on every response
+    (A§97), RFC3339 UTC timestamps, `limit` + opaque `cursor` pagination. No
+    monetary value appears on this API: a treatment carries channel-adapter
+    parameters as strings, and any amount inside them is a decimal string in
+    major units for the same reason decisioning documents use one
+    (contracts/README.md §4, plan §2).
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks —
+    `treatments:read` for reads, `treatments:write` for commands. The provider
+    webhook is the one exception: it is authenticated by HMAC signature, not by
+    a bearer token, because the caller is an external channel provider.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/treatment run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: treatments
+    description: >-
+      Treatment records, their execution state machine and their suppression
+      reasons (D§9, plan DEC-14/16).
+  - name: provider-webhooks
+    description: >-
+      Inbound delivery-status callbacks from channel providers, authenticated by
+      HMAC signature (plan DEC-15).
+
+paths:
+  /v1/treatments:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createTreatment
+      summary: Create a treatment manually
+      description: >-
+        Records a treatment that no decision produced — a collector acting
+        outside the automated flow, an operational replay, a fixture. The
+        normal path into this service is the `TreatmentSelected` consumer, and
+        this endpoint deliberately does not bypass anything the consumer path
+        enforces: the record starts at `REQUESTED` and the same guardrail
+        re-check runs before dispatch.
+
+
+        Required scope: `treatments:write`.
+
+
+        A manual treatment may carry a `decisionId`, which links it to the
+        decision it implements; the service enforces `UNIQUE(decision_id)`, so
+        posting a second treatment for a decision that already has one is 409
+        `TREATMENT_EXISTS_FOR_DECISION`. That uniqueness is the business-level
+        half of the defence against duplicates — the inbox dedupe on the event
+        consumer is the other half, and both are needed because they fail in
+        different ways (D§47).
+
+
+        `Idempotency-Key` is required: the same key and body replays the stored
+        response and creates no second treatment.
+      tags:
+        - treatments
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The treatment to record.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTreatmentRequest'
+      responses:
+        '201':
+          description: The created treatment, in state REQUESTED.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Treatment'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listTreatments
+      summary: List treatments by case or decision
+      description: >-
+        Lists treatments, most recently requested first. At least one of
+        `caseId` or `decisionId` must be supplied; omitting both is 400
+        `FILTER_REQUIRED`. These are the two questions the platform actually
+        asks — "what has been done on this case" for the collector workbench,
+        and "what did this decision produce" for an audit trail.
+
+
+        Required scope: `treatments:read`.
+
+
+        `status` narrows further, which is how an operator finds the treatments
+        parked in `REQUESTED` behind a closed contact window.
+      tags:
+        - treatments
+      parameters:
+        - name: caseId
+          in: query
+          required: false
+          description: Return treatments recorded against this collection case.
+          schema:
+            type: string
+            pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+            example: 01M0MEKBHXV37E3S3E28JT97KB
+        - name: decisionId
+          in: query
+          required: false
+          description: >-
+            Return the treatment produced by this decision. At most one exists
+            per decision, so this filter returns zero or one item.
+          schema:
+            type: string
+            pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+            example: 01M0MEKD80M9S346Q3D25VT4F5
+        - name: status
+          in: query
+          required: false
+          description: Return only treatments currently in this status. Omit for all.
+          schema:
+            $ref: '#/components/schemas/TreatmentStatus'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of treatments, most recently requested first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TreatmentPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/treatments/{treatmentId}:
+    parameters:
+      - $ref: '#/components/parameters/TreatmentIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getTreatment
+      summary: Get one treatment
+      description: >-
+        Returns the treatment: its status, the provider and provider reference
+        it was dispatched with, its scheduled dispatch time when a contact
+        window deferred it, the reasons it was suppressed when it was, and the
+        timestamp of every state it has passed through.
+
+
+        Required scope: `treatments:read`.
+
+
+        The per-state timestamps are separate fields rather than a single
+        `updatedAt` because "requested at 09:00, dispatched at 20:00" is the
+        answer to a complaint, and collapsing it into one column loses it.
+      tags:
+        - treatments
+      responses:
+        '200':
+          description: The treatment.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Treatment'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/webhooks/providers/{provider}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderPath'
+    post:
+      operationId: recordProviderDeliveryStatus
+      summary: Record a delivery status reported by a channel provider
+      description: >-
+        Inbound callback from a channel provider reporting the final delivery
+        outcome of a dispatched message. The treatment is located by
+        `providerRef` — which treatment-service set to the treatment id when it
+        dispatched, so the lookup needs no provider-side state — and moves
+        `DISPATCHED -> DELIVERED` or `DISPATCHED -> FAILED`. The outcome is also
+        posted to contact-service, which is the service that emits the contact
+        events (A§7.2, plan §6.4).
+
+
+        **Authentication is HMAC, not bearer.** The provider signs the raw
+        request body with a shared secret and sends the result in
+        `X-Signature`. The service recomputes it over the bytes as received —
+        before any parsing — and compares in constant time; a missing,
+        malformed or non-matching signature is **401** and changes no state.
+        The secret is an `ExternalSecret` per provider; it is never in git, a
+        values file or a test fixture. This operation therefore declares
+        `security: []`: a bearer token is neither required nor accepted, and
+        saying so in the contract is better than leaving a reader to guess why
+        the platform's only unauthenticated-looking endpoint exists.
+
+
+        **Idempotency without a key.** External providers do not send
+        `Idempotency-Key`, so the natural key does the work: `(providerRef,
+        status)` is unique, and a redelivered callback returns 200 with the
+        treatment unchanged. A callback that contradicts a terminal state — a
+        `DELIVERED` after a `FAILED` — is 409 `TREATMENT_TRANSITION_INVALID`
+        rather than being applied, because the first terminal answer is the one
+        that was acted on.
+
+
+        An unknown `providerRef` is 404. A callback for a provider this
+        deployment has no configured secret for is 401, not 404: whether a
+        provider is configured is not something an unauthenticated caller gets
+        to learn.
+      tags:
+        - provider-webhooks
+      security: []
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          description: >-
+            HMAC-SHA256 of the raw request body keyed with the provider's shared
+            secret, lowercase hex, optionally prefixed `sha256=`. Compared in
+            constant time against the bytes as received; a mismatch is 401 and
+            no state changes.
+          schema:
+            type: string
+            pattern: '^(sha256=)?[0-9a-f]{64}$'
+            example: sha256=4f1a0c9b7e6d5c4b3a29180f7e6d5c4b3a29180f7e6d5c4b3a29180f7e6d5c4b
+        - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        description: The delivery outcome as reported by the provider.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderDeliveryStatusRequest'
+      responses:
+        '200':
+          description: >-
+            The callback was accepted, or was a redelivery of one already
+            applied. The body reports the treatment's resulting status so the
+            provider — and the integration tests — can assert the effect.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderDeliveryStatusAck'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403. The scopes
+        this service recognises are `treatments:read` and `treatments:write`.
+        The provider webhook opts out with `security: []` and authenticates by
+        HMAC instead.
+
+  parameters:
+    TreatmentIdPath:
+      name: treatmentId
+      in: path
+      required: true
+      description: >-
+        Platform-generated ULID of the treatment. Also the value sent to the
+        channel provider as the dispatch reference, which is what makes the
+        delivery webhook a lookup rather than a correlation exercise.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+    ProviderPath:
+      name: provider
+      in: path
+      required: true
+      description: >-
+        Name of the channel provider posting the callback, matching the
+        configured adapter — `mock-comms` in the dev stack, `ses` for the SES
+        email adapter. Reference data owned by the deployment rather than a
+        contract enum, so that adding a provider is a configuration change and
+        not a new spec version.
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9-]{1,31}$'
+        example: mock-comms
+
+  schemas:
+    Channel:
+      type: string
+      title: Channel
+      description: >-
+        Contact channel. The closed set implemented by this service's channel
+        adapters (plan DEC-15); identical to `Channel` in `customer.v1.yaml`,
+        `strategy.v1.yaml` and `decision.v1.yaml`. A `CALL_TASK` treatment has
+        no channel — it becomes a case activity for a collector, not a message.
+      enum:
+        - SMS
+        - EMAIL
+        - LETTER
+        - DIGITAL
+      example: SMS
+
+    TreatmentType:
+      type: string
+      title: TreatmentType
+      description: >-
+        What kind of action this treatment is (D§9). `CONTACT` is an outbound
+        message and carries a `channel`; `CALL_TASK` creates work for a
+        collector through the case API; the remaining three hand the account to
+        another process.
+      enum:
+        - CONTACT
+        - CALL_TASK
+        - ARRANGEMENT_OFFER
+        - AGENCY_PLACEMENT
+        - LEGAL_ESCALATION
+      example: CONTACT
+
+    ReasonCodeValue:
+      type: string
+      title: ReasonCodeValue
+      description: >-
+        Stable reason code from `contracts/registries/reason-codes.v1.json`.
+        Clients and analytics branch on these; `message` text never carries
+        meaning (A§20, A§58).
+      pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+      example: GUARDRAIL_FREQUENCY_CAP
+
+    TreatmentStatus:
+      type: string
+      title: TreatmentStatus
+      description: >-
+        Execution state of a treatment (plan DEC-14). `REQUESTED` on creation;
+        `VALIDATED` once the record is checked and a channel adapter is
+        resolved; `DISPATCHED` once the provider has accepted it;
+        `DELIVERED` or `FAILED` on the provider's callback. `SUPPRESSED` is
+        reachable from `REQUESTED` and `VALIDATED` and means the pre-dispatch
+        guardrail re-check refused it — a terminal state that always carries at
+        least one `suppressionReasons` entry.
+
+
+        `DELIVERED`, `FAILED` and `SUPPRESSED` are terminal. There is no
+        `CANCELLED`: a treatment that should not go out is suppressed, with the
+        reason recorded, because "cancelled" says nothing about why.
+      enum:
+        - REQUESTED
+        - VALIDATED
+        - DISPATCHED
+        - DELIVERED
+        - FAILED
+        - SUPPRESSED
+      example: DELIVERED
+
+    TreatmentParams:
+      type: object
+      title: TreatmentParams
+      description: >-
+        Flat string-to-string parameter map handed to the channel adapter —
+        template id, message variables, offer terms. Copied from the deciding
+        strategy's `treatments[].params`, or supplied directly on a manual
+        creation.
+
+
+        Values are strings so that the shape stays stable as adapters evolve,
+        and so a monetary parameter is written the way every decisioning
+        document writes one: a decimal string in major units
+        (contracts/README.md §4). This is the only place in this spec where
+        `additionalProperties` is not `false`; it is a *typed* map, not an open
+        object, so nothing untyped reaches generated code. Keys are
+        lowerCamelCase and must not carry PII — a treatment row is read by
+        engineers debugging dispatch, and the customer's phone number belongs
+        to contact-service.
+      additionalProperties:
+        type: string
+        minLength: 1
+        maxLength: 512
+      example:
+        templateId: TPL_SMS_REMINDER_V3
+
+    CreateTreatmentRequest:
+      type: object
+      title: CreateTreatmentRequest
+      description: >-
+        A manually created treatment. `treatmentCode` and `type` are required
+        because a treatment with no code cannot be reported on, and a treatment
+        with no type cannot be executed.
+      additionalProperties: false
+      required:
+        - customerId
+        - accountId
+        - treatmentCode
+        - type
+      properties:
+        customerId:
+          type: string
+          description: >-
+            Source-system customer identifier the treatment is for. Kept in the
+            source format, never re-minted (contracts/README.md §6).
+          minLength: 1
+          maxLength: 64
+          example: C123
+        accountId:
+          type: string
+          description: Source-system account identifier the treatment relates to.
+          minLength: 1
+          maxLength: 64
+          example: A123
+        caseId:
+          type: string
+          description: >-
+            Collection case to record the treatment against. Omitted when
+            acting outside a case; supplying it is what makes the treatment
+            visible in the case activity timeline.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        decisionId:
+          type: string
+          description: >-
+            Decision this treatment implements, when there is one. Unique
+            across treatments: a decision produces at most one treatment.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+        treatmentCode:
+          type: string
+          description: >-
+            Code of the treatment to execute. Reference data owned by strategy
+            authors, hence a pattern rather than an enum.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+        type:
+          $ref: '#/components/schemas/TreatmentType'
+        channel:
+          $ref: '#/components/schemas/Channel'
+        params:
+          $ref: '#/components/schemas/TreatmentParams'
+        scheduledFor:
+          type: string
+          format: date-time
+          description: >-
+            Earliest instant at which the treatment may be dispatched, RFC3339
+            UTC. Omit to dispatch as soon as the guardrail re-check allows. A
+            requested time inside a closed contact window does not override the
+            window — guardrails narrow only, never widen (A§54).
+          example: '2026-08-23T08:00:00Z'
+      example:
+        customerId: C123
+        accountId: A123
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+        treatmentCode: SMS_REMINDER_D35
+        type: CONTACT
+        channel: SMS
+        params:
+          templateId: TPL_SMS_REMINDER_V3
+
+    Treatment:
+      type: object
+      title: Treatment
+      description: >-
+        One treatment and its execution history. Terminal-state fields are
+        omitted rather than nulled while they do not apply, so the presence of
+        `deliveredAt` is itself the answer to "did it arrive".
+      additionalProperties: false
+      required:
+        - treatmentId
+        - customerId
+        - accountId
+        - treatmentCode
+        - type
+        - status
+        - suppressionReasons
+        - requestedAt
+        - createdAt
+        - updatedAt
+      properties:
+        treatmentId:
+          type: string
+          description: >-
+            Platform-generated ULID of the treatment, and the value used as the
+            provider dispatch reference.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        customerId:
+          type: string
+          description: Source-system customer identifier the treatment is for.
+          minLength: 1
+          maxLength: 64
+          example: C123
+        accountId:
+          type: string
+          description: Source-system account identifier the treatment relates to.
+          minLength: 1
+          maxLength: 64
+          example: A123
+        caseId:
+          type: string
+          description: >-
+            Collection case the treatment is recorded against. Omitted when the
+            treatment was created outside a case.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        decisionId:
+          type: string
+          description: >-
+            Decision this treatment implements. Omitted for a manually created
+            treatment that no decision produced.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+        treatmentCode:
+          type: string
+          description: Code of the treatment being executed.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+        type:
+          $ref: '#/components/schemas/TreatmentType'
+        channel:
+          $ref: '#/components/schemas/Channel'
+        status:
+          $ref: '#/components/schemas/TreatmentStatus'
+        suppressionReasons:
+          type: array
+          description: >-
+            Why the treatment was suppressed, in the order the pre-dispatch
+            checks produced them. Empty unless `status` is `SUPPRESSED`, and
+            never empty when it is: a suppression with no stated reason is not
+            defensible to a customer or a regulator. More than one entry is
+            normal — a customer can be both do-not-contact and over a frequency
+            cap, and recording only the first would misrepresent why nothing was
+            sent.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          maxItems: 20
+        params:
+          $ref: '#/components/schemas/TreatmentParams'
+        provider:
+          type: string
+          description: >-
+            Channel provider the treatment was dispatched through. Omitted
+            until dispatch, and for treatment types that have no provider
+            (`CALL_TASK` goes to the case API, not a channel).
+          pattern: '^[a-z][a-z0-9-]{1,31}$'
+          example: mock-comms
+        providerRef:
+          type: string
+          description: >-
+            Reference the provider knows this dispatch by. Set to
+            `treatmentId`, which makes dispatch idempotent — a retried dispatch
+            reuses the same reference, so the provider deduplicates instead of
+            sending twice — and makes the delivery webhook a direct lookup.
+            Omitted until dispatch.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        scheduledFor:
+          type: string
+          format: date-time
+          description: >-
+            Earliest instant the treatment may be dispatched, RFC3339 UTC. Set
+            by the guardrail check to the next contact-window opening when the
+            treatment arrived outside one; a poller dispatches it then. Omitted
+            when no deferral applies.
+          example: '2026-08-23T08:00:00Z'
+        failureCode:
+          type: string
+          description: >-
+            Stable code explaining a `FAILED` treatment, from the provider's
+            reported failure mapped into the platform's vocabulary —
+            `INVALID_DESTINATION`, `PROVIDER_REJECTED`, `PROVIDER_TIMEOUT`.
+            Omitted otherwise.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: INVALID_DESTINATION
+        requestedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the treatment was requested, RFC3339 UTC — the decision time
+            for a decision-driven treatment, the API call time for a manual one.
+          example: '2026-08-22T10:00:02Z'
+        validatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the record passed validation and an adapter was resolved,
+            RFC3339 UTC. Omitted while `REQUESTED`.
+          example: '2026-08-22T10:00:03Z'
+        dispatchedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the provider accepted the dispatch, RFC3339 UTC. Omitted until
+            then.
+          example: '2026-08-22T10:00:04Z'
+        deliveredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the provider reported delivery, RFC3339 UTC. Omitted unless
+            `status` is `DELIVERED`.
+          example: '2026-08-22T10:00:37Z'
+        failedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the provider reported failure, RFC3339 UTC. Omitted unless
+            `status` is `FAILED`.
+          example: '2026-08-22T10:00:37Z'
+        suppressedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the pre-dispatch guardrail check refused the treatment,
+            RFC3339 UTC. Omitted unless `status` is `SUPPRESSED`.
+          example: '2026-08-22T10:00:03Z'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the treatment row was created, RFC3339 UTC.
+          example: '2026-08-22T10:00:02Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the treatment row last changed, RFC3339 UTC. Equal to
+            `createdAt` when it has never changed.
+          example: '2026-08-22T10:00:37Z'
+      example:
+        treatmentId: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        customerId: C123
+        accountId: A123
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+        treatmentCode: SMS_REMINDER_D35
+        type: CONTACT
+        channel: SMS
+        status: DELIVERED
+        suppressionReasons: []
+        params:
+          templateId: TPL_SMS_REMINDER_V3
+        provider: mock-comms
+        providerRef: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        requestedAt: '2026-08-22T10:00:02Z'
+        validatedAt: '2026-08-22T10:00:03Z'
+        dispatchedAt: '2026-08-22T10:00:04Z'
+        deliveredAt: '2026-08-22T10:00:37Z'
+        createdAt: '2026-08-22T10:00:02Z'
+        updatedAt: '2026-08-22T10:00:37Z'
+
+    ProviderDeliveryStatus:
+      type: string
+      title: ProviderDeliveryStatus
+      description: >-
+        Final delivery outcome a provider may report. Only terminal outcomes
+        are accepted: intermediate provider states ("queued", "sent") are not
+        part of this contract, because a treatment already has `DISPATCHED` for
+        that and mapping every provider's intermediate vocabulary would put
+        provider detail into the platform's state machine.
+      enum:
+        - DELIVERED
+        - FAILED
+      example: DELIVERED
+
+    ProviderDeliveryStatusRequest:
+      type: object
+      title: ProviderDeliveryStatusRequest
+      description: >-
+        A provider's delivery-status callback. Deliberately minimal: the
+        platform trusts the provider for the outcome of its own dispatch and for
+        nothing else, so there is no field here that could alter a treatment's
+        content.
+      additionalProperties: false
+      required:
+        - providerRef
+        - status
+        - occurredAt
+      properties:
+        providerRef:
+          type: string
+          description: >-
+            The reference the dispatch was made with — the treatment id. This
+            is how the callback is matched; a value that matches no dispatched
+            treatment is 404.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        status:
+          $ref: '#/components/schemas/ProviderDeliveryStatus'
+        failureCode:
+          type: string
+          description: >-
+            The provider's own failure code, when `status` is `FAILED`. Mapped
+            into the platform's `failureCode` vocabulary by the adapter; the raw
+            value is kept in the adapter's log, not on the treatment, so a
+            provider changing its codes cannot change the platform's contract.
+            Ignored when `status` is `DELIVERED`.
+          minLength: 1
+          maxLength: 64
+          example: INVALID_DESTINATION
+        occurredAt:
+          type: string
+          format: date-time
+          description: >-
+            When the provider observed the outcome, RFC3339 UTC — not when it
+            sent the callback. Recorded as the treatment's `deliveredAt` or
+            `failedAt`, because a webhook delayed by an hour should not make a
+            message look an hour late.
+          example: '2026-08-22T10:00:37Z'
+      example:
+        providerRef: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        status: DELIVERED
+        occurredAt: '2026-08-22T10:00:37Z'
+
+    ProviderDeliveryStatusAck:
+      type: object
+      title: ProviderDeliveryStatusAck
+      description: >-
+        Acknowledgement of a delivery callback, reporting the treatment's
+        resulting status. Returned so that the mock provider, and the DEC-15
+        integration test, can assert the effect without reading the database.
+      additionalProperties: false
+      required:
+        - treatmentId
+        - status
+      properties:
+        treatmentId:
+          type: string
+          description: The treatment the callback was applied to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        status:
+          $ref: '#/components/schemas/TreatmentStatus'
+      example:
+        treatmentId: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+        status: DELIVERED
+
+    NextCursor:
+      type: string
+      title: NextCursor
+      description: >-
+        Opaque continuation token for the next page, or `null` on the last
+        page. Pass it back verbatim as `cursor`; never parse or construct one.
+        Nullable rather than omitted so that "last page" is an explicit answer
+        (contracts/README.md §10).
+      nullable: true
+      minLength: 1
+      maxLength: 512
+      example: eyJhZnRlciI6IjAxTTBNRUtNMDlWMlk2QzFIM0s3UTRQNVRHIn0
+
+    TreatmentPage:
+      type: object
+      title: TreatmentPage
+      description: One page of treatments.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The treatments in this page, most recently requested first.
+          items:
+            $ref: '#/components/schemas/Treatment'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - treatmentId: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+            customerId: C123
+            accountId: A123
+            caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+            treatmentCode: SMS_REMINDER_D35
+            type: CONTACT
+            channel: SMS
+            status: DELIVERED
+            suppressionReasons: []
+            provider: mock-comms
+            providerRef: 01M0MEKM09V2Y6C1H3K7Q4P5TG
+            requestedAt: '2026-08-22T10:00:02Z'
+            createdAt: '2026-08-22T10:00:02Z'
+            updatedAt: '2026-08-22T10:00:37Z'
+        nextCursor: null

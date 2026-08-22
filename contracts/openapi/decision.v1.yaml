@@ -1,0 +1,3492 @@
+# =============================================================================
+# Collections Platform — decision-service API (DEC-1)
+# =============================================================================
+# Owns `/v1/decisions*` — including `.../explanation`, `.../batch`,
+# `.../simulations`, `.../shadow-runs` — and `GET /v1/reference/reason-codes`
+# (contracts/README.md "URL path-ownership matrix"). Strategy authoring and
+# governance live in `strategy.v1.yaml`; treatment execution in
+# `treatment.v1.yaml`; model scoring in `model.v1.yaml`.
+#
+# Source: A§16 (decision API catalogue, verbatim), A§52 (pipeline), A§54
+# (policy precedence), A§55–58 (rules, models, optimisation, explainability),
+# A§59 (simulation), A§87–88 (migration parity + diff categories), D§8
+# (decisioning requirements), D§39 (decision audit), D§40 (simulation), D§41
+# (champion/challenger), plan §7 DEC-1 and DEC-6..13.
+#
+# ROUTER REQUIREMENT — read before generating a server.
+# The A§16 path set cannot be routed by Go's `net/http.ServeMux` (Go 1.22+
+# patterns). `GET /v1/decisions/{decisionId}/explanation` overlaps
+# `GET /v1/decisions/batch/{batchId}` and
+# `GET /v1/decisions/simulations/{simulationId}` on requests such as
+# `/v1/decisions/batch/explanation`, and ServeMux considers neither pattern more
+# specific, so it *panics at registration*. Generate decision-service with
+# oapi-codegen `chi-server` (or another trie router that prefers a static
+# segment over a wildcard at each level) rather than `std-http-server`;
+# `strict-server` is unaffected and still mandatory (CLAUDE.md §4). Verified in
+# `scripts/verify/DEC-1B.sh`. Do not "fix" this by renaming the A§16 paths.
+#
+# SELF-CONTAINED BY DESIGN: the context document, decision result and
+# explanation shapes are declared inline as component schemas rather than
+# `$ref`-ing `contracts/schemas/decisioning/*.json`, because oapi-codegen cannot
+# follow a JSON-Schema `$ref` out of an OpenAPI document and the strict-server
+# contract must be a compile-time artefact. The normative documents remain:
+#
+#   contracts/schemas/decisioning/context-document.v1.json
+#   contracts/schemas/decisioning/context-field-catalogue.v1.json
+#   contracts/schemas/decisioning/population-line.v1.json
+#   contracts/schemas/decisioning/decision-outcome-line.v1.json
+#   contracts/registries/reason-codes.v1.json
+#
+# and decision-service validates every context document against them at
+# runtime. Field shapes here are kept identical; a divergence is a bug in
+# whichever file drifted.
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `decision.v2.yaml`. See contracts/README.md §1.
+#
+# Vocabulary policy (same as the wave-A specs): closed state machines and
+# pipeline enums defined by the design pack are `enum`s; vocabularies that are
+# reference data owned by a service (segments, product codes, delinquency
+# buckets, reason codes, treatment codes, model ids) are pattern-constrained
+# strings, because adding an enum member to a released contract is a breaking
+# change.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Decision Service API
+  version: 1.0.0
+  description: >-
+    The decisioning surface (A§16): make a decision for a subject, read it
+    back, explain it stage by stage, and run the batch, simulation and
+    shadow-comparison jobs that decisioning is governed by.
+
+
+    Every decision is immutable and auditable. `POST /v1/decisions` writes one
+    append-only `decision_audit` row plus an S3 input snapshot in the same
+    transaction as the outbox events it produces, and nothing in this API — or
+    in the database grants behind it — can amend or delete either (D§39,
+    CLAUDE.md hard rule 4). That is what makes `GET .../explanation` a
+    reconstruction rather than a re-computation.
+
+
+    Precedence is fixed and non-negotiable: policy > decision logic >
+    optimisation (A§54, CLAUDE.md hard rule 2). Constraints narrow only, and a
+    post-selection guard re-validates the chosen treatment against the policy
+    snapshot; a violation is returned as `NO_ACTION` with
+    `POLICY_VIOLATION_GUARD`, never as a dispatch.
+
+
+    Conventions (normative: `contracts/README.md`): A§20 error body on every
+    non-2xx response, `Idempotency-Key` on every POST command (A§21),
+    `X-Correlation-Id` accepted on every request and echoed on every response
+    (A§97), RFC3339 UTC timestamps, `limit` + opaque `cursor` pagination.
+
+
+    Money on this API appears only inside a **context document**, and only as a
+    decimal string in *major* units (`"500.00"`, not `50000`). That is the
+    platform's single documented departure from int64 minor units: business
+    rules are authored by people who write thresholds the way the business
+    states them, and the context builder performs the minor-to-major conversion
+    once, recording the unit of every field in
+    `schemas/decisioning/context-field-catalogue.v1.json`
+    (contracts/README.md §4, plan §2/§6.8). No other field on this API is
+    monetary.
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description:
+    `decisions:read` for reads, `decisions:write` for decisions and job
+    submission, `admin` additionally for supplying a context document by hand.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/decision run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: decisions
+    description: >-
+      Online decisioning and the immutable decision record — decide, read,
+      explain, search (A§16, D§39).
+  - name: decision-batch
+    description: >-
+      Batch decisioning runs driven by the daily Airflow cycle, with the
+      control-total identity that makes a run provably complete (A§40, plan
+      DEC-10).
+  - name: decision-simulation
+    description: >-
+      Candidate-versus-baseline strategy simulation over a historical
+      population, and the distribution report business users compare before
+      approving a strategy (A§59, D§40, plan DEC-12).
+  - name: decision-shadow-runs
+    description: >-
+      Shadow comparison of two strategy versions, or of a strategy version
+      against the legacy engine's own decisions, with per-subject diffs
+      categorised by a reviewer (A§87–88, plan DEC-13).
+  - name: reference
+    description: Closed reference vocabularies served from the contracts module registries.
+
+paths:
+  # -------------------------------------------------------- online decisioning
+  /v1/decisions:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createDecision
+      summary: Make a decision for a subject
+      description: >-
+        Runs the full A§52 pipeline for one subject and returns the decision.
+        Stages execute in fixed order — Policy, Eligibility (strategy
+        selection), Segmentation, Rules, Models, Optimisation, Treatment
+        selection — and the result, the input snapshot reference and the stage
+        trace are persisted before the response is written, so a decision the
+        caller received is always a decision the platform can explain.
+
+
+        Required scope: `decisions:write`.
+
+
+        **Context.** Normally the caller supplies only `subject` and the context
+        builder assembles the context document from account, delinquency,
+        customer, arrangement and contact services, recording provenance per
+        section. A caller may instead supply `context` verbatim — that is how
+        simulation, batch replay and regression fixtures pin an exact input —
+        but only with the `admin` scope in addition to `decisions:write`, and
+        only when `mode` is `TEST` or `SIMULATION`. A context document supplied
+        for `ONLINE` mode, or by a caller without `admin`, is 403
+        `CONTEXT_OVERRIDE_FORBIDDEN` and no decision is made: an operator being
+        able to hand-craft the inputs to a live decision would make the audit
+        trail worthless.
+
+
+        **When context cannot be built.** If a required upstream is unavailable
+        or times out, the request fails with 422 `CONTEXT_UNAVAILABLE` rather
+        than deciding on partial data. Deciding without knowing whether a
+        customer is flagged do-not-contact is not a degraded decision, it is a
+        compliance incident.
+
+
+        **Outcomes.** `TREAT` carries a `treatment`; `NO_ACTION`,
+        `SUPPRESSED` and `INELIGIBLE` never do, and always carry at least one
+        reason code naming why (A§58).
+
+
+        `Idempotency-Key` is required: the same key with the same body replays
+        the stored decision — the same `decisionId`, no second audit row and no
+        second treatment event.
+      tags:
+        - decisions
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The subject to decide for, and optionally the exact context to decide on.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
+            examples:
+              online:
+                summary: A§16 worked example — subject only, context built by the service
+                value:
+                  subject:
+                    customerId: C123
+                    accountId: A123
+                  mode: ONLINE
+              testWithSuppliedContext:
+                summary: Regression fixture — full context supplied, TEST mode, admin scope
+                value:
+                  mode: TEST
+                  subject:
+                    customerId: C123
+                    accountId: A123
+                    caseId: 01M0MEKBHXV37E3S3E28JT97KB
+                  context:
+                    subject:
+                      customerId: C123
+                      accountId: A123
+                      caseId: 01M0MEKBHXV37E3S3E28JT97KB
+                    delinquency:
+                      dpd: 35
+                      bucket: 31-60
+                      amountOverdue: '500.00'
+                      currency: EUR
+                    account:
+                      productCode: PERSONAL_LOAN
+                      currentBalance: '4820.55'
+                      status: ACTIVE
+                    customer:
+                      contactability: HIGH
+                      preferredChannel: SMS
+                      doNotContact: false
+                      vulnerabilityFlag: false
+                      segment: EARLY_STAGE_LOW_RISK
+                    arrangement:
+                      hasActiveArrangement: false
+                      hasOpenPromise: false
+                      brokenPromises90d: 0
+                    contactHistory:
+                      contacts7d: 1
+                      contacts30d: 2
+                      byChannel7d:
+                        sms: 1
+                        email: 0
+                        letter: 0
+                        digital: 0
+                      lastContactAt: '2026-08-19T09:14:00Z'
+                    provenance:
+                      - path: delinquency
+                        source: delinquency-service
+                        asOf: '2026-08-22T06:00:00Z'
+                      - path: account
+                        source: account-service
+                        asOf: '2026-08-22T06:00:00Z'
+                      - path: customer
+                        source: customer-service
+                        asOf: '2026-08-22T06:00:00Z'
+                      - path: arrangement
+                        source: arrangement-service
+                        asOf: '2026-08-22T06:00:00Z'
+                      - path: contactHistory
+                        source: contact-service
+                        asOf: '2026-08-22T06:00:00Z'
+      responses:
+        '201':
+          description: The decision, persisted and explainable.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionResult'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listDecisions
+      summary: Search the decision audit
+      description: >-
+        Lists decision audit records, most recent first. At least one of
+        `caseId` or `accountId` must be supplied — an unfiltered scan of a
+        partitioned audit table is not a query anybody wants to run twice, and
+        omitting both is 400 `FILTER_REQUIRED`.
+
+
+        Required scope: `decisions:read`.
+
+
+        `mode` narrows to one decision mode, which is how an operator separates
+        live decisions from batch, shadow and simulation traffic sharing the
+        same table.
+      tags:
+        - decisions
+      parameters:
+        - name: caseId
+          in: query
+          required: false
+          description: >-
+            Return decisions recorded against this collection case. Combined
+            with `accountId` when both are given.
+          schema:
+            type: string
+            pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+            example: 01M0MEKBHXV37E3S3E28JT97KB
+        - name: accountId
+          in: query
+          required: false
+          description: Return decisions recorded against this account.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            example: A123
+        - name: mode
+          in: query
+          required: false
+          description: Return only decisions made in this mode. Omit for all modes.
+          schema:
+            $ref: '#/components/schemas/DecisionMode'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of decision audit records, most recent first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/{decisionId}:
+    parameters:
+      - $ref: '#/components/parameters/DecisionIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getDecision
+      summary: Get one decision audit record
+      description: >-
+        Returns the persisted decision: what was decided, which strategy
+        version, rule-set version, policy-set version and model versions
+        produced it, which experiment arm the subject fell in, and where the
+        input snapshot and stage trace are stored (D§39).
+
+
+        Required scope: `decisions:read`.
+
+
+        The record is immutable. There is no PUT, PATCH or DELETE on this
+        resource, and the database enforces it too — an `UPDATE` on
+        `decision_audit` fails on a trigger, and the application role holds
+        INSERT and SELECT only (CLAUDE.md hard rule 4).
+      tags:
+        - decisions
+      responses:
+        '200':
+          description: The decision audit record.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Decision'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/{decisionId}/explanation:
+    parameters:
+      - $ref: '#/components/parameters/DecisionIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getDecisionExplanation
+      summary: Explain a decision stage by stage
+      description: >-
+        Returns the stage-by-stage trace recorded when the decision was made
+        (A§58): for each pipeline stage, what it concluded, which reason codes
+        it contributed and a short human-readable detail line. Reason-code
+        descriptions come from `registries/reason-codes.v1.json`, so an
+        explanation is readable without a lookup table.
+
+
+        Required scope: `decisions:read`.
+
+
+        This is a *replay of what was recorded*, never a re-computation: the
+        configuration that produced the decision may since have been retired,
+        and re-running it would produce a different — and therefore
+        misleading — answer. `inputSnapshotRef` and `traceRef` point at the
+        immutable S3 objects behind the response for anyone who needs the raw
+        material.
+      tags:
+        - decisions
+      responses:
+        '200':
+          description: The stage-by-stage explanation of the decision.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionExplanation'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # --------------------------------------------------------- batch decisioning
+  /v1/decisions/batch:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createDecisionBatch
+      summary: Submit a batch decisioning run
+      description: >-
+        Starts a batch run over a population file and returns immediately with
+        a `batchId`; the run itself is asynchronous and polled through
+        `GET /v1/decisions/batch/{batchId}`. This is the endpoint the
+        `collections_daily_decisioning` DAG invokes (A§40) — the DAG
+        orchestrates and polls, and holds no business logic of its own
+        (CLAUDE.md hard rule 3).
+
+
+        Required scope: `decisions:write`.
+
+
+        **Idempotency on `(businessDate, runId)`.** The pair is the run's
+        natural key. Re-submitting the same pair returns **200** with the
+        *same* `batchId` and starts nothing — an Airflow task retry, a duplicate
+        DAG trigger and a manual re-run are all safe. A first submission
+        returns **201**. `Idempotency-Key` is required in addition, per A§21,
+        and covers retries that differ in nothing at all; the natural key
+        covers retries that arrive with a fresh key, which is the case Airflow
+        actually produces. Re-submitting the same pair with a *different*
+        `populationRef` or `mode` is 409 `BATCH_RUN_CONFLICT`, because that is
+        a mistake rather than a retry.
+
+
+        `mode` selects what the run is for: `BATCH` is production decisioning
+        and emits events; `SHADOW` and `SIMULATION` write audit rows and
+        outcomes but emit no treatment events, so nothing is dispatched to a
+        customer.
+      tags:
+        - decision-batch
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The population to decide over, and the run's natural key.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDecisionBatchRequest'
+      responses:
+        '200':
+          description: >-
+            The run already exists for this `(businessDate, runId)` — the same
+            `batchId` is returned and nothing was started.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionBatch'
+        '202':
+          description: The run was accepted and is now RUNNING.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionBatch'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/batch/{batchId}:
+    parameters:
+      - $ref: '#/components/parameters/BatchIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getDecisionBatch
+      summary: Get the status and control totals of a batch run
+      description: >-
+        Returns the run's status, its counts and — once complete — the S3
+        references to its outputs. This is the endpoint the DAG's `wait` task
+        polls to a terminal state.
+
+
+        Required scope: `decisions:read`.
+
+
+        **The control-total identity** `population == decided + suppressed +
+        ineligible + errored` holds exactly on a `COMPLETED` run and is
+        asserted by the DAG's reconciliation task against the counts loaded into
+        Snowflake (D§37–38, plan DEC-10). Pipeline success is never on its own
+        evidence that the data is right (CLAUDE.md hard rule 5), which is why
+        the counts are part of the contract rather than a log line. On a
+        `RUNNING` run the counts are a live partial tally and the identity does
+        not yet hold; on `FAILED` it holds for the rows processed before the
+        failure.
+      tags:
+        - decision-batch
+      responses:
+        '200':
+          description: The batch run.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionBatch'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # ------------------------------------------------------ strategy simulation
+  /v1/decisions/simulations:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createDecisionSimulation
+      summary: Submit a candidate-versus-baseline strategy simulation
+      description: >-
+        Decides the same historical population twice — once with
+        `baselineVersion`, once with `candidateVersion` — in mode `SIMULATION`,
+        and produces the distribution comparison business users read before
+        approving a strategy (A§59, D§40). Returns immediately with a
+        `simulationId`; poll `GET /v1/decisions/simulations/{simulationId}`.
+
+
+        Required scope: `decisions:write`.
+
+
+        No treatment events are emitted and nothing reaches a customer:
+        `SIMULATION` mode writes audit rows and the report, nothing else.
+
+
+        On completion the run is recorded against the candidate version's
+        **content hash** in strategy-service, which is what unlocks the
+        `TEST -> SIMULATED` governance transition (plan DEC-12). Editing the
+        candidate definition afterwards changes its hash and invalidates the
+        record, so a strategy can never be approved on the strength of a
+        simulation of different logic.
+
+
+        `Idempotency-Key` is required: this command creates a durable
+        simulation record and an S3 report.
+      tags:
+        - decision-simulation
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The two strategy versions to compare and the population to compare them over.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSimulationRequest'
+      responses:
+        '202':
+          description: The simulation was accepted and is now RUNNING.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Simulation'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/simulations/{simulationId}:
+    parameters:
+      - $ref: '#/components/parameters/SimulationIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getDecisionSimulation
+      summary: Get a simulation and its comparison report
+      description: >-
+        Returns the simulation's status and, once `COMPLETED`, the full
+        distribution report: treatment mix, contact volume per channel,
+        suppression counts, reason-code histogram and segment breakdown, each as
+        baseline, candidate and delta (D§40, A§59).
+
+
+        Required scope: `decisions:read`.
+
+
+        The report is deliberately a comparison of *distributions*, not a
+        prediction of recovery. Forecasting expected recovery from a strategy
+        change needs an uplift model the MVP does not have, and a number that
+        looks like a forecast but is not one is worse than no number at all.
+      tags:
+        - decision-simulation
+      responses:
+        '200':
+          description: The simulation, with its report when complete.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Simulation'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # -------------------------------------------------------------- shadow runs
+  /v1/decisions/shadow-runs:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createShadowRun
+      summary: Submit a shadow comparison run
+      description: >-
+        Decides a population under `strategyA` and compares the result against
+        `strategyB`, which is either a second strategy version or the literal
+        `"LEGACY"`. `"LEGACY"` compares against the `legacyDecision` carried on
+        each population line — that is the migration-parity mechanism of A§87–88
+        and the evidence for a cutover, and it is why the comparand is a union
+        rather than two endpoints.
+
+
+        Required scope: `decisions:write`.
+
+
+        Runs in mode `SHADOW`: audit rows and diffs are written, no treatment
+        events are emitted, nothing reaches a customer. Every diff starts life
+        `UNCATEGORIZED`; a reviewer then classifies each one, and only when the
+        remaining categories are understood is a parity claim meaningful. A
+        high match rate with 200 uncategorised diffs proves nothing.
+
+
+        `Idempotency-Key` is required: this command creates a durable run and
+        its diff rows.
+      tags:
+        - decision-shadow-runs
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The population and the two things to compare over it.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateShadowRunRequest'
+            examples:
+              strategyVersusStrategy:
+                summary: Compare two strategy versions
+                value:
+                  populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=SHADOW_001/population.jsonl
+                  strategyA:
+                    id: EARLY_COLLECTION
+                    version: 17
+                  strategyB:
+                    id: EARLY_COLLECTION
+                    version: 18
+              strategyVersusLegacy:
+                summary: Migration parity — compare against the legacy engine's own decisions
+                value:
+                  populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=PARITY_001/population.jsonl
+                  strategyA:
+                    id: EARLY_COLLECTION
+                    version: 17
+                  strategyB: LEGACY
+      responses:
+        '202':
+          description: The shadow run was accepted and is now RUNNING.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowRun'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/shadow-runs/{shadowRunId}/summary:
+    parameters:
+      - $ref: '#/components/parameters/ShadowRunIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getShadowRunSummary
+      summary: Get the match rate and diff-category counts of a shadow run
+      description: >-
+        Returns the headline parity numbers: how many subjects were compared,
+        what fraction agreed, and how many diffs sit in each category. Every
+        category is present with a count, zero included, so a client renders a
+        stable table and a reviewer can see at a glance that the uncategorised
+        pile is empty.
+
+
+        Required scope: `decisions:read`.
+
+
+        Categorising a diff changes these counts — `UNCATEGORIZED` drops as the
+        assigned category rises — which is exactly how a parity review is
+        tracked to completion.
+      tags:
+        - decision-shadow-runs
+      responses:
+        '200':
+          description: The shadow run summary.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowRunSummary'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/shadow-runs/{shadowRunId}/diffs:
+    parameters:
+      - $ref: '#/components/parameters/ShadowRunIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listShadowRunDiffs
+      summary: List the per-subject diffs of a shadow run
+      description: >-
+        Lists the subjects on which the two sides disagreed, oldest first, with
+        both decisions side by side. Subjects that agreed are not returned:
+        the match rate on the summary is the count of agreements, and paging
+        through a million matches to find twelve mismatches is not a workflow.
+
+
+        Required scope: `decisions:read`.
+
+
+        Filter by `category` to work a queue — `?category=UNCATEGORIZED` is the
+        reviewer's inbox.
+      tags:
+        - decision-shadow-runs
+      parameters:
+        - name: category
+          in: query
+          required: false
+          description: >-
+            Return only diffs currently in this category. Omit for all diffs.
+          schema:
+            $ref: '#/components/schemas/ShadowDiffCategory'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of diffs, oldest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowRunDiffPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/decisions/shadow-runs/{shadowRunId}/diffs/{diffId}:
+    parameters:
+      - $ref: '#/components/parameters/ShadowRunIdPath'
+      - $ref: '#/components/parameters/DiffIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getShadowRunDiff
+      summary: Get one shadow-run diff
+      description: >-
+        Returns one diff and its current categorisation, with the row version
+        in the `ETag` header. A reviewer needs that `ETag` to categorise the
+        diff, because `PATCH` requires `If-Match` (contracts/README.md §9) —
+        this operation exists so a client can obtain it without paging the whole
+        list.
+
+
+        Required scope: `decisions:read`.
+      tags:
+        - decision-shadow-runs
+      responses:
+        '200':
+          description: The diff, with its row version in `ETag`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowRunDiff'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    patch:
+      operationId: categorizeShadowRunDiff
+      summary: Categorise a shadow-run diff
+      description: >-
+        Assigns one of the A§88 categories to a diff and optionally records the
+        reviewer's notes. The categories are exactly those of A§88 —
+        `EXPECTED`, `DATA_DIFFERENCE`, `RULE_TRANSLATION_ERROR`,
+        `MISSING_RULE`, `LEGACY_BUG`, `NEW_BUG` — and a diff cannot be put back
+        to `UNCATEGORIZED`: undoing a review by erasing it is not a reviewable
+        action. An unrecognised value is 400.
+
+
+        Required scope: `decisions:write`.
+
+
+        `If-Match` carries the row version from the diff's `ETag`; a stale
+        value is 412 and nothing changes, so two reviewers cannot silently
+        overwrite each other's classification. Every categorisation records the
+        actor and timestamp on the row.
+
+
+        The category vocabulary is load-bearing for a migration: a diff filed
+        as `RULE_TRANSLATION_ERROR` blocks a cutover, one filed as `EXPECTED`
+        does not, and conflating the two is how a parity sign-off becomes
+        fiction.
+      tags:
+        - decision-shadow-runs
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        description: The category to assign and the reviewer's notes.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategorizeShadowRunDiffRequest'
+      responses:
+        '200':
+          description: The updated diff, with its new row version in `ETag`.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowRunDiff'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '412':
+          $ref: './common.v1.yaml#/components/responses/PreconditionFailed'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # ---------------------------------------------------------------- reference
+  /v1/reference/reason-codes:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listReasonCodes
+      summary: List the decisioning reason-code registry
+      description: >-
+        Serves `contracts/registries/reason-codes.v1.json` — the closed
+        vocabulary every rule outcome, suppression and explanation draws from.
+        Clients render explanations from this rather than embedding their own
+        copy of the descriptions, so a code added to the registry appears in the
+        workbench without a UI release.
+
+
+        Required scope: `decisions:read`.
+
+
+        The registry is a contract artefact, not application data: a code is
+        added by a pull request against `contracts/`, and CI fails a build in
+        which any example, rule set or fixture references a code that is not in
+        it.
+      tags:
+        - reference
+      parameters:
+        - name: stage
+          in: query
+          required: false
+          description: >-
+            Return only reason codes contributed by this pipeline stage. Omit
+            for the whole registry.
+          schema:
+            $ref: '#/components/schemas/DecisionStage'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of reason-code definitions, ordered by code.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReasonCodePage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403. The scopes
+        this service recognises are `decisions:read`, `decisions:write` and
+        `admin`; `admin` is additionally required to supply a context document
+        by hand, because that is the one input that could make an audit trail
+        lie.
+
+  headers:
+    ETag:
+      description: >-
+        Opaque row version of the returned resource. Pass it back verbatim in
+        `If-Match` on the next `PATCH`; a stale value is rejected with 412 and
+        nothing changes (contracts/README.md §9). `If-Match: *` is not
+        accepted — blind overwrites of a reviewer's classification are not
+        allowed.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: '"7"'
+
+  parameters:
+    DecisionIdPath:
+      name: decisionId
+      in: path
+      required: true
+      description: >-
+        Platform-generated ULID of the decision. Appears in the decision audit
+        row, in the `DecisionMade` event, on the treatment it produced, and in
+        the S3 key of its input snapshot — one identifier ties the whole chain
+        together.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKD80M9S346Q3D25VT4F5
+    BatchIdPath:
+      name: batchId
+      in: path
+      required: true
+      description: Platform-generated ULID of the batch run.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+    SimulationIdPath:
+      name: simulationId
+      in: path
+      required: true
+      description: Platform-generated ULID of the simulation run.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKGV5R8T2Y6C1H3K9J0QD
+    ShadowRunIdPath:
+      name: shadowRunId
+      in: path
+      required: true
+      description: Platform-generated ULID of the shadow run.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+    DiffIdPath:
+      name: diffId
+      in: path
+      required: true
+      description: Platform-generated ULID of one diff row within a shadow run.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKJX7T0W4A8E3K5N1M2SF
+
+  schemas:
+    # -------------------------------------------------- shared scalar wrappers
+    Channel:
+      type: string
+      title: Channel
+      description: >-
+        Contact channel. The closed set implemented by treatment-service's
+        channel adapters; identical to `Channel` in `customer.v1.yaml`,
+        `strategy.v1.yaml` and `treatment.v1.yaml`. A collector-task treatment
+        has no channel — it lands as a case activity, not a message.
+      enum:
+        - SMS
+        - EMAIL
+        - LETTER
+        - DIGITAL
+      example: SMS
+
+    TreatmentType:
+      type: string
+      title: TreatmentType
+      description: >-
+        What kind of action a treatment is (D§9). `CONTACT` is an outbound
+        message and carries a `channel`; `CALL_TASK` creates work for a
+        collector; the remaining three hand the account to another process.
+        A§16 shows `CONTACT` with channel `SMS`.
+      enum:
+        - CONTACT
+        - CALL_TASK
+        - ARRANGEMENT_OFFER
+        - AGENCY_PLACEMENT
+        - LEGAL_ESCALATION
+      example: CONTACT
+
+    ReasonCodeValue:
+      type: string
+      title: ReasonCodeValue
+      description: >-
+        Stable reason code from `registries/reason-codes.v1.json`. Clients and
+        analytics branch on these; `message` text never carries meaning
+        (A§20, A§58).
+      pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+      example: DPD_31_60
+
+    DecimalAmount:
+      type: string
+      title: DecimalAmount
+      description: >-
+        Monetary amount as a decimal string in **major** units — `"500"` and
+        `"500.00"` both mean five hundred, not five. This is the platform's
+        single documented departure from int64 minor units and it exists only
+        inside a decisioning context document: business rules are authored by
+        people who write `amountOverdue >= "500"`, and a rule that had to read
+        `50000` would be mis-authored sooner or later (contracts/README.md §4,
+        plan §2/§6.8). The context builder performs the conversion once, from
+        the int64 minor units every other API and event uses, and
+        `schemas/decisioning/context-field-catalogue.v1.json` records the unit
+        of every field. Currency travels as `delinquency.currency`; an amount is
+        never interpretable on its own.
+      pattern: '^-?(0|[1-9][0-9]{0,15})(\.[0-9]{1,2})?$'
+      example: '500.00'
+
+    S3Uri:
+      type: string
+      title: S3Uri
+      description: >-
+        `s3://bucket/key` reference to an object in the platform's own buckets
+        (populations and outcomes in `colx-dev-batch`, input snapshots and
+        traces in `colx-dev-decision-audit`). A reference rather than an
+        embedded payload: a population is millions of lines, and an input
+        snapshot must stay byte-identical to what was hashed.
+      pattern: '^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[^\s]{1,900}$'
+      example: s3://colx-dev-batch/population/date=2026-08-21/run=DAILY_001/population.jsonl
+
+    ContentHash:
+      type: string
+      title: ContentHash
+      description: >-
+        Lowercase hex SHA-256 of a canonicalised JSON document. Used for the
+        input snapshot (`inputContentHash`) and for strategy definitions:
+        identifying content rather than a version number is what lets a
+        simulation, an approval and a decision all be pinned to exactly the same
+        logic.
+      pattern: '^[0-9a-f]{64}$'
+      example: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+
+    StrategyRef:
+      type: object
+      title: StrategyRef
+      description: >-
+        Pinned reference to one strategy version — exactly the
+        `{id, version}` pair A§16 returns. Pinning the version is what makes a
+        decision reproducible from its audit row.
+      additionalProperties: false
+      required:
+        - id
+        - version
+      properties:
+        id:
+          type: string
+          description: Business identifier of the strategy.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        version:
+          type: integer
+          format: int32
+          description: Version number of the strategy.
+          minimum: 1
+          example: 17
+      example:
+        id: EARLY_COLLECTION
+        version: 17
+
+    RuleSetRef:
+      type: object
+      title: RuleSetRef
+      description: >-
+        Pinned reference to the rule-set version that was evaluated. Recorded
+        on every decision so that an explanation can name the exact rule
+        document, not just the strategy that pointed at it.
+      additionalProperties: false
+      required:
+        - ruleSetId
+        - version
+      properties:
+        ruleSetId:
+          type: string
+          description: Business identifier of the rule set.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION_RULES
+        version:
+          type: integer
+          format: int32
+          description: Version number of the rule set.
+          minimum: 1
+          example: 42
+      example:
+        ruleSetId: EARLY_COLLECTION_RULES
+        version: 42
+
+    ModelReference:
+      type: object
+      title: ModelReference
+      description: >-
+        One model version consulted for a decision — the A§16 `modelReferences`
+        entry, `{model, version}`. `version` is a string because model versions
+        belong to the ML platform rather than being platform-minted integers;
+        A§16 shows `"8"`.
+      additionalProperties: false
+      required:
+        - model
+        - version
+      properties:
+        model:
+          type: string
+          description: Model identifier as registered with the model server.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAYMENT_PROPENSITY
+        version:
+          type: string
+          description: Model version, exactly as the model server reports it.
+          minLength: 1
+          maxLength: 32
+          example: '8'
+      example:
+        model: PAYMENT_PROPENSITY
+        version: '8'
+
+    # --------------------------------------------------------- context document
+    DecisionSubject:
+      type: object
+      title: DecisionSubject
+      description: >-
+        Who the decision is about. `customerId` and `accountId` are
+        source-system identifiers kept in their source format
+        (contracts/README.md §6); `caseId` is a platform-minted ULID and is
+        present whenever the decision is being made in the context of an open
+        collection case.
+      additionalProperties: false
+      required:
+        - customerId
+        - accountId
+      properties:
+        customerId:
+          type: string
+          description: Source-system customer identifier.
+          minLength: 1
+          maxLength: 64
+          example: C123
+        accountId:
+          type: string
+          description: Source-system account identifier (account number).
+          minLength: 1
+          maxLength: 64
+          example: A123
+        caseId:
+          type: string
+          description: >-
+            Collection case the decision belongs to. Omitted when deciding
+            outside a case — a pre-delinquency nudge, a batch run over accounts
+            with no case yet.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+      example:
+        customerId: C123
+        accountId: A123
+        caseId: 01M0MEKBHXV37E3S3E28JT97KB
+
+    ContextDelinquency:
+      type: object
+      title: ContextDelinquency
+      description: >-
+        Delinquency facts the rules read (A§52). `amountOverdue` is a decimal
+        string in major units — see `DecimalAmount` — and always travels with
+        `currency`.
+      additionalProperties: false
+      required:
+        - dpd
+        - bucket
+        - amountOverdue
+        - currency
+      properties:
+        dpd:
+          type: integer
+          format: int32
+          description: >-
+            Days past due, computed by delinquency-service as
+            `asOf - oldestUnpaidDueDate`. Zero means current.
+          minimum: 0
+          maximum: 36500
+          example: 35
+        bucket:
+          type: string
+          description: >-
+            Delinquency bucket code from the delinquency-service bucket
+            configuration. Reference data, not a contract enum, because D§5
+            requires the buckets to be configurable rather than hard-coded.
+          pattern: '^[A-Z0-9][A-Z0-9_+-]{0,31}$'
+          example: 31-60
+        amountOverdue:
+          $ref: '#/components/schemas/DecimalAmount'
+        currency:
+          type: string
+          description: >-
+            ISO-4217 alpha-3 currency of every monetary field in this context
+            document. An account has exactly one currency.
+          pattern: '^[A-Z]{3}$'
+          example: EUR
+      example:
+        dpd: 35
+        bucket: 31-60
+        amountOverdue: '500.00'
+        currency: EUR
+
+    ContextAccount:
+      type: object
+      title: ContextAccount
+      description: >-
+        Account facts the rules read. `currentBalance` is a decimal string in
+        major units, in the currency named by `delinquency.currency`.
+      additionalProperties: false
+      required:
+        - productCode
+        - currentBalance
+        - status
+      properties:
+        productCode:
+          type: string
+          description: >-
+            Collections-facing product code normalised by the ingestion
+            canonicalizer — reference data owned by account-service, hence a
+            pattern rather than an enum.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PERSONAL_LOAN
+        currentBalance:
+          $ref: '#/components/schemas/DecimalAmount'
+        status:
+          type: string
+          description: >-
+            Normalised collections status of the account. The closed set
+            `account.v1.yaml` publishes: source systems have richer and
+            mutually inconsistent vocabularies, and the canonicalizer maps them
+            so that strategy rules can be written once.
+          enum:
+            - ACTIVE
+            - SUSPENDED
+            - CLOSED
+            - WRITTEN_OFF
+          example: ACTIVE
+      example:
+        productCode: PERSONAL_LOAN
+        currentBalance: '4820.55'
+        status: ACTIVE
+
+    ContextCustomer:
+      type: object
+      title: ContextCustomer
+      description: >-
+        Customer facts the rules read. `doNotContact` and `vulnerabilityFlag`
+        are policy inputs and can only ever narrow what a decision may select
+        (A§54); they are re-checked immediately before dispatch, so a flag
+        flipped after the decision still suppresses the treatment.
+      additionalProperties: false
+      required:
+        - contactability
+        - doNotContact
+        - vulnerabilityFlag
+        - segment
+      properties:
+        contactability:
+          type: string
+          description: >-
+            Derived contactability band — how reachable the customer has proved
+            to be, computed by the context builder from contact history and
+            available channels. A band rather than a raw score so that rules
+            authored against it stay stable when the derivation is tuned.
+            `UNKNOWN` when there is not enough history to say, and rules must
+            treat `UNKNOWN` explicitly rather than assuming the worst or the
+            best.
+          enum:
+            - HIGH
+            - MEDIUM
+            - LOW
+            - UNKNOWN
+          example: HIGH
+        preferredChannel:
+          $ref: '#/components/schemas/Channel'
+        doNotContact:
+          type: boolean
+          description: >-
+            True when the customer must not be contacted on any channel. A
+            global suppression, not a preference.
+          example: false
+        vulnerabilityFlag:
+          type: boolean
+          description: >-
+            True when a vulnerability or assistance indicator applies. Drives
+            gentler treatment paths; the underlying reason is deliberately not
+            carried into the context document, because a decision trace is
+            read by people who do not need it.
+          example: false
+        segment:
+          type: string
+          description: >-
+            Collections segment the customer currently falls in. Matches the
+            `segments[].name` vocabulary of the strategy documents;
+            unsegmented customers carry `DEFAULT`.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_LOW_RISK
+      example:
+        contactability: HIGH
+        preferredChannel: SMS
+        doNotContact: false
+        vulnerabilityFlag: false
+        segment: EARLY_STAGE_LOW_RISK
+
+    ContextArrangement:
+      type: object
+      title: ContextArrangement
+      description: >-
+        Whether the customer already has a payment plan or a live promise.
+        Chasing a customer who is paying to an arrangement is the classic
+        collections own-goal, so these three flags are first-class context
+        rather than something a rule has to derive.
+      additionalProperties: false
+      required:
+        - hasActiveArrangement
+        - hasOpenPromise
+        - brokenPromises90d
+      properties:
+        hasActiveArrangement:
+          type: boolean
+          description: True when an arrangement is ACTIVE for this account.
+          example: false
+        hasOpenPromise:
+          type: boolean
+          description: True when a promise to pay is open and not yet due or broken.
+          example: false
+        brokenPromises90d:
+          type: integer
+          format: int32
+          description: >-
+            Promises broken in the last 90 days. A count rather than a boolean
+            because "broke one promise" and "broke four" are different
+            situations.
+          minimum: 0
+          maximum: 1000
+          example: 0
+      example:
+        hasActiveArrangement: false
+        hasOpenPromise: false
+        brokenPromises90d: 0
+
+    ContextChannelCounts:
+      type: object
+      title: ContextChannelCounts
+      description: >-
+        Contact attempts in the last 7 days broken down by channel. Every
+        channel is present with an explicit count, zero included, so the
+        canonical JSON of a context document — and therefore its content hash —
+        does not depend on which channels happened to be used.
+
+
+        One property per member of the `Channel` enum, named in the platform's
+        lowerCamelCase property convention rather than by the enum spelling: a
+        field name is a field name, and a rule references it as
+        `contactHistory.byChannel7d.sms`.
+      additionalProperties: false
+      required:
+        - sms
+        - email
+        - letter
+        - digital
+      properties:
+        sms:
+          type: integer
+          format: int32
+          description: '`SMS` attempts in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 1
+        email:
+          type: integer
+          format: int32
+          description: '`EMAIL` attempts in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 0
+        letter:
+          type: integer
+          format: int32
+          description: '`LETTER` dispatches in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 0
+        digital:
+          type: integer
+          format: int32
+          description: '`DIGITAL` notifications in the last 7 days.'
+          minimum: 0
+          maximum: 10000
+          example: 0
+      example:
+        sms: 1
+        email: 0
+        letter: 0
+        digital: 0
+
+    ContextContactHistory:
+      type: object
+      title: ContextContactHistory
+      description: >-
+        Recent contact pressure — the input to frequency rules at decision time
+        and the reason a decision can be sensible without the guardrail check
+        that treatment-service repeats before dispatch.
+      additionalProperties: false
+      required:
+        - contacts7d
+        - contacts30d
+        - byChannel7d
+      properties:
+        contacts7d:
+          type: integer
+          format: int32
+          description: Total contact attempts in the last 7 days, all channels.
+          minimum: 0
+          maximum: 10000
+          example: 1
+        contacts30d:
+          type: integer
+          format: int32
+          description: Total contact attempts in the last 30 days, all channels.
+          minimum: 0
+          maximum: 10000
+          example: 2
+        byChannel7d:
+          $ref: '#/components/schemas/ContextChannelCounts'
+        lastContactAt:
+          type: string
+          format: date-time
+          description: >-
+            When the most recent contact attempt was made, RFC3339 UTC. Omitted
+            when the customer has never been contacted.
+          example: '2026-08-19T09:14:00Z'
+      example:
+        contacts7d: 1
+        contacts30d: 2
+        byChannel7d:
+          sms: 1
+          email: 0
+          letter: 0
+          digital: 0
+        lastContactAt: '2026-08-19T09:14:00Z'
+
+    ContextProvenance:
+      type: object
+      title: ContextProvenance
+      description: >-
+        Where one section of the context document came from and how fresh it
+        was. Recorded per section because "the decision was wrong" and "the
+        decision was right about stale data" are different incidents, and only
+        provenance tells them apart.
+      additionalProperties: false
+      required:
+        - path
+        - source
+        - asOf
+      properties:
+        path:
+          type: string
+          description: >-
+            Dotted path of the context section or field this entry describes,
+            e.g. `delinquency` or `contactHistory.byChannel7d`.
+          pattern: '^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){0,4}$'
+          example: delinquency
+        source:
+          type: string
+          description: >-
+            Which upstream produced the value — a service name for an API
+            fetch, `population-line` when a batch supplied it verbatim,
+            `caller` when a `TEST`/`SIMULATION` request did.
+          pattern: '^[a-z][a-z0-9-]{1,63}$'
+          example: delinquency-service
+        asOf:
+          type: string
+          format: date-time
+          description: >-
+            As-of timestamp of the upstream data, RFC3339 UTC — not the fetch
+            time. A value fetched at 09:00 from a snapshot taken at 06:00 is
+            three hours old, and the rules that read it should be judged on
+            that.
+          example: '2026-08-22T06:00:00Z'
+      example:
+        path: delinquency
+        source: delinquency-service
+        asOf: '2026-08-22T06:00:00Z'
+
+    ContextDocument:
+      type: object
+      title: ContextDocument
+      description: >-
+        The complete input to a decision (A§52). Assembled by the context
+        builder from the domain services, validated against
+        `schemas/decisioning/context-document.v1.json`, hashed, and written to
+        S3 before the pipeline runs — so a decision can always be re-explained
+        against the exact bytes it saw.
+
+
+        Every field a rule may reference is declared in
+        `schemas/decisioning/context-field-catalogue.v1.json` with its path,
+        type and unit, and a rule referencing anything else is rejected at
+        authoring time. That catalogue is also the contract between this
+        document and the Snowflake model that builds batch populations
+        (`int_collection_eligibility`, plan ANA-10) — the two must agree field
+        for field or simulation and online decisioning will silently diverge.
+
+
+        This is the only shape in the platform carrying monetary values as
+        decimal strings in major units; see `DecimalAmount`.
+      additionalProperties: false
+      required:
+        - subject
+        - delinquency
+        - account
+        - customer
+        - arrangement
+        - contactHistory
+        - provenance
+      properties:
+        subject:
+          $ref: '#/components/schemas/DecisionSubject'
+        delinquency:
+          $ref: '#/components/schemas/ContextDelinquency'
+        account:
+          $ref: '#/components/schemas/ContextAccount'
+        customer:
+          $ref: '#/components/schemas/ContextCustomer'
+        arrangement:
+          $ref: '#/components/schemas/ContextArrangement'
+        contactHistory:
+          $ref: '#/components/schemas/ContextContactHistory'
+        provenance:
+          type: array
+          description: >-
+            One entry per context section, in a stable order. Never empty: a
+            context document with no provenance cannot be audited, and an
+            unauditable decision is not one this platform makes.
+          items:
+            $ref: '#/components/schemas/ContextProvenance'
+          minItems: 1
+          maxItems: 100
+      example:
+        subject:
+          customerId: C123
+          accountId: A123
+          caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        delinquency:
+          dpd: 35
+          bucket: 31-60
+          amountOverdue: '500.00'
+          currency: EUR
+        account:
+          productCode: PERSONAL_LOAN
+          currentBalance: '4820.55'
+          status: ACTIVE
+        customer:
+          contactability: HIGH
+          preferredChannel: SMS
+          doNotContact: false
+          vulnerabilityFlag: false
+          segment: EARLY_STAGE_LOW_RISK
+        arrangement:
+          hasActiveArrangement: false
+          hasOpenPromise: false
+          brokenPromises90d: 0
+        contactHistory:
+          contacts7d: 1
+          contacts30d: 2
+          byChannel7d:
+            sms: 1
+            email: 0
+            letter: 0
+            digital: 0
+          lastContactAt: '2026-08-19T09:14:00Z'
+        provenance:
+          - path: delinquency
+            source: delinquency-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: account
+            source: account-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: customer
+            source: customer-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: arrangement
+            source: arrangement-service
+            asOf: '2026-08-22T06:00:00Z'
+          - path: contactHistory
+            source: contact-service
+            asOf: '2026-08-22T06:00:00Z'
+
+    # ------------------------------------------------------- online decisioning
+    DecisionRequestMode:
+      type: string
+      title: DecisionRequestMode
+      description: >-
+        Mode a synchronous decision request runs in. `ONLINE` is a real
+        decision: it emits `DecisionMade`, and `TreatmentSelected` when a
+        treatment is chosen. `TEST` and `SIMULATION` write the audit row but
+        emit no treatment event, so nothing reaches a customer; they are also
+        the only modes in which a caller may supply a context document.
+        `BATCH` and `SHADOW` are not accepted here — those runs are created
+        through `POST /v1/decisions/batch`, which is what enforces their
+        control totals.
+      enum:
+        - ONLINE
+        - TEST
+        - SIMULATION
+      example: ONLINE
+
+    DecisionMode:
+      type: string
+      title: DecisionMode
+      description: >-
+        Mode a recorded decision was made in (D§39 `decision_audit.mode`). All
+        five modes share one audit table, so every read filters on it: mixing
+        shadow and live decisions in a report is a mistake that is easy to make
+        once and expensive to explain.
+      enum:
+        - ONLINE
+        - BATCH
+        - TEST
+        - SIMULATION
+        - SHADOW
+      example: ONLINE
+
+    DecisionOutcome:
+      type: string
+      title: DecisionOutcome
+      description: >-
+        What the pipeline concluded. `TREAT` selected a treatment and is the
+        only outcome carrying one. `NO_ACTION` reached the end with nothing
+        selected — including the post-selection policy guard rejecting the
+        choice, which reports `POLICY_VIOLATION_GUARD` rather than dispatching
+        (A§54, CLAUDE.md hard rule 2). `SUPPRESSED` means policy or a
+        suppression rule removed every candidate. `INELIGIBLE` means no
+        strategy's eligibility matched the subject at all.
+      enum:
+        - TREAT
+        - NO_ACTION
+        - SUPPRESSED
+        - INELIGIBLE
+      example: TREAT
+
+    DecisionStage:
+      type: string
+      title: DecisionStage
+      description: >-
+        One stage of the fixed-order A§52 pipeline. The order is Policy,
+        Eligibility, Segmentation, Rules, Models, Optimisation, Selection, and
+        it is fixed rather than configurable precisely so that policy always
+        runs before — and can never be re-litigated by — optimisation.
+      enum:
+        - POLICY
+        - ELIGIBILITY
+        - SEGMENTATION
+        - RULES
+        - MODELS
+        - OPTIMIZATION
+        - SELECTION
+      example: RULES
+
+    TreatmentSelection:
+      type: object
+      title: TreatmentSelection
+      description: >-
+        The treatment a decision selected — the A§16 `treatment` object, with
+        `treatmentCode` added because `{type, channel}` alone does not identify
+        which SMS to send. Present only on a `TREAT` decision.
+      additionalProperties: false
+      required:
+        - type
+        - treatmentCode
+      properties:
+        type:
+          $ref: '#/components/schemas/TreatmentType'
+        channel:
+          $ref: '#/components/schemas/Channel'
+        treatmentCode:
+          type: string
+          description: >-
+            Code of the selected treatment, matching a
+            `treatments[].treatmentCode` of the strategy version that decided.
+            Carried into `TreatmentSelected` and into treatment-service.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+      example:
+        type: CONTACT
+        channel: SMS
+        treatmentCode: SMS_REMINDER_D35
+
+    DecisionRequest:
+      type: object
+      title: DecisionRequest
+      description: >-
+        A request to decide. Supplying only `subject` is the normal path and
+        the only one available in `ONLINE` mode; `context` is the role-gated
+        override used by fixtures, replay and simulation.
+      additionalProperties: false
+      required:
+        - subject
+      properties:
+        subject:
+          $ref: '#/components/schemas/DecisionSubject'
+        context:
+          $ref: '#/components/schemas/ContextDocument'
+        mode:
+          $ref: '#/components/schemas/DecisionRequestMode'
+      example:
+        subject:
+          customerId: C123
+          accountId: A123
+        mode: ONLINE
+
+    DecisionResult:
+      type: object
+      title: DecisionResult
+      description: >-
+        The response to `POST /v1/decisions` — the A§16 response shape. Kept
+        deliberately narrow: what was decided, by which strategy version, with
+        which treatment, why, and on which models. The audit metadata
+        (snapshot references, hashes, mode, timestamps) is on
+        `GET /v1/decisions/{decisionId}`, so the hot path returns only what a
+        caller acts on.
+      additionalProperties: false
+      required:
+        - decisionId
+        - decision
+        - strategy
+        - reasonCodes
+        - modelReferences
+      properties:
+        decisionId:
+          type: string
+          description: >-
+            Platform-generated ULID of the decision. The handle for the
+            explanation, the treatment it produced and the audit row.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+        decision:
+          $ref: '#/components/schemas/DecisionOutcome'
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        treatment:
+          $ref: '#/components/schemas/TreatmentSelection'
+        reasonCodes:
+          type: array
+          description: >-
+            Why this decision was reached, in deterministic pipeline order —
+            stage order first, then the order each stage contributed them.
+            Never empty: A§58 requires every decision to be explainable, and
+            that includes `NO_ACTION`.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          minItems: 1
+          maxItems: 50
+        modelReferences:
+          type: array
+          description: >-
+            Model versions consulted, in the strategy's `modelRefs` order. Empty
+            for a rules-only strategy — which the MVP ships, and which is a
+            legitimate configuration rather than a gap.
+          items:
+            $ref: '#/components/schemas/ModelReference'
+          maxItems: 20
+        experimentArm:
+          type: string
+          description: >-
+            Champion/challenger arm the subject was allocated to, when the
+            deciding strategy version has an enabled experiment. Omitted
+            otherwise. Allocation is a pure function of `accountId` and the
+            experiment salt, so the same account always lands in the same arm
+            (D§41).
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: CHAMPION
+      example:
+        decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+        decision: TREAT
+        strategy:
+          id: EARLY_COLLECTION
+          version: 17
+        treatment:
+          type: CONTACT
+          channel: SMS
+          treatmentCode: SMS_REMINDER_D35
+        reasonCodes:
+          - DPD_31_60
+          - CHANNEL_ELIGIBLE
+        modelReferences:
+          - model: PAYMENT_PROPENSITY
+            version: '8'
+        experimentArm: CHAMPION
+
+    Decision:
+      type: object
+      title: Decision
+      description: >-
+        One immutable decision audit record (D§39). Everything needed to answer
+        "what did the platform decide for this account on this day, on what
+        inputs, under which configuration, and why" without re-running
+        anything.
+      additionalProperties: false
+      required:
+        - decisionId
+        - correlationId
+        - mode
+        - subject
+        - decidedAt
+        - decision
+        - strategy
+        - reasonCodes
+        - modelReferences
+        - inputSnapshotRef
+        - inputContentHash
+      properties:
+        decisionId:
+          type: string
+          description: Platform-generated ULID of the decision.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+        correlationId:
+          type: string
+          description: >-
+            Correlation id of the request or event chain that produced this
+            decision, carried from the inbound `X-Correlation-Id` into every
+            event and log line (A§97). This is what ties a decision back to the
+            file that delivered the data behind it.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        mode:
+          $ref: '#/components/schemas/DecisionMode'
+        subject:
+          $ref: '#/components/schemas/DecisionSubject'
+        decidedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the decision was made, RFC3339 UTC. The audit table is range
+            partitioned on this column.
+          example: '2026-08-22T10:00:00Z'
+        decision:
+          $ref: '#/components/schemas/DecisionOutcome'
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        treatment:
+          $ref: '#/components/schemas/TreatmentSelection'
+        reasonCodes:
+          type: array
+          description: Why this decision was reached, in deterministic pipeline order.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          minItems: 1
+          maxItems: 50
+        modelReferences:
+          type: array
+          description: Model versions consulted, in the strategy's `modelRefs` order.
+          items:
+            $ref: '#/components/schemas/ModelReference'
+          maxItems: 20
+        ruleSet:
+          $ref: '#/components/schemas/RuleSetRef'
+        policySetVersion:
+          type: integer
+          format: int32
+          description: >-
+            Version of the global policy set in force when the decision was
+            made. Global rather than pinned per strategy, so that a policy
+            tightening applies to every strategy at once (A§54).
+          minimum: 1
+          example: 12
+        experimentArm:
+          type: string
+          description: >-
+            Champion/challenger arm the subject was allocated to. Omitted when
+            the deciding version had no enabled experiment.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: CHAMPION
+        allocationBucket:
+          type: integer
+          format: int32
+          description: >-
+            The 0..9999 basis-point bucket the allocation function produced.
+            Recorded alongside the arm so an analyst can verify the split
+            without re-deriving it, and so a mis-configured arm boundary is
+            visible in the data (D§41).
+          minimum: 0
+          maximum: 9999
+          example: 4213
+        segment:
+          type: string
+          description: >-
+            Segment the subject was placed in by the segmentation stage.
+            Omitted on an `INELIGIBLE` decision, which never reaches
+            segmentation.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_LOW_RISK
+        inputSnapshotRef:
+          $ref: '#/components/schemas/S3Uri'
+        inputContentHash:
+          $ref: '#/components/schemas/ContentHash'
+        traceRef:
+          $ref: '#/components/schemas/S3Uri'
+        batchId:
+          type: string
+          description: >-
+            Batch run that produced this decision. Present for `BATCH`,
+            `SHADOW` and `SIMULATION` modes, omitted for `ONLINE` and `TEST`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+      example:
+        decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+        correlationId: 01M0MEKBHXV37E3S3E28JT97KB
+        mode: ONLINE
+        subject:
+          customerId: C123
+          accountId: A123
+          caseId: 01M0MEKBHXV37E3S3E28JT97KB
+        decidedAt: '2026-08-22T10:00:00Z'
+        decision: TREAT
+        strategy:
+          id: EARLY_COLLECTION
+          version: 17
+        treatment:
+          type: CONTACT
+          channel: SMS
+          treatmentCode: SMS_REMINDER_D35
+        reasonCodes:
+          - DPD_31_60
+          - CHANNEL_ELIGIBLE
+        modelReferences:
+          - model: PAYMENT_PROPENSITY
+            version: '8'
+        ruleSet:
+          ruleSetId: EARLY_COLLECTION_RULES
+          version: 42
+        policySetVersion: 12
+        experimentArm: CHAMPION
+        allocationBucket: 4213
+        segment: EARLY_STAGE_LOW_RISK
+        inputSnapshotRef: s3://colx-dev-decision-audit/input-snapshots/date=2026-08-22/01M0MEKD80M9S346Q3D25VT4F5.json
+        inputContentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+        traceRef: s3://colx-dev-decision-audit/traces/date=2026-08-22/01M0MEKD80M9S346Q3D25VT4F5.json
+
+    DecisionStageTrace:
+      type: object
+      title: DecisionStageTrace
+      description: >-
+        What one pipeline stage did (A§58). `detail` is a short human-readable
+        line for an operator; `reasonCodes` is the machine-readable part, and a
+        client must never parse `detail`.
+      additionalProperties: false
+      required:
+        - stage
+        - outcome
+        - reasonCodes
+      properties:
+        stage:
+          $ref: '#/components/schemas/DecisionStage'
+        outcome:
+          type: string
+          description: >-
+            What the stage concluded, as a stable SCREAMING_SNAKE code —
+            `PASS`, `NO_MATCH`, `MATCHED`, `SUPPRESSED`, `SKIPPED`,
+            `MODEL_DEFAULTED`, `POLICY_VIOLATION_GUARD`. A pattern-constrained
+            code rather than an enum for the same reason `Error.code` is: the
+            pipeline's vocabulary grows as stages gain behaviour, and adding an
+            enum member to a released contract is a breaking change. Clients
+            branch on it, so codes are never renamed or repurposed.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: MATCHED
+        reasonCodes:
+          type: array
+          description: >-
+            Reason codes this stage contributed, in the order it contributed
+            them. May be empty for a stage that passed without comment.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          maxItems: 50
+        detail:
+          type: string
+          description: >-
+            Human-readable summary of what the stage did — which rule fired,
+            which segment matched, what a model returned. Free text for an
+            operator, never for a parser, and never carrying PII.
+          minLength: 1
+          maxLength: 1024
+          example: rule SMS_FOR_MID_DPD (priority 100) matched; selected SMS_REMINDER_D35
+      example:
+        stage: RULES
+        outcome: MATCHED
+        reasonCodes:
+          - DPD_31_60
+        detail: rule SMS_FOR_MID_DPD (priority 100) matched; selected SMS_REMINDER_D35
+
+    DecisionExplanation:
+      type: object
+      title: DecisionExplanation
+      description: >-
+        The full A§58 explanation of a decision: the outcome, the exact
+        configuration versions that produced it, the stage-by-stage trace, and
+        references to the immutable input snapshot and trace objects.
+
+
+        Reconstructed from what was recorded, never re-computed — see the
+        operation description.
+      additionalProperties: false
+      required:
+        - decisionId
+        - mode
+        - decidedAt
+        - decision
+        - strategy
+        - modelReferences
+        - stages
+        - reasonCodes
+        - inputSnapshotRef
+        - inputContentHash
+      properties:
+        decisionId:
+          type: string
+          description: Platform-generated ULID of the explained decision.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+        mode:
+          $ref: '#/components/schemas/DecisionMode'
+        decidedAt:
+          type: string
+          format: date-time
+          description: When the explained decision was made, RFC3339 UTC.
+          example: '2026-08-22T10:00:00Z'
+        decision:
+          $ref: '#/components/schemas/DecisionOutcome'
+        treatment:
+          $ref: '#/components/schemas/TreatmentSelection'
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        ruleSet:
+          $ref: '#/components/schemas/RuleSetRef'
+        policySetVersion:
+          type: integer
+          format: int32
+          description: Version of the global policy set that was in force.
+          minimum: 1
+          example: 12
+        modelReferences:
+          type: array
+          description: Model versions consulted, in the strategy's `modelRefs` order.
+          items:
+            $ref: '#/components/schemas/ModelReference'
+          maxItems: 20
+        stages:
+          type: array
+          description: >-
+            One entry per stage that ran, in pipeline order. A stage that was
+            skipped — models on a rules-only strategy, segmentation on an
+            ineligible subject — appears with outcome `SKIPPED` rather than
+            being absent, so the reader can see the whole pipeline rather than
+            guessing what was omitted.
+          items:
+            $ref: '#/components/schemas/DecisionStageTrace'
+          minItems: 1
+          maxItems: 20
+        reasonCodes:
+          type: array
+          description: >-
+            The decision's reason codes, flattened across stages in
+            deterministic order — the same list `DecisionResult` returned.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          minItems: 1
+          maxItems: 50
+        reasonCodeDescriptions:
+          type: array
+          description: >-
+            Registry description for each code in `reasonCodes`, in the same
+            order, so an explanation renders without a second call. Present
+            whenever every code resolves in `registries/reason-codes.v1.json`.
+          items:
+            $ref: '#/components/schemas/ReasonCodeDefinition'
+          maxItems: 50
+        inputSnapshotRef:
+          $ref: '#/components/schemas/S3Uri'
+        inputContentHash:
+          $ref: '#/components/schemas/ContentHash'
+        traceRef:
+          $ref: '#/components/schemas/S3Uri'
+      example:
+        decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+        mode: ONLINE
+        decidedAt: '2026-08-22T10:00:00Z'
+        decision: TREAT
+        treatment:
+          type: CONTACT
+          channel: SMS
+          treatmentCode: SMS_REMINDER_D35
+        strategy:
+          id: EARLY_COLLECTION
+          version: 17
+        ruleSet:
+          ruleSetId: EARLY_COLLECTION_RULES
+          version: 42
+        policySetVersion: 12
+        modelReferences:
+          - model: PAYMENT_PROPENSITY
+            version: '8'
+        stages:
+          - stage: POLICY
+            outcome: PASS
+            reasonCodes: []
+            detail: no customer constraint in force; contact permitted
+          - stage: ELIGIBILITY
+            outcome: MATCHED
+            reasonCodes: []
+            detail: strategy EARLY_COLLECTION v17 selected (priority 100)
+          - stage: SEGMENTATION
+            outcome: MATCHED
+            reasonCodes: []
+            detail: segment EARLY_STAGE_LOW_RISK matched (segment 1 of 2)
+          - stage: RULES
+            outcome: MATCHED
+            reasonCodes:
+              - DPD_31_60
+            detail: rule SMS_FOR_MID_DPD (priority 100) matched; selected SMS_REMINDER_D35
+          - stage: MODELS
+            outcome: PASS
+            reasonCodes: []
+            detail: PAYMENT_PROPENSITY v8 scored 0.72 (band HIGH) in 41ms
+          - stage: OPTIMIZATION
+            outcome: PASS
+            reasonCodes:
+              - CHANNEL_ELIGIBLE
+            detail: 2 candidates after constraint filter; ranked by strategy priority
+          - stage: SELECTION
+            outcome: MATCHED
+            reasonCodes: []
+            detail: selected SMS_REMINDER_D35; post-selection policy guard passed
+        reasonCodes:
+          - DPD_31_60
+          - CHANNEL_ELIGIBLE
+        inputSnapshotRef: s3://colx-dev-decision-audit/input-snapshots/date=2026-08-22/01M0MEKD80M9S346Q3D25VT4F5.json
+        inputContentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+        traceRef: s3://colx-dev-decision-audit/traces/date=2026-08-22/01M0MEKD80M9S346Q3D25VT4F5.json
+
+    # ---------------------------------------------------------- batch resources
+    RunStatus:
+      type: string
+      title: RunStatus
+      description: >-
+        Lifecycle of an asynchronous run — batch, simulation or shadow.
+        `RUNNING` is the state a run is in from the moment it is accepted;
+        `COMPLETED` and `FAILED` are terminal. There is no queued state in the
+        contract: from a caller's point of view a run that has been accepted is
+        running, and exposing a queue would invite polling logic that depends on
+        internal scheduling.
+      enum:
+        - RUNNING
+        - COMPLETED
+        - FAILED
+      example: COMPLETED
+
+    BatchMode:
+      type: string
+      title: BatchMode
+      description: >-
+        What a batch run is for. `BATCH` is production decisioning and emits
+        `DecisionMade`/`TreatmentSelected`. `SHADOW` and `SIMULATION` write
+        audit rows and outcome files but emit no treatment events, so a
+        comparison run can never dispatch anything to a customer.
+      enum:
+        - BATCH
+        - SHADOW
+        - SIMULATION
+      example: BATCH
+
+    BatchCounts:
+      type: object
+      title: BatchCounts
+      description: >-
+        The control totals of a batch run. On a `COMPLETED` run the identity
+        `population == decided + suppressed + ineligible + errored` holds
+        exactly, and the daily DAG asserts it against the counts loaded into
+        Snowflake (D§37–38, plan DEC-10). Every field is required, because a
+        missing count is indistinguishable from zero and that is precisely the
+        ambiguity a control total exists to remove.
+      additionalProperties: false
+      required:
+        - population
+        - decided
+        - suppressed
+        - ineligible
+        - errored
+      properties:
+        population:
+          type: integer
+          format: int64
+          description: >-
+            Lines read from the population file. Must equal the `rowCount` in
+            the population manifest; a mismatch fails the run rather than
+            producing a plausible-looking partial result.
+          minimum: 0
+          example: 1000
+        decided:
+          type: integer
+          format: int64
+          description: Subjects that produced a `TREAT` or `NO_ACTION` decision.
+          minimum: 0
+          example: 812
+        suppressed:
+          type: integer
+          format: int64
+          description: Subjects whose decision was `SUPPRESSED`.
+          minimum: 0
+          example: 143
+        ineligible:
+          type: integer
+          format: int64
+          description: Subjects whose decision was `INELIGIBLE` — no strategy matched.
+          minimum: 0
+          example: 42
+        errored:
+          type: integer
+          format: int64
+          description: >-
+            Lines that could not be decided — malformed JSON, a schema
+            violation, an upstream failure. Each one is written to
+            `errors.jsonl` with its reason; they are counted, never silently
+            dropped.
+          minimum: 0
+          example: 3
+      example:
+        population: 1000
+        decided: 812
+        suppressed: 143
+        ineligible: 42
+        errored: 3
+
+    CreateDecisionBatchRequest:
+      type: object
+      title: CreateDecisionBatchRequest
+      description: >-
+        Submission of a batch run. `(businessDate, runId)` is the natural key
+        the run is idempotent on.
+      additionalProperties: false
+      required:
+        - populationRef
+        - businessDate
+        - runId
+        - mode
+      properties:
+        populationRef:
+          $ref: '#/components/schemas/S3Uri'
+        businessDate:
+          type: string
+          format: date
+          description: >-
+            Business date the run decides for, `YYYY-MM-DD`. Part of the
+            natural key, and the date the decisions are attributed to in
+            analytics — which is not necessarily the date the run executes.
+          example: '2026-08-21'
+        runId:
+          type: string
+          description: >-
+            Caller's identifier for this run within the business date —
+            typically the Airflow run id. The second half of the natural key.
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+          example: DAILY_001
+        mode:
+          $ref: '#/components/schemas/BatchMode'
+      example:
+        populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=DAILY_001/population.jsonl
+        businessDate: '2026-08-21'
+        runId: DAILY_001
+        mode: BATCH
+
+    DecisionBatch:
+      type: object
+      title: DecisionBatch
+      description: >-
+        A batch decisioning run: its natural key, its status, its control
+        totals and the references to its outputs.
+      additionalProperties: false
+      required:
+        - batchId
+        - status
+        - mode
+        - businessDate
+        - runId
+        - populationRef
+        - counts
+        - startedAt
+      properties:
+        batchId:
+          type: string
+          description: >-
+            Platform-generated ULID of the run. Stable for a given
+            `(businessDate, runId)`: a re-submission returns this same value.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        mode:
+          $ref: '#/components/schemas/BatchMode'
+        businessDate:
+          type: string
+          format: date
+          description: Business date the run decides for.
+          example: '2026-08-21'
+        runId:
+          type: string
+          description: Caller's run identifier within the business date.
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+          example: DAILY_001
+        populationRef:
+          $ref: '#/components/schemas/S3Uri'
+        counts:
+          $ref: '#/components/schemas/BatchCounts'
+        outcomesRef:
+          $ref: '#/components/schemas/S3Uri'
+        errorsRef:
+          $ref: '#/components/schemas/S3Uri'
+        summaryRef:
+          $ref: '#/components/schemas/S3Uri'
+        failureCode:
+          type: string
+          description: >-
+            Stable code explaining a `FAILED` run — `POPULATION_UNREADABLE`,
+            `MANIFEST_MISMATCH`, `CONFIG_UNAVAILABLE`. Omitted otherwise.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: MANIFEST_MISMATCH
+        startedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the run was accepted and its configuration snapshot pinned,
+            RFC3339 UTC. Pinning at the start is what makes a long run
+            internally consistent even if a strategy is activated mid-run.
+          example: '2026-08-22T02:05:00Z'
+        completedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the run reached a terminal status, RFC3339 UTC. Omitted while
+            `RUNNING`.
+          example: '2026-08-22T02:19:41Z'
+      example:
+        batchId: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        status: COMPLETED
+        mode: BATCH
+        businessDate: '2026-08-21'
+        runId: DAILY_001
+        populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=DAILY_001/population.jsonl
+        counts:
+          population: 1000
+          decided: 812
+          suppressed: 143
+          ineligible: 42
+          errored: 3
+        outcomesRef: s3://colx-dev-batch/outcomes/date=2026-08-21/run=DAILY_001/decisions.jsonl
+        errorsRef: s3://colx-dev-batch/outcomes/date=2026-08-21/run=DAILY_001/errors.jsonl
+        summaryRef: s3://colx-dev-batch/outcomes/date=2026-08-21/run=DAILY_001/summary.json
+        startedAt: '2026-08-22T02:05:00Z'
+        completedAt: '2026-08-22T02:19:41Z'
+
+    # ----------------------------------------------------- simulation resources
+    ComparisonCounts:
+      type: object
+      title: ComparisonCounts
+      description: >-
+        One baseline-versus-candidate comparison. `delta` is
+        `candidate - baseline` and may be negative; it is carried explicitly
+        rather than left to the client so that every consumer computes it the
+        same way.
+      additionalProperties: false
+      required:
+        - baseline
+        - candidate
+        - delta
+      properties:
+        baseline:
+          type: integer
+          format: int64
+          description: Count under the baseline strategy version.
+          minimum: 0
+          example: 640
+        candidate:
+          type: integer
+          format: int64
+          description: Count under the candidate strategy version.
+          minimum: 0
+          example: 705
+        delta:
+          type: integer
+          format: int64
+          description: '`candidate - baseline`. Negative when the candidate does less.'
+          example: 65
+      example:
+        baseline: 640
+        candidate: 705
+        delta: 65
+
+    TreatmentComparison:
+      type: object
+      title: TreatmentComparison
+      description: One row of the treatment-mix comparison — a treatment code and its counts.
+      additionalProperties: false
+      required:
+        - treatmentCode
+        - counts
+      properties:
+        treatmentCode:
+          type: string
+          description: >-
+            Treatment code being compared. Codes selected by either side appear;
+            a code selected by only one side appears with zero on the other, so
+            the table has no gaps.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+        counts:
+          $ref: '#/components/schemas/ComparisonCounts'
+      example:
+        treatmentCode: SMS_REMINDER_D35
+        counts:
+          baseline: 640
+          candidate: 705
+          delta: 65
+
+    ChannelComparison:
+      type: object
+      title: ChannelComparison
+      description: >-
+        One row of the contact-volume comparison — a channel and its counts.
+        This is the number operations care about most: a candidate that lifts
+        SMS volume 40% is a capacity conversation before it is a strategy
+        conversation.
+      additionalProperties: false
+      required:
+        - channel
+        - counts
+      properties:
+        channel:
+          $ref: '#/components/schemas/Channel'
+        counts:
+          $ref: '#/components/schemas/ComparisonCounts'
+      example:
+        channel: SMS
+        counts:
+          baseline: 640
+          candidate: 705
+          delta: 65
+
+    ReasonCodeComparison:
+      type: object
+      title: ReasonCodeComparison
+      description: >-
+        One row of the reason-code histogram — a code and how often each side
+        produced it. Reading this is how a reviewer notices that a candidate
+        reaches the same treatment mix for entirely different reasons.
+      additionalProperties: false
+      required:
+        - reasonCode
+        - counts
+      properties:
+        reasonCode:
+          $ref: '#/components/schemas/ReasonCodeValue'
+        counts:
+          $ref: '#/components/schemas/ComparisonCounts'
+      example:
+        reasonCode: DPD_31_60
+        counts:
+          baseline: 640
+          candidate: 705
+          delta: 65
+
+    SegmentComparison:
+      type: object
+      title: SegmentComparison
+      description: One row of the segment breakdown — a segment name and its counts.
+      additionalProperties: false
+      required:
+        - segment
+        - counts
+      properties:
+        segment:
+          type: string
+          description: >-
+            Segment name from the strategy definition of whichever side placed
+            subjects in it. Segments the candidate introduces appear with a
+            baseline of zero.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_STAGE_LOW_RISK
+        counts:
+          $ref: '#/components/schemas/ComparisonCounts'
+      example:
+        segment: EARLY_STAGE_LOW_RISK
+        counts:
+          baseline: 640
+          candidate: 705
+          delta: 65
+
+    SimulationReport:
+      type: object
+      title: SimulationReport
+      description: >-
+        The distribution comparison a business user reads before approving a
+        strategy (D§40, A§59): treatment mix, contact volume per channel,
+        suppressions, reason-code histogram and segment breakdown, each as
+        baseline, candidate and delta over the same population.
+
+
+        Deliberately distributions rather than forecasts — see the operation
+        description.
+      additionalProperties: false
+      required:
+        - populationRows
+        - byTreatment
+        - contactVolumeByChannel
+        - suppressions
+        - reasonCodeHistogram
+        - segmentBreakdown
+      properties:
+        populationRows:
+          type: integer
+          format: int64
+          description: >-
+            Subjects decided by both sides — the denominator for every count
+            below. Present so that a percentage can be computed without
+            fetching the population manifest.
+          minimum: 0
+          example: 1000
+        byTreatment:
+          type: array
+          description: >-
+            Treatment mix, one row per treatment code. Modelled as an array of
+            rows rather than a code-keyed object so that the shape stays closed
+            (`additionalProperties: false`) and generated clients get a typed
+            list instead of a free-form map. Ordered by descending candidate
+            count, then by code.
+          items:
+            $ref: '#/components/schemas/TreatmentComparison'
+          maxItems: 200
+        contactVolumeByChannel:
+          type: array
+          description: >-
+            Outbound contact volume, one row per channel, ordered as the
+            `Channel` enum is.
+          items:
+            $ref: '#/components/schemas/ChannelComparison'
+          maxItems: 20
+        suppressions:
+          $ref: '#/components/schemas/ComparisonCounts'
+        reasonCodeHistogram:
+          type: array
+          description: >-
+            How often each reason code was produced, ordered by descending
+            candidate count, then by code.
+          items:
+            $ref: '#/components/schemas/ReasonCodeComparison'
+          maxItems: 200
+        segmentBreakdown:
+          type: array
+          description: >-
+            Subjects per segment, ordered by descending candidate count, then by
+            segment name.
+          items:
+            $ref: '#/components/schemas/SegmentComparison'
+          maxItems: 200
+      example:
+        populationRows: 1000
+        byTreatment:
+          - treatmentCode: SMS_REMINDER_D35
+            counts:
+              baseline: 640
+              candidate: 705
+              delta: 65
+          - treatmentCode: EMAIL_REMINDER_D35
+            counts:
+              baseline: 210
+              candidate: 150
+              delta: -60
+        contactVolumeByChannel:
+          - channel: SMS
+            counts:
+              baseline: 640
+              candidate: 705
+              delta: 65
+          - channel: EMAIL
+            counts:
+              baseline: 210
+              candidate: 150
+              delta: -60
+        suppressions:
+          baseline: 143
+          candidate: 138
+          delta: -5
+        reasonCodeHistogram:
+          - reasonCode: DPD_31_60
+            counts:
+              baseline: 640
+              candidate: 705
+              delta: 65
+        segmentBreakdown:
+          - segment: EARLY_STAGE_LOW_RISK
+            counts:
+              baseline: 640
+              candidate: 705
+              delta: 65
+
+    CreateSimulationRequest:
+      type: object
+      title: CreateSimulationRequest
+      description: >-
+        Submission of a simulation. Both versions must belong to `strategyId`,
+        and the candidate must be in a state whose definition is settled —
+        simulating a `DRAFT` that is still being edited produces a report about
+        logic that no longer exists.
+      additionalProperties: false
+      required:
+        - strategyId
+        - candidateVersion
+        - baselineVersion
+        - populationRef
+        - name
+      properties:
+        strategyId:
+          type: string
+          description: Strategy whose versions are being compared.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        candidateVersion:
+          type: integer
+          format: int32
+          description: >-
+            The version under evaluation. Its content hash is what the
+            resulting simulation record is pinned to, and therefore what the
+            `TEST -> SIMULATED` transition checks.
+          minimum: 1
+          example: 18
+        baselineVersion:
+          type: integer
+          format: int32
+          description: >-
+            The version to compare against — normally the currently ACTIVE one.
+            May equal `candidateVersion`, which is a useful determinism check
+            and must produce an all-zero delta.
+          minimum: 1
+          example: 17
+        populationRef:
+          $ref: '#/components/schemas/S3Uri'
+        name:
+          type: string
+          description: >-
+            Human-readable name for the run, shown in the workbench and quoted
+            in approval discussions.
+          minLength: 1
+          maxLength: 200
+          example: EARLY_COLLECTION v18 vs v17 on 2026-08-21 population
+      example:
+        strategyId: EARLY_COLLECTION
+        candidateVersion: 18
+        baselineVersion: 17
+        populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=SIM_001/population.jsonl
+        name: EARLY_COLLECTION v18 vs v17 on 2026-08-21 population
+
+    Simulation:
+      type: object
+      title: Simulation
+      description: >-
+        A simulation run and, once complete, its comparison report and the
+        content hash the result is pinned to.
+      additionalProperties: false
+      required:
+        - simulationId
+        - status
+        - strategyId
+        - candidateVersion
+        - baselineVersion
+        - populationRef
+        - name
+        - startedAt
+      properties:
+        simulationId:
+          type: string
+          description: Platform-generated ULID of the simulation run.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKGV5R8T2Y6C1H3K9J0QD
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        strategyId:
+          type: string
+          description: Strategy whose versions were compared.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        candidateVersion:
+          type: integer
+          format: int32
+          description: The version under evaluation.
+          minimum: 1
+          example: 18
+        baselineVersion:
+          type: integer
+          format: int32
+          description: The version compared against.
+          minimum: 1
+          example: 17
+        candidateContentHash:
+          $ref: '#/components/schemas/ContentHash'
+        populationRef:
+          $ref: '#/components/schemas/S3Uri'
+        name:
+          type: string
+          description: Human-readable name of the run.
+          minLength: 1
+          maxLength: 200
+          example: EARLY_COLLECTION v18 vs v17 on 2026-08-21 population
+        report:
+          $ref: '#/components/schemas/SimulationReport'
+        reportRef:
+          $ref: '#/components/schemas/S3Uri'
+        failureCode:
+          type: string
+          description: >-
+            Stable code explaining a `FAILED` run. Omitted otherwise.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: POPULATION_UNREADABLE
+        startedAt:
+          type: string
+          format: date-time
+          description: When the run was accepted, RFC3339 UTC.
+          example: '2026-08-22T09:00:00Z'
+        completedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the run reached a terminal status, RFC3339 UTC. Omitted while
+            `RUNNING`.
+          example: '2026-08-22T09:07:12Z'
+      example:
+        simulationId: 01M0MEKGV5R8T2Y6C1H3K9J0QD
+        status: COMPLETED
+        strategyId: EARLY_COLLECTION
+        candidateVersion: 18
+        baselineVersion: 17
+        candidateContentHash: 3a5b7c9d1e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b
+        populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=SIM_001/population.jsonl
+        name: EARLY_COLLECTION v18 vs v17 on 2026-08-21 population
+        report:
+          populationRows: 1000
+          byTreatment:
+            - treatmentCode: SMS_REMINDER_D35
+              counts:
+                baseline: 640
+                candidate: 705
+                delta: 65
+          contactVolumeByChannel:
+            - channel: SMS
+              counts:
+                baseline: 640
+                candidate: 705
+                delta: 65
+          suppressions:
+            baseline: 143
+            candidate: 138
+            delta: -5
+          reasonCodeHistogram:
+            - reasonCode: DPD_31_60
+              counts:
+                baseline: 640
+                candidate: 705
+                delta: 65
+          segmentBreakdown:
+            - segment: EARLY_STAGE_LOW_RISK
+              counts:
+                baseline: 640
+                candidate: 705
+                delta: 65
+        reportRef: s3://colx-dev-batch/simulations/01M0MEKGV5R8T2Y6C1H3K9J0QD/report.json
+        startedAt: '2026-08-22T09:00:00Z'
+        completedAt: '2026-08-22T09:07:12Z'
+
+    # ---------------------------------------------------- shadow-run resources
+    LegacyComparand:
+      type: string
+      title: LegacyComparand
+      description: >-
+        The literal `"LEGACY"`, meaning "compare against the `legacyDecision`
+        carried on each population line" rather than against a second strategy
+        version. This is the migration-parity mode of A§87–88: the legacy engine
+        is not called, its own recorded decisions are.
+      enum:
+        - LEGACY
+      example: LEGACY
+
+    ShadowComparand:
+      title: ShadowComparand
+      description: >-
+        What `strategyA` is being compared against — either a pinned strategy
+        version or the literal `"LEGACY"`. A union rather than two endpoints,
+        because "run the comparison" is one operation with one set of outputs
+        and the reviewer workflow over the diffs is identical either way.
+      oneOf:
+        - $ref: '#/components/schemas/StrategyRef'
+        - $ref: '#/components/schemas/LegacyComparand'
+
+    ShadowDiffCategory:
+      type: string
+      title: ShadowDiffCategory
+      description: >-
+        Classification of a shadow-run diff — exactly the A§88 set, plus
+        `UNCATEGORIZED` for a diff nobody has looked at yet. The distinctions
+        are the whole point: `EXPECTED` and `DATA_DIFFERENCE` do not block a
+        cutover, `RULE_TRANSLATION_ERROR`, `MISSING_RULE` and `NEW_BUG` do, and
+        `LEGACY_BUG` is a finding to take to the business rather than a defect
+        to fix. Collapsing them into "differences" is how a parity sign-off
+        becomes fiction.
+      enum:
+        - UNCATEGORIZED
+        - EXPECTED
+        - DATA_DIFFERENCE
+        - RULE_TRANSLATION_ERROR
+        - MISSING_RULE
+        - LEGACY_BUG
+        - NEW_BUG
+      example: UNCATEGORIZED
+
+    ShadowDiffCategoryAssignment:
+      type: string
+      title: ShadowDiffCategoryAssignment
+      description: >-
+        Category a reviewer may assign. `UNCATEGORIZED` is deliberately absent:
+        a diff starts there and moves out, and moving it back would erase a
+        review rather than record one.
+      enum:
+        - EXPECTED
+        - DATA_DIFFERENCE
+        - RULE_TRANSLATION_ERROR
+        - MISSING_RULE
+        - LEGACY_BUG
+        - NEW_BUG
+      example: RULE_TRANSLATION_ERROR
+
+    ShadowDiffCategoryCount:
+      type: object
+      title: ShadowDiffCategoryCount
+      description: One category and how many diffs currently sit in it.
+      additionalProperties: false
+      required:
+        - category
+        - count
+      properties:
+        category:
+          $ref: '#/components/schemas/ShadowDiffCategory'
+        count:
+          type: integer
+          format: int64
+          description: Diffs currently in this category. Zero when none.
+          minimum: 0
+          example: 4
+      example:
+        category: RULE_TRANSLATION_ERROR
+        count: 4
+
+    ShadowDecisionSummary:
+      type: object
+      title: ShadowDecisionSummary
+      description: >-
+        One side of a diff, reduced to what a reviewer compares. `strategy` is
+        omitted on the legacy side, which by definition has no strategy version
+        — that absence is meaningful, not missing data.
+      additionalProperties: false
+      required:
+        - decision
+        - reasonCodes
+      properties:
+        decision:
+          $ref: '#/components/schemas/DecisionOutcome'
+        treatmentCode:
+          type: string
+          description: >-
+            Treatment this side selected. Omitted when the side did not select
+            one.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+        channel:
+          $ref: '#/components/schemas/Channel'
+        reasonCodes:
+          type: array
+          description: >-
+            Reason codes this side produced. Empty on the legacy side when the
+            legacy engine recorded none — legacy systems frequently did not.
+          items:
+            $ref: '#/components/schemas/ReasonCodeValue'
+          maxItems: 50
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        decisionId:
+          type: string
+          description: >-
+            Decision audit record this side produced, when it was produced by
+            this platform. Omitted on the legacy side.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+      example:
+        decision: TREAT
+        treatmentCode: SMS_REMINDER_D35
+        channel: SMS
+        reasonCodes:
+          - DPD_31_60
+        strategy:
+          id: EARLY_COLLECTION
+          version: 17
+        decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+
+    CreateShadowRunRequest:
+      type: object
+      title: CreateShadowRunRequest
+      description: >-
+        Submission of a shadow run. When `strategyB` is `"LEGACY"`, every
+        population line must carry a `legacyDecision`; a line without one is
+        counted in `errored` rather than silently treated as agreement.
+      additionalProperties: false
+      required:
+        - populationRef
+        - strategyA
+        - strategyB
+      properties:
+        populationRef:
+          $ref: '#/components/schemas/S3Uri'
+        strategyA:
+          $ref: '#/components/schemas/StrategyRef'
+        strategyB:
+          $ref: '#/components/schemas/ShadowComparand'
+      example:
+        populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=PARITY_001/population.jsonl
+        strategyA:
+          id: EARLY_COLLECTION
+          version: 17
+        strategyB: LEGACY
+
+    ShadowRun:
+      type: object
+      title: ShadowRun
+      description: A shadow comparison run and what it is comparing.
+      additionalProperties: false
+      required:
+        - shadowRunId
+        - status
+        - populationRef
+        - strategyA
+        - strategyB
+        - startedAt
+      properties:
+        shadowRunId:
+          type: string
+          description: Platform-generated ULID of the shadow run.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        populationRef:
+          $ref: '#/components/schemas/S3Uri'
+        strategyA:
+          $ref: '#/components/schemas/StrategyRef'
+        strategyB:
+          $ref: '#/components/schemas/ShadowComparand'
+        failureCode:
+          type: string
+          description: Stable code explaining a `FAILED` run. Omitted otherwise.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: POPULATION_UNREADABLE
+        startedAt:
+          type: string
+          format: date-time
+          description: When the run was accepted, RFC3339 UTC.
+          example: '2026-08-22T11:00:00Z'
+        completedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the run reached a terminal status, RFC3339 UTC. Omitted while
+            `RUNNING`.
+          example: '2026-08-22T11:06:30Z'
+      example:
+        shadowRunId: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+        status: COMPLETED
+        populationRef: s3://colx-dev-batch/population/date=2026-08-21/run=PARITY_001/population.jsonl
+        strategyA:
+          id: EARLY_COLLECTION
+          version: 17
+        strategyB: LEGACY
+        startedAt: '2026-08-22T11:00:00Z'
+        completedAt: '2026-08-22T11:06:30Z'
+
+    ShadowRunSummary:
+      type: object
+      title: ShadowRunSummary
+      description: >-
+        The headline parity numbers of a shadow run. `matchRate` is the
+        fraction of compared subjects on which both sides produced the same
+        decision, treatment code and channel.
+      additionalProperties: false
+      required:
+        - shadowRunId
+        - status
+        - populationRows
+        - comparedRows
+        - matchRate
+        - countsByCategory
+      properties:
+        shadowRunId:
+          type: string
+          description: The shadow run this summary describes.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        populationRows:
+          type: integer
+          format: int64
+          description: Lines read from the population file.
+          minimum: 0
+          example: 100
+        comparedRows:
+          type: integer
+          format: int64
+          description: >-
+            Subjects both sides decided, and therefore the denominator of
+            `matchRate`. Lower than `populationRows` when lines errored or,
+            in `"LEGACY"` mode, carried no `legacyDecision`. Reported
+            separately so a match rate can never be quietly computed over a
+            shrinking base.
+          minimum: 0
+          example: 100
+        matchRate:
+          type: number
+          format: double
+          description: >-
+            `matchingRows / comparedRows`, in [0,1]. A ratio, not money, so a
+            float is the right type here — the platform's int64-minor-units
+            rule is about monetary amounts. `1` when nothing was compared.
+          minimum: 0
+          maximum: 1
+          example: 0.88
+        countsByCategory:
+          type: array
+          description: >-
+            Diff counts per category, one entry for every member of
+            `ShadowDiffCategory` in enum order, zeroes included. A reviewer can
+            therefore see "UNCATEGORIZED: 0" — which is the whole point of a
+            parity sign-off — rather than inferring it from an absent key.
+          items:
+            $ref: '#/components/schemas/ShadowDiffCategoryCount'
+          minItems: 7
+          maxItems: 7
+      example:
+        shadowRunId: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+        status: COMPLETED
+        populationRows: 100
+        comparedRows: 100
+        matchRate: 0.88
+        countsByCategory:
+          - category: UNCATEGORIZED
+            count: 0
+          - category: EXPECTED
+            count: 5
+          - category: DATA_DIFFERENCE
+            count: 2
+          - category: RULE_TRANSLATION_ERROR
+            count: 4
+          - category: MISSING_RULE
+            count: 1
+          - category: LEGACY_BUG
+            count: 0
+          - category: NEW_BUG
+            count: 0
+
+    ShadowRunDiff:
+      type: object
+      title: ShadowRunDiff
+      description: >-
+        One subject on which the two sides disagreed, with both decisions and
+        the reviewer's classification.
+      additionalProperties: false
+      required:
+        - diffId
+        - shadowRunId
+        - subject
+        - decisionA
+        - decisionB
+        - category
+        - createdAt
+      properties:
+        diffId:
+          type: string
+          description: Platform-generated ULID of this diff row.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKJX7T0W4A8E3K5N1M2SF
+        shadowRunId:
+          type: string
+          description: The shadow run this diff belongs to.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+        subject:
+          $ref: '#/components/schemas/DecisionSubject'
+        decisionA:
+          $ref: '#/components/schemas/ShadowDecisionSummary'
+        decisionB:
+          $ref: '#/components/schemas/ShadowDecisionSummary'
+        category:
+          $ref: '#/components/schemas/ShadowDiffCategory'
+        notes:
+          type: string
+          description: >-
+            Reviewer's notes, recorded verbatim. Must not contain PII — a diff
+            row is read by people investigating rule translation, not the
+            customer's circumstances.
+          minLength: 1
+          maxLength: 2048
+          example: Legacy applied the old 250 threshold; expected under the agreed change.
+        categorizedBy:
+          type: string
+          description: >-
+            Subject claim of the reviewer who assigned the current category.
+            Omitted while `UNCATEGORIZED`.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        categorizedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the current category was assigned, RFC3339 UTC. Omitted while
+            `UNCATEGORIZED`.
+          example: '2026-08-22T12:15:00Z'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the diff was recorded by the comparator, RFC3339 UTC.
+          example: '2026-08-22T11:06:30Z'
+      example:
+        diffId: 01M0MEKJX7T0W4A8E3K5N1M2SF
+        shadowRunId: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+        subject:
+          customerId: C123
+          accountId: A123
+        decisionA:
+          decision: TREAT
+          treatmentCode: SMS_REMINDER_D35
+          channel: SMS
+          reasonCodes:
+            - DPD_31_60
+          strategy:
+            id: EARLY_COLLECTION
+            version: 17
+          decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+        decisionB:
+          decision: NO_ACTION
+          reasonCodes: []
+        category: RULE_TRANSLATION_ERROR
+        notes: Legacy applied the old 250 threshold; expected under the agreed change.
+        categorizedBy: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        categorizedAt: '2026-08-22T12:15:00Z'
+        createdAt: '2026-08-22T11:06:30Z'
+
+    CategorizeShadowRunDiffRequest:
+      type: object
+      title: CategorizeShadowRunDiffRequest
+      description: A reviewer's classification of one diff.
+      additionalProperties: false
+      required:
+        - category
+      properties:
+        category:
+          $ref: '#/components/schemas/ShadowDiffCategoryAssignment'
+        notes:
+          type: string
+          description: >-
+            Reviewer's notes. Strongly recommended for any category that blocks
+            a cutover: "RULE_TRANSLATION_ERROR" with no note is not a finding
+            anybody can act on. Must not contain PII.
+          minLength: 1
+          maxLength: 2048
+          example: Legacy applied the old 250 threshold; expected under the agreed change.
+      example:
+        category: RULE_TRANSLATION_ERROR
+        notes: Legacy applied the old 250 threshold; expected under the agreed change.
+
+    # ------------------------------------------------------ reference resources
+    ReasonCodeDefinition:
+      type: object
+      title: ReasonCodeDefinition
+      description: >-
+        One entry of `contracts/registries/reason-codes.v1.json`: the code and
+        what it means, plus the pipeline stage that contributes it where that
+        is well defined.
+      additionalProperties: false
+      required:
+        - code
+        - description
+      properties:
+        code:
+          $ref: '#/components/schemas/ReasonCodeValue'
+        description:
+          type: string
+          description: >-
+            What the code means, in language safe to show an operator or a
+            collector. Not localised; the workbench localises presentation, not
+            the registry.
+          minLength: 1
+          maxLength: 512
+          example: Account is between 31 and 60 days past due
+        stage:
+          $ref: '#/components/schemas/DecisionStage'
+      example:
+        code: DPD_31_60
+        description: Account is between 31 and 60 days past due
+        stage: RULES
+
+    # ------------------------------------------------------------------- pages
+    NextCursor:
+      type: string
+      title: NextCursor
+      description: >-
+        Opaque continuation token for the next page, or `null` on the last
+        page. Pass it back verbatim as `cursor`; never parse or construct one.
+        Nullable rather than omitted so that "last page" is an explicit answer
+        (contracts/README.md §10).
+      nullable: true
+      minLength: 1
+      maxLength: 512
+      example: eyJhZnRlciI6IjAxTTBNRUtEODBNOVMzNDZRM0QyNVZUNEY1In0
+
+    DecisionPage:
+      type: object
+      title: DecisionPage
+      description: One page of decision audit records.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The decisions in this page, most recent first.
+          items:
+            $ref: '#/components/schemas/Decision'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - decisionId: 01M0MEKD80M9S346Q3D25VT4F5
+            correlationId: 01M0MEKBHXV37E3S3E28JT97KB
+            mode: ONLINE
+            subject:
+              customerId: C123
+              accountId: A123
+              caseId: 01M0MEKBHXV37E3S3E28JT97KB
+            decidedAt: '2026-08-22T10:00:00Z'
+            decision: TREAT
+            strategy:
+              id: EARLY_COLLECTION
+              version: 17
+            treatment:
+              type: CONTACT
+              channel: SMS
+              treatmentCode: SMS_REMINDER_D35
+            reasonCodes:
+              - DPD_31_60
+              - CHANNEL_ELIGIBLE
+            modelReferences:
+              - model: PAYMENT_PROPENSITY
+                version: '8'
+            inputSnapshotRef: s3://colx-dev-decision-audit/input-snapshots/date=2026-08-22/01M0MEKD80M9S346Q3D25VT4F5.json
+            inputContentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+        nextCursor: null
+
+    ShadowRunDiffPage:
+      type: object
+      title: ShadowRunDiffPage
+      description: One page of shadow-run diffs.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The diffs in this page, oldest first.
+          items:
+            $ref: '#/components/schemas/ShadowRunDiff'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - diffId: 01M0MEKJX7T0W4A8E3K5N1M2SF
+            shadowRunId: 01M0MEKHW6S9V3Z7D2J4M0K1RE
+            subject:
+              customerId: C123
+              accountId: A123
+            decisionA:
+              decision: TREAT
+              treatmentCode: SMS_REMINDER_D35
+              channel: SMS
+              reasonCodes:
+                - DPD_31_60
+            decisionB:
+              decision: NO_ACTION
+              reasonCodes: []
+            category: UNCATEGORIZED
+            createdAt: '2026-08-22T11:06:30Z'
+        nextCursor: null
+
+    ReasonCodePage:
+      type: object
+      title: ReasonCodePage
+      description: One page of reason-code definitions.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The reason-code definitions in this page, ordered by code.
+          items:
+            $ref: '#/components/schemas/ReasonCodeDefinition'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - code: CHANNEL_ELIGIBLE
+            description: The selected channel is permitted for this customer
+            stage: OPTIMIZATION
+          - code: DPD_31_60
+            description: Account is between 31 and 60 days past due
+            stage: RULES
+        nextCursor: null

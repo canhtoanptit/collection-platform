@@ -1,0 +1,3449 @@
+# =============================================================================
+# Collections Platform — strategy-service API (DEC-1)
+# =============================================================================
+# Owns `/v1/strategies*`, `/v1/rule-sets*` and `/v1/guardrail-configs*`
+# (contracts/README.md "URL path-ownership matrix"). Decision execution lives in
+# `decision.v1.yaml`; this spec is the *authoring and governance* surface only —
+# nothing here evaluates a strategy.
+#
+# Source: A§53 (strategy object), A§54 (policy precedence), A§55 (rule engine),
+# A§60 (strategy governance lifecycle), D§7 (strategy management), D§77
+# (strategy lifecycle), plan §7 DEC-1/DEC-2/DEC-3/DEC-4.
+#
+# SELF-CONTAINED BY DESIGN: the strategy document, rule-set document, guardrail
+# config and condition grammar are declared inline as component schemas rather
+# than `$ref`-ing `contracts/schemas/decisioning/*.json`. oapi-codegen cannot
+# follow a JSON-Schema `$ref` out of an OpenAPI document, and the strict-server
+# contract must be a compile-time artefact (CLAUDE.md §4). The normative
+# documents remain:
+#
+#   contracts/schemas/decisioning/strategy-document.v1.json
+#   contracts/schemas/decisioning/rule-set.v1.json
+#   contracts/schemas/decisioning/guardrail-config.v1.json
+#   contracts/schemas/decisioning/context-field-catalogue.v1.json
+#
+# and strategy-service validates every submitted definition against them at
+# runtime (embedded FS, `platform/events`-style loader). Field shapes here are
+# kept identical to those schemas; a divergence is a bug in whichever file
+# drifted.
+#
+# RELEASED FILE — IMMUTABLE once on `main`. Any change a consumer could notice
+# ships as `strategy.v2.yaml`. See contracts/README.md §1.
+#
+# Vocabulary policy (same as the wave-A specs): closed state machines defined by
+# the design pack are `enum`s; vocabularies that are reference data owned by a
+# service (segments, product codes, delinquency buckets, reason codes, model
+# ids) are pattern-constrained strings, because adding an enum member to a
+# released contract is a breaking change.
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Strategy Service API
+  version: 1.0.0
+  description: >-
+    Authoring, versioning and governance of collections decisioning
+    configuration: strategies (A§53), rule sets and policy sets (A§55), and
+    execution guardrail configs. Every artefact is immutable once it leaves
+    DRAFT, versioned independently, and moves through the A§60 lifecycle under
+    an append-only audit trail (CLAUDE.md hard rule 4).
+
+
+    Conventions (normative: `contracts/README.md`): A§20 error body on every
+    non-2xx response, `Idempotency-Key` on every POST command (A§21),
+    `X-Correlation-Id` accepted on every request and echoed on every response
+    (A§97), RFC3339 UTC timestamps, `limit` + opaque `cursor` pagination.
+
+
+    Money never appears on this API as a scalar amount. The only monetary
+    values in the decisioning contracts are inside a **context document**, and
+    they are decimal strings in *major* units (`"500"`, not `50000`) so that
+    business rules authored by non-engineers read the same numbers the business
+    uses — the single documented exception to the platform's int64-minor-units
+    rule (contracts/README.md §4, plan §2). Strategy and rule-set definitions
+    only ever *compare against* those context fields, so any threshold written
+    in a condition leaf is a decimal string in major units too.
+
+
+    Authorization is a per-service JWT with deny-by-default scope checks. The
+    scope each operation requires is stated in its description. The governance
+    roles are `strategy-author`, `business-approver`, `risk-approver` and
+    `admin` (Cognito groups, FND-6).
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.collections.internal
+    description: >-
+      API gateway host (A§64). No ingress exists before Phase 12 of the
+      implementation plan; until then the service is reached directly.
+  - url: http://localhost:8080
+    description: Local development (`make -C services/strategy run`, compose stack, port-forward).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: strategies
+    description: >-
+      Strategy aggregates and their immutable versions — create, clone, edit a
+      DRAFT definition, read the ACTIVE set (A§53, plan DEC-2).
+  - name: strategy-governance
+    description: >-
+      The A§60 lifecycle: state transitions, dual approvals, and the
+      append-only audit of who moved what, when, against which content hash
+      (plan DEC-3).
+  - name: rule-sets
+    description: >-
+      Versioned rule and policy documents evaluated by the decision pipeline.
+      Immutable once published (A§55, plan DEC-4).
+  - name: guardrail-configs
+    description: >-
+      Versioned execution guardrails — per-channel contact windows and
+      frequency caps enforced by treatment-service before dispatch (plan
+      DEC-4/DEC-16).
+
+paths:
+  # --------------------------------------------------------------- strategies
+  /v1/strategies:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createStrategy
+      summary: Create a strategy and its first DRAFT version
+      description: >-
+        Creates the strategy aggregate identified by the submitted definition's
+        `id`, together with version `1` in state `DRAFT`. The body is a full
+        strategy document (A§53); it is validated against
+        `schemas/decisioning/strategy-document.v1.json` and rejected with 400
+        `STRATEGY_DEFINITION_INVALID` — including a `details[]` entry per
+        offending field — when a field is unknown, a referenced context field
+        is absent from the field catalogue, or `experiment.arms[].percentBps`
+        does not sum to 10000.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        Creating a strategy whose `id` already exists is 409
+        `STRATEGY_EXISTS`: subsequent versions are created with
+        `POST /v1/strategies/{strategyId}/versions`.
+      tags:
+        - strategies
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The initial strategy document. Its `id` becomes `strategyId`.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyDocument'
+      responses:
+        '201':
+          description: The created strategy version — always version 1, state DRAFT.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listStrategies
+      summary: List strategies
+      description: >-
+        Lists strategy aggregates, newest first by creation time. `status`
+        filters to strategies that currently have at least one version in that
+        state, which is how the workbench renders the "awaiting my approval"
+        queues.
+
+
+        Required scope: any governance role — `strategy-author`,
+        `business-approver`, `risk-approver` or `admin`.
+      tags:
+        - strategies
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >-
+            Return only strategies having at least one version in this
+            lifecycle state. Omit for all strategies.
+          schema:
+            $ref: '#/components/schemas/StrategyState'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of strategies.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/strategies/active:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listActiveStrategies
+      summary: List the strategy versions active on a date
+      description: >-
+        Returns the ACTIVE version of every strategy whose effective window
+        contains `onDate`. This is the config-cache load performed by
+        decision-service at start-up and after every `StrategyStateChanged`
+        event (plan DEC-6); it is also how an auditor reconstructs the strategy
+        set that was live on a past business date.
+
+
+        At most one version of a strategy is ACTIVE at any time — enforced in
+        the store by a partial unique index on `(strategy_id) WHERE status =
+        'ACTIVE'` — so this list has at most one entry per `strategyId`.
+        Entries are ordered by descending `definition.priority` then ascending
+        `strategyId`, which is exactly the strategy-selection order the decision
+        pipeline applies (highest priority wins, ties broken
+        lexicographically).
+
+
+        Required scope: any governance role, or `decisions:write` for the
+        decision-service service identity.
+      tags:
+        - strategies
+      parameters:
+        - name: onDate
+          in: query
+          required: false
+          description: >-
+            Business date to evaluate the effective window against
+            (`YYYY-MM-DD`). Defaults to today in UTC. A future date returns the
+            set that *will* be active then only insofar as versions are already
+            ACTIVE — SCHEDULED versions are not included, because they are not
+            yet decisions the platform would make.
+          schema:
+            type: string
+            format: date
+            example: '2026-08-22'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of ACTIVE strategy versions, in selection order.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyVersionPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/strategies/{strategyId}:
+    parameters:
+      - $ref: '#/components/parameters/StrategyIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getStrategy
+      summary: Get a strategy aggregate
+      description: >-
+        Returns the strategy aggregate: its name, the highest version number
+        that exists, and which version (if any) is currently ACTIVE. The
+        definitions themselves live on the version resources.
+
+
+        Required scope: any governance role.
+      tags:
+        - strategies
+      responses:
+        '200':
+          description: The strategy aggregate.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Strategy'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/strategies/{strategyId}/versions:
+    parameters:
+      - $ref: '#/components/parameters/StrategyIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listStrategyVersions
+      summary: List the versions of a strategy
+      description: >-
+        Every version ever created for this strategy, newest version number
+        first, each with its lifecycle state and content hash. Versions are
+        never deleted: a rejected or retired version stays readable forever
+        because a decision audit row may reference it (D§39).
+
+
+        Required scope: any governance role.
+      tags:
+        - strategies
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of strategy versions, highest version first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyVersionPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    post:
+      operationId: createStrategyVersion
+      summary: Clone the latest version into a new DRAFT
+      description: >-
+        Creates the next version number by copying the definition of the
+        highest existing version verbatim, in state `DRAFT`. This is the only
+        way to change a strategy that has left DRAFT: released versions are
+        immutable so that every decision audit row keeps pointing at exactly
+        the definition that produced it.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        The request body is optional; supply `sourceVersion` to clone something
+        other than the latest. Cloning does not carry over lifecycle state,
+        approvals or the frozen content hash — the new version starts clean at
+        DRAFT.
+      tags:
+        - strategies
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        description: Which version to clone from, and an optional comment for the audit trail.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStrategyVersionRequest'
+      responses:
+        '201':
+          description: The newly created DRAFT version.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/strategies/{strategyId}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/StrategyIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getStrategyVersion
+      summary: Get one strategy version with its full definition
+      description: >-
+        Returns the version, its lifecycle state, its content hash and the
+        complete strategy document. The content hash is the SHA-256 of the
+        canonicalised definition and is what simulation records and the
+        governance state machine key on — a definition edit changes the hash and
+        invalidates any simulation performed against the old one.
+
+
+        Required scope: any governance role, or `decisions:write` for the
+        decision-service service identity loading its config cache.
+      tags:
+        - strategies
+      responses:
+        '200':
+          description: The strategy version and its definition.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/strategies/{strategyId}/versions/{version}/definition:
+    parameters:
+      - $ref: '#/components/parameters/StrategyIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    put:
+      operationId: replaceStrategyVersionDefinition
+      summary: Replace the definition of an editable strategy version
+      description: >-
+        Wholesale replacement of the version's strategy document. Editable only
+        while the version is in `DRAFT` or `TEST`; any other state is 409
+        `STRATEGY_NOT_EDITABLE` — that is the mechanism that makes an approved
+        or active strategy tamper-proof (A§60, plan DEC-2/DEC-3).
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        The submitted document's `id` must equal `{strategyId}`; a mismatch is
+        400 `STRATEGY_DEFINITION_INVALID`. On success the content hash is
+        recomputed, which deliberately invalidates any simulation record taken
+        against the previous hash — a version cannot reach `SIMULATED` on the
+        strength of a simulation of different content.
+
+
+        No `If-Match` is required: this is a full replacement of a definition
+        that only its author's role may touch, and every change is recorded in
+        the append-only transition/audit trail. PATCH semantics (and therefore
+        row-version preconditions) are deliberately not offered for strategy
+        documents — partial edits of a rule tree are how production strategies
+        get silently broken.
+      tags:
+        - strategies
+      requestBody:
+        required: true
+        description: The replacement strategy document.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyDocument'
+      responses:
+        '200':
+          description: The updated version, with its recomputed content hash.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # ------------------------------------------------------ strategy governance
+  /v1/strategies/{strategyId}/versions/{version}/transitions:
+    parameters:
+      - $ref: '#/components/parameters/StrategyIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createStrategyTransition
+      summary: Move a strategy version to the next lifecycle state
+      description: >-
+        Requests the A§60 transition to `toState`. Legal edges, and the role
+        that may drive each one, are:
+
+
+        | from | to | required role | additional guard |
+        |---|---|---|---|
+        | `DRAFT` | `TEST` | `strategy-author` | every `ruleSetRef` and
+        `modelRefs[]` reference resolves, and the referenced rule set version is
+        `PUBLISHED` |
+        | `TEST` | `DRAFT` | `strategy-author` | — (re-open for editing; the
+        content hash is not yet frozen) |
+        | `TEST` | `SIMULATED` | `admin`, or the decision-service system
+        identity | **content hash is frozen here** and a *completed* simulation
+        record must exist for exactly that hash (`SIMULATION_REQUIRED`
+        otherwise); feature-flagged off until DEC-12 ships |
+        | `SIMULATED` | `BUSINESS_APPROVED` | `business-approver` | approver
+        must not be the author of the version |
+        | `SIMULATED` | `REJECTED` | `business-approver` or `admin` | — |
+        | `BUSINESS_APPROVED` | `RISK_APPROVED` | `risk-approver` | approver
+        must not be the author, and must not be the business approver |
+        | `BUSINESS_APPROVED` | `REJECTED` | `risk-approver` or `admin` | — |
+        | `RISK_APPROVED` | `SCHEDULED` | `strategy-author` or `admin` |
+        `definition.effectiveFrom` must be today or later |
+        | `SCHEDULED` | `ACTIVE` | `admin`, or the activation scheduler | any
+        previously ACTIVE version of the same strategy is RETIRED in the same
+        transaction |
+        | `ACTIVE` | `RETIRED` | `admin` | — |
+        | `REJECTED` | `DRAFT` | `strategy-author` | — (rework a rejected
+        version) |
+
+
+        Anything not in that table is 409 `STRATEGY_TRANSITION_INVALID` and
+        changes nothing. A caller holding the wrong role gets 403, and so does
+        an approver who authored the version — the approver-is-not-author rule
+        is a 403 `APPROVER_IS_AUTHOR`, not a 409, because it is an
+        authorization failure about *who* is asking rather than about the state
+        of the resource.
+
+
+        Required scope: as per the table above; `admin` may drive any edge that
+        names it.
+
+
+        Every accepted request appends one row to the append-only transition
+        log and emits `StrategyStateChanged`; activation additionally emits
+        `StrategyActivated` and `StrategyRetired` for the version it displaced.
+        Approval edges also append to the approval log returned by
+        `GET .../approvals`.
+      tags:
+        - strategy-governance
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: Target state and the reviewer's comment.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyTransitionRequest'
+      responses:
+        '201':
+          description: The recorded transition.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyTransition'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listStrategyTransitions
+      summary: List the transition audit trail of a strategy version
+      description: >-
+        The append-only history of every state change applied to this version,
+        oldest first — actor, roles held at the time, comment and the content
+        hash that was in force. INSERT + SELECT only: there is no API, and no
+        database grant, that can amend or remove a row (CLAUDE.md hard rule 4,
+        D§39).
+
+
+        Required scope: any governance role. Read access is deliberately broad:
+        an auditor must be able to reconstruct a governance history without
+        write privileges.
+      tags:
+        - strategy-governance
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of transitions, oldest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyTransitionPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/strategies/{strategyId}/versions/{version}/approvals:
+    parameters:
+      - $ref: '#/components/parameters/StrategyIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: listStrategyApprovals
+      summary: List the recorded approvals of a strategy version
+      description: >-
+        The business and risk approvals granted for this version, oldest first,
+        each pinned to the content hash that was approved. A version that
+        reached `RISK_APPROVED` has exactly two rows by two distinct actors,
+        neither of whom authored the version — that is the evidence a regulator
+        asks for, so the rows are append-only like the transitions.
+
+
+        Required scope: any governance role.
+      tags:
+        - strategy-governance
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of approvals, oldest first.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyApprovalPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # ---------------------------------------------------------------- rule sets
+  /v1/rule-sets:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createRuleSet
+      summary: Create a rule set, or a new DRAFT version of an existing one
+      description: >-
+        Creates version `1` in state `DRAFT` for a new `ruleSetId`. When the
+        `ruleSetId` already exists the next version number is created instead,
+        also as `DRAFT` — published versions are immutable, so a new version is
+        the only way to change a rule set. `kind` must match the existing rule
+        set's kind; changing it is 422 `RULESET_KIND_IMMUTABLE`.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        Validation (400 `RULESET_DEFINITION_INVALID` with `details[]`): the
+        document must satisfy `schemas/decisioning/rule-set.v1.json`; every
+        `when` leaf `field` must exist in
+        `schemas/decisioning/context-field-catalogue.v1.json`; every
+        `then.reasonCode` must exist in `registries/reason-codes.v1.json`; and
+        `FORBID_CHANNEL` outcomes are accepted only when `kind` is `POLICY`
+        (A§54 — policy narrows, rules select).
+      tags:
+        - rule-sets
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The rule-set document to store as a new DRAFT version.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuleSetDocument'
+      responses:
+        '201':
+          description: The created DRAFT rule-set version.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSetVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listRuleSets
+      summary: List rule sets
+      description: >-
+        Lists rule-set aggregates, newest first by creation time, optionally
+        filtered by `kind` and by whether a version in a given status exists.
+
+
+        Required scope: any governance role, or `decisions:write` for the
+        decision-service service identity.
+      tags:
+        - rule-sets
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          description: Restrict to rule sets of this kind. Omit for both kinds.
+          schema:
+            $ref: '#/components/schemas/RuleSetKind'
+        - name: status
+          in: query
+          required: false
+          description: >-
+            Return only rule sets having at least one version in this status.
+            Omit for all rule sets.
+          schema:
+            $ref: '#/components/schemas/PublishableState'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of rule sets.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSetPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/rule-sets/{ruleSetId}:
+    parameters:
+      - $ref: '#/components/parameters/RuleSetIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getRuleSet
+      summary: Get a rule-set aggregate
+      description: >-
+        Returns the rule-set aggregate: kind, highest version number, and the
+        highest currently PUBLISHED version — the one a strategy's `ruleSetRef`
+        may point at.
+
+
+        Required scope: any governance role.
+      tags:
+        - rule-sets
+      responses:
+        '200':
+          description: The rule-set aggregate.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSet'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/rule-sets/{ruleSetId}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/RuleSetIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getRuleSetVersion
+      summary: Get one rule-set version with its full definition
+      description: >-
+        Returns the version, its status, its content hash and the complete rule
+        or policy document, including every rule's `when` condition tree and
+        `then` outcome.
+
+
+        Required scope: any governance role, or `decisions:write` for the
+        decision-service service identity loading its config cache.
+      tags:
+        - rule-sets
+      responses:
+        '200':
+          description: The rule-set version and its definition.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSetVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/rule-sets/{ruleSetId}/versions/{version}/definition:
+    parameters:
+      - $ref: '#/components/parameters/RuleSetIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    put:
+      operationId: replaceRuleSetVersionDefinition
+      summary: Replace the definition of a DRAFT rule-set version
+      description: >-
+        Wholesale replacement of the version's rule or policy document.
+        Editable only while the version is `DRAFT`; a `PUBLISHED` or `RETIRED`
+        version is 409 `RULESET_PUBLISHED`.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        The submitted document's `ruleSetId` and `kind` must match the
+        resource; `version` in the body, if present, must equal `{version}`.
+        Validation is identical to `POST /v1/rule-sets`.
+      tags:
+        - rule-sets
+      requestBody:
+        required: true
+        description: The replacement rule-set document.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuleSetDocument'
+      responses:
+        '200':
+          description: The updated DRAFT version, with its recomputed content hash.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSetVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/rule-sets/{ruleSetId}/versions/{version}/publish:
+    parameters:
+      - $ref: '#/components/parameters/RuleSetIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: publishRuleSetVersion
+      summary: Publish a DRAFT rule-set version
+      description: >-
+        Moves the version from `DRAFT` to `PUBLISHED`, making it immutable and
+        eligible to be referenced by a strategy's `ruleSetRef`. Re-publishing an
+        already published version, or attempting to publish a `RETIRED` one, is
+        409 `RULESET_PUBLISHED` — the same code the definition PUT returns, so a
+        client has one thing to branch on for "this rule set is frozen".
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        Publication re-runs the full validation set (schema, field catalogue,
+        reason-code registry, `FORBID_CHANNEL`-only-in-POLICY) because the
+        catalogue and registry may have changed since the DRAFT was written,
+        and emits `RuleSetPublished`.
+      tags:
+        - rule-sets
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        description: Optional publication comment recorded in the audit trail.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+      responses:
+        '200':
+          description: The published, now immutable, rule-set version.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSetVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  # -------------------------------------------------------- guardrail configs
+  /v1/guardrail-configs:
+    parameters:
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: createGuardrailConfig
+      summary: Create a guardrail config, or a new DRAFT version of an existing one
+      description: >-
+        Same resource pattern as rule sets: version `1` `DRAFT` for a new
+        `guardrailConfigId`, otherwise the next version number as `DRAFT`.
+        Guardrail configs carry the per-channel contact windows and frequency
+        caps that treatment-service re-evaluates immediately before dispatch
+        (plan DEC-4/DEC-16) — they are execution guardrails, not decision
+        logic, which is why they are a separate resource from policy rule sets.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        Validation (400 `GUARDRAIL_DEFINITION_INVALID` with `details[]`): the
+        document must satisfy
+        `schemas/decisioning/guardrail-config.v1.json`; contact windows must
+        not be empty for a channel that any frequency cap references; `from`
+        must be strictly before `to` within a window; and at most one window
+        may exist per (channel, day-of-week) pair.
+      tags:
+        - guardrail-configs
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The guardrail-config document to store as a new DRAFT version.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailConfigDocument'
+      responses:
+        '201':
+          description: The created DRAFT guardrail-config version.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailConfigVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+    get:
+      operationId: listGuardrailConfigs
+      summary: List guardrail configs
+      description: >-
+        Lists guardrail-config aggregates, newest first by creation time,
+        optionally filtered by whether a version in a given status exists.
+
+
+        Required scope: any governance role, or `treatments:write` for the
+        treatment-service service identity loading its guardrail cache.
+      tags:
+        - guardrail-configs
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >-
+            Return only guardrail configs having at least one version in this
+            status. Omit for all of them.
+          schema:
+            $ref: '#/components/schemas/PublishableState'
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of guardrail configs.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailConfigPage'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/guardrail-configs/{guardrailConfigId}:
+    parameters:
+      - $ref: '#/components/parameters/GuardrailConfigIdPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getGuardrailConfig
+      summary: Get a guardrail-config aggregate
+      description: >-
+        Returns the aggregate: highest version number and the highest currently
+        PUBLISHED version, which is the one treatment-service enforces.
+
+
+        Required scope: any governance role, or `treatments:write` for the
+        treatment-service service identity.
+      tags:
+        - guardrail-configs
+      responses:
+        '200':
+          description: The guardrail-config aggregate.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailConfig'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/guardrail-configs/{guardrailConfigId}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/GuardrailConfigIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    get:
+      operationId: getGuardrailConfigVersion
+      summary: Get one guardrail-config version with its full definition
+      description: >-
+        Returns the version, its status, its content hash and the complete
+        guardrail document — every contact window and frequency cap
+        treatment-service will enforce.
+
+
+        Required scope: any governance role, or `treatments:write` for the
+        treatment-service service identity.
+      tags:
+        - guardrail-configs
+      responses:
+        '200':
+          description: The guardrail-config version and its definition.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailConfigVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/guardrail-configs/{guardrailConfigId}/versions/{version}/definition:
+    parameters:
+      - $ref: '#/components/parameters/GuardrailConfigIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    put:
+      operationId: replaceGuardrailConfigVersionDefinition
+      summary: Replace the definition of a DRAFT guardrail-config version
+      description: >-
+        Wholesale replacement of the version's guardrail document. Editable
+        only while the version is `DRAFT`; a `PUBLISHED` or `RETIRED` version is
+        409 `GUARDRAIL_PUBLISHED`.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        The submitted document's `guardrailConfigId` must match the resource.
+        Validation is identical to `POST /v1/guardrail-configs`.
+      tags:
+        - guardrail-configs
+      requestBody:
+        required: true
+        description: The replacement guardrail-config document.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailConfigDocument'
+      responses:
+        '200':
+          description: The updated DRAFT version, with its recomputed content hash.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailConfigVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+  /v1/guardrail-configs/{guardrailConfigId}/versions/{version}/publish:
+    parameters:
+      - $ref: '#/components/parameters/GuardrailConfigIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+      - $ref: './common.v1.yaml#/components/parameters/CorrelationId'
+    post:
+      operationId: publishGuardrailConfigVersion
+      summary: Publish a DRAFT guardrail-config version
+      description: >-
+        Moves the version from `DRAFT` to `PUBLISHED`, making it immutable and
+        the config treatment-service enforces from that moment. Re-publishing,
+        or publishing a `RETIRED` version, is 409 `GUARDRAIL_PUBLISHED`.
+
+
+        Required scope: `strategy-author` (or `admin`).
+
+
+        Publication emits `GuardrailConfigPublished`, which is what makes
+        treatment-service refresh its cache; there is no polling contract for
+        guardrails because a stale window would let a dispatch out at the wrong
+        time of day.
+      tags:
+        - guardrail-configs
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        description: Optional publication comment recorded in the audit trail.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+      responses:
+        '200':
+          description: The published, now immutable, guardrail-config version.
+          headers:
+            X-Correlation-Id:
+              $ref: './common.v1.yaml#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailConfigVersion'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: './common.v1.yaml#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        OAuth2/OIDC access token (Cognito-issued JWT) presented as
+        `Authorization: Bearer <token>`, validated per service by
+        `platform/authn` against the configured issuer's JWKS. Authorization is
+        deny-by-default: every operation names the scope it requires in its
+        description, and a token without it is rejected with 403. The
+        governance roles — `strategy-author`, `business-approver`,
+        `risk-approver`, `admin` — arrive as group claims and are recorded on
+        every transition, because "who was allowed to do this at the time" is
+        part of the audit trail, not just of the request.
+
+  parameters:
+    StrategyIdPath:
+      name: strategyId
+      in: path
+      required: true
+      description: >-
+        Business identifier of the strategy — the `id` of its strategy
+        document, authored by a human rather than minted by the platform, so it
+        is a SCREAMING_SNAKE code and not a ULID. It appears verbatim in every
+        decision audit row the strategy produced.
+      schema:
+        type: string
+        pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+        example: EARLY_COLLECTION
+    RuleSetIdPath:
+      name: ruleSetId
+      in: path
+      required: true
+      description: >-
+        Business identifier of the rule set, authored by a human in the same
+        SCREAMING_SNAKE form as a strategy id. Policy sets use the same
+        namespace; `kind` distinguishes them.
+      schema:
+        type: string
+        pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+        example: EARLY_COLLECTION_RULES
+    GuardrailConfigIdPath:
+      name: guardrailConfigId
+      in: path
+      required: true
+      description: >-
+        Business identifier of the guardrail config, authored by a human in the
+        same SCREAMING_SNAKE form as a strategy id.
+      schema:
+        type: string
+        pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+        example: DEFAULT_GUARDRAILS
+    VersionPath:
+      name: version
+      in: path
+      required: true
+      description: >-
+        Version number of the addressed artefact. Versions start at 1 and are
+        allocated densely and monotonically per aggregate; they are never
+        reused, even after a rejection, because a decision audit row may name
+        one forever.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        example: 17
+
+  schemas:
+    # ------------------------------------------------ shared decisioning types
+    Channel:
+      type: string
+      title: Channel
+      description: >-
+        Contact channel. The closed set implemented by treatment-service's
+        channel adapters (plan DEC-15); identical to `Channel` in
+        `customer.v1.yaml` and `treatment.v1.yaml`. A collector-task treatment
+        has no channel — it lands as a case activity, not a message.
+      enum:
+        - SMS
+        - EMAIL
+        - LETTER
+        - DIGITAL
+      example: SMS
+
+    TreatmentType:
+      type: string
+      title: TreatmentType
+      description: >-
+        What kind of action a treatment is (D§9). `CONTACT` is an outbound
+        message and carries a `channel`; `CALL_TASK` creates work for a
+        collector; the remaining three hand the account to another process.
+        Decisioning selects the type, treatment-service executes it — the
+        separation is deliberate (D§9).
+      enum:
+        - CONTACT
+        - CALL_TASK
+        - ARRANGEMENT_OFFER
+        - AGENCY_PLACEMENT
+        - LEGAL_ESCALATION
+      example: CONTACT
+
+    ContentHash:
+      type: string
+      title: ContentHash
+      description: >-
+        Lowercase hex SHA-256 of the canonicalised definition JSON. Identifies
+        *content* rather than version number: it is what a simulation record is
+        keyed on, what the governance state machine freezes at
+        `TEST -> SIMULATED`, and what an approval row pins, so that an edit can
+        never smuggle new logic past an approval.
+      pattern: '^[0-9a-f]{64}$'
+      example: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+
+    ReasonCode:
+      type: string
+      title: ReasonCode
+      description: >-
+        Stable reason code from `registries/reason-codes.v1.json`. Clients and
+        analytics branch on these, and every rule outcome must carry one so
+        that no decision is ever unexplainable (A§55, A§58).
+      pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+      example: DPD_31_60
+
+    Probability:
+      type: string
+      title: Probability
+      description: >-
+        A probability in [0,1] as a decimal string, for the same reason
+        monetary amounts are strings: model thresholds are authored by humans
+        and compared exactly, and a float round-trip through JSON is not
+        exact. Up to six decimal places.
+      pattern: '^(0(\.[0-9]{1,6})?|1(\.0{1,6})?)$'
+      example: '0.72'
+
+    # ---------------------------------------------------- condition expression
+    ConditionOperator:
+      type: string
+      title: ConditionOperator
+      description: >-
+        Comparison operator of a condition leaf (A§55). The set is deliberately
+        small and total: the rule language is not Turing-complete, so every
+        rule set is decidable, auditable and parity-testable against the legacy
+        engine (A§88). `BETWEEN` takes a two-element `[low, high]` array and is
+        inclusive at both ends; `IN`/`NOT_IN` take an array; `IS_NULL` and
+        `NOT_NULL` take no `value`.
+      enum:
+        - EQ
+        - NE
+        - GT
+        - GTE
+        - LT
+        - LTE
+        - BETWEEN
+        - IN
+        - NOT_IN
+        - IS_NULL
+        - NOT_NULL
+      example: BETWEEN
+
+    ConditionScalar:
+      title: ConditionScalar
+      description: >-
+        One scalar operand inside an `IN`, `NOT_IN` or `BETWEEN` array. Typed
+        as a union rather than left open so that generated clients keep a
+        concrete type: strings for codes and monetary amounts, numbers for
+        counts and day figures, booleans for flags.
+
+
+        A monetary operand is a decimal string in **major** units — `"500"`
+        means five hundred, not five. This is the platform's single documented
+        departure from int64 minor units and it exists only in decisioning
+        documents, because a threshold authored as `50000` by a business user
+        who meant `500` is a mistake nobody catches in review
+        (contracts/README.md §4, plan §2/§6.8). The unit of every comparable
+        field is declared once in
+        `schemas/decisioning/context-field-catalogue.v1.json`.
+      oneOf:
+        - type: string
+          description: >-
+            Code, enum member, ISO date, or monetary amount as a decimal string
+            in major units (`"250.00"`).
+        - type: number
+          description: Integer or fractional count, e.g. a day-past-due threshold.
+        - type: boolean
+          description: Flag value.
+      example: 31
+
+    ConditionValue:
+      title: ConditionValue
+      description: >-
+        Right-hand operand of a condition leaf. A bare scalar for the
+        comparison operators, or an array for `IN`, `NOT_IN` and `BETWEEN`
+        (which requires exactly two elements, low then high). Omitted entirely
+        for `IS_NULL` and `NOT_NULL`. The operand's type must match the type
+        the referenced field declares in
+        `schemas/decisioning/context-field-catalogue.v1.json`, which is checked
+        at authoring time rather than at decision time — a type error in a live
+        strategy is not something to discover at 3am.
+      oneOf:
+        - type: string
+          description: >-
+            Single code, enum member, ISO date, or monetary amount as a decimal
+            string in major units.
+        - type: number
+          description: Single integer or fractional count.
+        - type: boolean
+          description: Single flag value.
+        - type: array
+          description: Operand list for `IN`/`NOT_IN`, or `[low, high]` for `BETWEEN`.
+          items:
+            $ref: '#/components/schemas/ConditionScalar'
+          minItems: 1
+          maxItems: 200
+      example: 31
+
+    ConditionLeaf:
+      type: object
+      title: ConditionLeaf
+      description: >-
+        A single comparison against one context-document field (A§55).
+        `field` is a dotted path into the context document — `delinquency.dpd`,
+        `customer.doNotContact` — and must exist in
+        `schemas/decisioning/context-field-catalogue.v1.json`, which also fixes
+        its type and unit. An unknown path is rejected at authoring time with
+        400 and the path named in `details[]`, so a typo can never silently
+        evaluate to false in production.
+      additionalProperties: false
+      required:
+        - field
+        - op
+      properties:
+        field:
+          type: string
+          description: >-
+            Dotted path of the context-document field to test. Must be present
+            in the context field catalogue.
+          pattern: '^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){0,4}$'
+          example: delinquency.dpd
+        op:
+          $ref: '#/components/schemas/ConditionOperator'
+        value:
+          $ref: '#/components/schemas/ConditionValue'
+      example:
+        field: delinquency.dpd
+        op: BETWEEN
+        value:
+          - 31
+          - 60
+
+    ConditionNode:
+      title: ConditionNode
+      description: >-
+        One node of a condition tree: either a nested group (`all`/`any`) or a
+        leaf comparison. Modelled as a union so the recursion terminates in the
+        generated types; nesting is capped at 5 levels by the JSON Schema and
+        by the authoring validator, because a rule nobody can read is a rule
+        nobody can approve.
+      oneOf:
+        - $ref: '#/components/schemas/ConditionGroup'
+        - $ref: '#/components/schemas/ConditionLeaf'
+
+    ConditionGroup:
+      type: object
+      title: ConditionGroup
+      description: >-
+        Boolean combination of child nodes. Exactly one of `all` (conjunction)
+        or `any` (disjunction) is present. An empty `all` is the deliberate
+        idiom for "always true" and is what the mandatory final `DEFAULT`
+        segment uses; an empty `any` is rejected, because "never true" is
+        better written by deleting the rule.
+      additionalProperties: false
+      properties:
+        all:
+          type: array
+          description: >-
+            Every child must hold. An empty array is true — the "match
+            everything" idiom.
+          items:
+            $ref: '#/components/schemas/ConditionNode'
+          maxItems: 50
+        any:
+          type: array
+          description: At least one child must hold. Must not be empty.
+          items:
+            $ref: '#/components/schemas/ConditionNode'
+          minItems: 1
+          maxItems: 50
+      example:
+        all:
+          - field: delinquency.dpd
+            op: BETWEEN
+            value:
+              - 31
+              - 60
+          - field: customer.doNotContact
+            op: EQ
+            value: false
+
+    # ------------------------------------------------------- strategy document
+    StrategyDocument:
+      type: object
+      title: StrategyDocument
+      description: >-
+        The complete declarative definition of a strategy version (A§53,
+        expanded per plan §7 DEC-1). Mirrors
+        `schemas/decisioning/strategy-document.v1.json`, which is the normative
+        artefact validated at runtime.
+
+
+        Policy sets are deliberately **absent**: they are global and are never
+        pinned per strategy, so that a policy tightening applies immediately to
+        every strategy rather than waiting for each one to be re-approved
+        (A§54, CLAUDE.md hard rule 2).
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - id
+        - name
+        - effectiveFrom
+        - priority
+        - eligibility
+        - segments
+        - ruleSetRef
+        - modelRefs
+        - treatments
+      properties:
+        schemaVersion:
+          type: integer
+          format: int32
+          description: >-
+            Major version of the strategy-document schema this instance
+            conforms to. Always 1 for this contract; a document declaring
+            anything else is rejected rather than best-effort parsed.
+          enum:
+            - 1
+          example: 1
+        id:
+          type: string
+          description: >-
+            Business identifier of the strategy, equal to the `strategyId` path
+            segment. Authored by a human and stable across versions.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        name:
+          type: string
+          description: Human-readable name shown in the workbench and in approval requests.
+          minLength: 1
+          maxLength: 200
+          example: Early collection — 1 to 60 days past due
+        effectiveFrom:
+          type: string
+          format: date
+          description: >-
+            First business date on which this version may be selected, once it
+            is ACTIVE. Checked at `RISK_APPROVED -> SCHEDULED`: a version whose
+            window has already opened cannot be scheduled.
+          example: '2026-08-01'
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: >-
+            Last business date on which this version may be selected, or `null`
+            for open-ended. Explicitly nullable rather than omitted because
+            "open-ended" is a decision an author makes, and reviewers should
+            see it stated.
+          example: null
+        priority:
+          type: integer
+          format: int32
+          description: >-
+            Strategy-selection priority. When more than one strategy's
+            `eligibility` matches a subject, the highest `priority` wins; ties
+            are broken by ascending `id` so that selection is deterministic and
+            reproducible from the audit row alone.
+          minimum: 0
+          maximum: 1000000
+          example: 100
+        eligibility:
+          $ref: '#/components/schemas/ConditionGroup'
+        segments:
+          type: array
+          description: >-
+            Ordered segments, evaluated **first match wins**. The last element
+            must be the default segment — conventionally named `DEFAULT` with
+            an empty `all` — so that every eligible subject lands in exactly
+            one segment and no subject can fall off the end of the strategy.
+          items:
+            $ref: '#/components/schemas/StrategySegment'
+          minItems: 1
+          maxItems: 100
+        ruleSetRef:
+          $ref: '#/components/schemas/RuleSetRef'
+        modelRefs:
+          type: array
+          description: >-
+            Models to score for this strategy, in declaration order. May be
+            empty: a rules-only strategy is a legitimate and often preferable
+            configuration, and the MVP ships one.
+          items:
+            $ref: '#/components/schemas/ModelRef'
+          maxItems: 20
+        treatments:
+          type: array
+          description: >-
+            Candidate treatments this strategy may select, in ranking order
+            after constraint filtering. Optimisation may only ever *narrow*
+            this list — never add to it and never re-admit something policy
+            removed (A§54, CLAUDE.md hard rule 2).
+          items:
+            $ref: '#/components/schemas/StrategyTreatment'
+          minItems: 1
+          maxItems: 50
+        experiment:
+          $ref: '#/components/schemas/StrategyExperiment'
+      example:
+        schemaVersion: 1
+        id: EARLY_COLLECTION
+        name: Early collection — 1 to 60 days past due
+        effectiveFrom: '2026-08-01'
+        effectiveTo: null
+        priority: 100
+        eligibility:
+          all:
+            - field: delinquency.dpd
+              op: BETWEEN
+              value:
+                - 1
+                - 60
+            - field: account.status
+              op: EQ
+              value: ACTIVE
+        segments:
+          - name: EARLY_LOW_BALANCE
+            when:
+              all:
+                - field: delinquency.amountOverdue
+                  op: LT
+                  value: '250.00'
+          - name: DEFAULT
+            when:
+              all: []
+        ruleSetRef:
+          ruleSetId: EARLY_COLLECTION_RULES
+          version: 42
+        modelRefs:
+          - modelId: PAYMENT_PROPENSITY
+            version: '8'
+            required: false
+            timeoutMs: 300
+            onError: DEFAULT
+            defaultScore: '0.5'
+        treatments:
+          - treatmentCode: SMS_REMINDER_D35
+            type: CONTACT
+            channel: SMS
+            priority: 10
+            params:
+              templateId: TPL_SMS_REMINDER_V3
+          - treatmentCode: EMAIL_REMINDER_D35
+            type: CONTACT
+            channel: EMAIL
+            priority: 20
+            params:
+              templateId: TPL_EMAIL_REMINDER_V2
+        experiment:
+          enabled: true
+          salt: EARLY_COLLECTION_2026H2
+          arms:
+            - name: CHAMPION
+              version: null
+              percentBps: 9000
+            - name: CHALLENGER
+              version: 18
+              percentBps: 1000
+
+    StrategySegment:
+      type: object
+      title: StrategySegment
+      description: >-
+        One segment of a strategy. Segments are evaluated in array order and
+        the first whose `when` holds is the subject's segment; the segment name
+        is recorded on the decision and drives per-segment reporting.
+      additionalProperties: false
+      required:
+        - name
+        - when
+      properties:
+        name:
+          type: string
+          description: >-
+            Segment name, recorded on every decision made in this segment and
+            used as the grouping key in simulation reports. Matches the
+            `segment` vocabulary customer-service exposes.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_LOW_BALANCE
+        when:
+          $ref: '#/components/schemas/ConditionGroup'
+      example:
+        name: EARLY_LOW_BALANCE
+        when:
+          all:
+            - field: delinquency.amountOverdue
+              op: LT
+              value: '250.00'
+
+    RuleSetRef:
+      type: object
+      title: RuleSetRef
+      description: >-
+        Pinned reference to the rule set this strategy evaluates. Both parts
+        are required: pinning the version is what makes a strategy version
+        reproducible, and it is why publishing a new rule-set version never
+        silently changes a live strategy.
+      additionalProperties: false
+      required:
+        - ruleSetId
+        - version
+      properties:
+        ruleSetId:
+          type: string
+          description: Business identifier of the referenced rule set (`kind` must be `RULES`).
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION_RULES
+        version:
+          type: integer
+          format: int32
+          description: >-
+            Version of the rule set. Must be `PUBLISHED` before the strategy
+            version may leave `DRAFT` for `TEST`.
+          minimum: 1
+          example: 42
+      example:
+        ruleSetId: EARLY_COLLECTION_RULES
+        version: 42
+
+    ModelRef:
+      type: object
+      title: ModelRef
+      description: >-
+        One model the decision pipeline scores for this strategy, with the
+        failure behaviour spelled out in the strategy rather than hidden in
+        code (A§56, D§42). The decision service calls
+        `POST /v1/models/{modelId}/versions/{version}/score` — see
+        `model.v1.yaml` — and does not know or care what the model is
+        implemented in.
+      additionalProperties: false
+      required:
+        - modelId
+        - version
+        - required
+        - timeoutMs
+        - onError
+      properties:
+        modelId:
+          type: string
+          description: >-
+            Model identifier as registered with the model server. Reference
+            data owned by the ML platform, so a pattern rather than an enum.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: PAYMENT_PROPENSITY
+        version:
+          type: string
+          description: >-
+            Model version, pinned. A string because model versions are the ML
+            platform's identifiers, not platform-minted integers — A§16 shows
+            `"8"`.
+          minLength: 1
+          maxLength: 32
+          example: '8'
+        required:
+          type: boolean
+          description: >-
+            When true, a strategy version cannot be activated unless this model
+            version is registered and reachable, and `onError` must be `FAIL`.
+            When false the model is advisory and `onError` may substitute a
+            default score.
+          example: false
+        timeoutMs:
+          type: integer
+          format: int32
+          description: >-
+            Per-call timeout in milliseconds. Exceeding it is an error and
+            takes the `onError` path; the decision service never waits longer,
+            because an online decision that arrives late is a failed decision.
+          minimum: 10
+          maximum: 5000
+          example: 300
+        onError:
+          type: string
+          description: >-
+            What to do when the model errors or times out. `DEFAULT`
+            substitutes `defaultScore` and adds a reason code recording the
+            substitution; `FAIL` aborts the decision with 503 so the caller
+            retries rather than acting on a guess.
+          enum:
+            - DEFAULT
+            - FAIL
+          example: DEFAULT
+        defaultScore:
+          $ref: '#/components/schemas/Probability'
+      example:
+        modelId: PAYMENT_PROPENSITY
+        version: '8'
+        required: false
+        timeoutMs: 300
+        onError: DEFAULT
+        defaultScore: '0.5'
+
+    StrategyTreatment:
+      type: object
+      title: StrategyTreatment
+      description: >-
+        One candidate treatment a strategy may select, with its ranking
+        priority and channel-adapter parameters.
+      additionalProperties: false
+      required:
+        - treatmentCode
+        - type
+        - priority
+      properties:
+        treatmentCode:
+          type: string
+          description: >-
+            Stable code for this treatment, carried into the decision audit,
+            the `TreatmentSelected` event and treatment-service. Reference data
+            owned by strategy authors, hence a pattern rather than an enum.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+        type:
+          $ref: '#/components/schemas/TreatmentType'
+        channel:
+          $ref: '#/components/schemas/Channel'
+        priority:
+          type: integer
+          format: int32
+          description: >-
+            Ranking priority within the strategy — **lower wins**, so 10 is
+            preferred over 20. Ties are broken by ascending `treatmentCode`,
+            which keeps selection deterministic for the parity tests.
+          minimum: 0
+          maximum: 1000000
+          example: 10
+        params:
+          type: object
+          description: >-
+            Flat string-to-string parameter map handed to the channel adapter —
+            template id, offer terms, letter stock. Values are strings so that
+            the strategy document stays schema-stable as adapters evolve, and
+            so that a monetary parameter is written the same way as everywhere
+            else in a decisioning document: a decimal string in major units.
+            This is the one place in the decisioning contracts where
+            `additionalProperties` is not `false`; it is a *typed* map, not an
+            open object, so nothing untyped reaches generated code. Keys are
+            lowerCamelCase and must not carry PII.
+          additionalProperties:
+            type: string
+            minLength: 1
+            maxLength: 512
+          example:
+            templateId: TPL_SMS_REMINDER_V3
+      example:
+        treatmentCode: SMS_REMINDER_D35
+        type: CONTACT
+        channel: SMS
+        priority: 10
+        params:
+          templateId: TPL_SMS_REMINDER_V3
+
+    StrategyExperiment:
+      type: object
+      title: StrategyExperiment
+      description: >-
+        Champion/challenger configuration (D§41, plan DEC-11). Evaluated after
+        strategy selection: the account is allocated to an arm by
+        `platform/allocation` — the first 8 bytes of
+        `SHA-256("<accountId>:<salt>")` as a big-endian uint64, modulo 10000,
+        against the cumulative basis points — so the same account always lands
+        in the same arm without any stored assignment.
+      additionalProperties: false
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+          description: >-
+            Whether arm allocation runs. When false the remaining fields are
+            ignored, which is how an experiment is switched off without
+            deleting its definition and losing the record of what ran.
+          example: true
+        salt:
+          type: string
+          description: >-
+            Allocation salt. Required when `enabled`. Changing it re-shuffles
+            every account, so it is treated as a new experiment and must never
+            be edited in place on a running one.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION_2026H2
+        arms:
+          type: array
+          description: >-
+            Experiment arms. Required when `enabled`, and
+            `sum(percentBps) == 10000` exactly — a config that does not sum is
+            rejected with 400 rather than silently leaving a slice of the
+            population undecided.
+          items:
+            $ref: '#/components/schemas/ExperimentArm'
+          minItems: 2
+          maxItems: 10
+      example:
+        enabled: true
+        salt: EARLY_COLLECTION_2026H2
+        arms:
+          - name: CHAMPION
+            version: null
+            percentBps: 9000
+          - name: CHALLENGER
+            version: 18
+            percentBps: 1000
+
+    ExperimentArm:
+      type: object
+      title: ExperimentArm
+      description: >-
+        One arm of a champion/challenger experiment. The arm name and the
+        allocation bucket are both written to the decision audit so that
+        analytics can attribute outcomes without re-running the allocation
+        (D§41).
+      additionalProperties: false
+      required:
+        - name
+        - version
+        - percentBps
+      properties:
+        name:
+          type: string
+          description: Arm name, recorded on every decision allocated to it.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: CHALLENGER
+        version:
+          type: integer
+          format: int32
+          nullable: true
+          description: >-
+            Strategy version this arm evaluates, or `null` meaning "this
+            version" — the champion. A challenger version must itself be
+            content-frozen and `RISK_APPROVED`, validated when the champion is
+            activated, so an unapproved definition can never reach live traffic
+            through an experiment.
+          minimum: 1
+          example: 18
+        percentBps:
+          type: integer
+          format: int32
+          description: >-
+            Share of the population in basis points (10000 = 100%). Integer
+            basis points rather than a percentage float so the arms sum exactly.
+          minimum: 0
+          maximum: 10000
+          example: 1000
+      example:
+        name: CHALLENGER
+        version: 18
+        percentBps: 1000
+
+    # ------------------------------------------------------- strategy resources
+    StrategyState:
+      type: string
+      title: StrategyState
+      description: >-
+        Lifecycle state of a strategy version — exactly the A§60 state set plus
+        `REJECTED`. `DRAFT` and `TEST` are the only editable states; the
+        content hash is frozen at `TEST -> SIMULATED`; only `ACTIVE` versions
+        are ever selected by the decision pipeline, and at most one version of
+        a strategy is ACTIVE at a time.
+      enum:
+        - DRAFT
+        - TEST
+        - SIMULATED
+        - BUSINESS_APPROVED
+        - RISK_APPROVED
+        - REJECTED
+        - SCHEDULED
+        - ACTIVE
+        - RETIRED
+      example: ACTIVE
+
+    Strategy:
+      type: object
+      title: Strategy
+      description: >-
+        A strategy aggregate: stable identity plus pointers into its version
+        history. The definitions live on the version resources, so this stays
+        cheap to list.
+      additionalProperties: false
+      required:
+        - strategyId
+        - name
+        - latestVersion
+        - activeVersion
+        - createdAt
+        - updatedAt
+      properties:
+        strategyId:
+          type: string
+          description: Business identifier of the strategy.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        name:
+          type: string
+          description: >-
+            Human-readable name, taken from the latest version's definition.
+          minLength: 1
+          maxLength: 200
+          example: Early collection — 1 to 60 days past due
+        latestVersion:
+          type: integer
+          format: int32
+          description: Highest version number that exists for this strategy.
+          minimum: 1
+          example: 18
+        activeVersion:
+          type: integer
+          format: int32
+          nullable: true
+          description: >-
+            Version currently in state `ACTIVE`, or `null` when the strategy
+            has never been activated or its last active version was retired.
+            Nullable rather than omitted: "no active version" is a state an
+            operator needs to see, not an absence to interpret.
+          minimum: 1
+          example: 17
+        createdAt:
+          type: string
+          format: date-time
+          description: When the strategy aggregate was created, RFC3339 UTC.
+          example: '2026-06-02T08:41:12Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the aggregate last changed — a new version, a state
+            transition — RFC3339 UTC.
+          example: '2026-08-22T10:00:00Z'
+      example:
+        strategyId: EARLY_COLLECTION
+        name: Early collection — 1 to 60 days past due
+        latestVersion: 18
+        activeVersion: 17
+        createdAt: '2026-06-02T08:41:12Z'
+        updatedAt: '2026-08-22T10:00:00Z'
+
+    StrategyVersion:
+      type: object
+      title: StrategyVersion
+      description: >-
+        One immutable-once-released version of a strategy: its lifecycle state,
+        its content hash, its full definition and who created it. Everything an
+        auditor needs to answer "what exactly would this have decided, and who
+        signed it off".
+      additionalProperties: false
+      required:
+        - strategyId
+        - version
+        - state
+        - contentHash
+        - hashFrozen
+        - definition
+        - createdBy
+        - createdAt
+        - updatedAt
+      properties:
+        strategyId:
+          type: string
+          description: Business identifier of the owning strategy.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        version:
+          type: integer
+          format: int32
+          description: Version number, unique within the strategy and never reused.
+          minimum: 1
+          example: 17
+        state:
+          $ref: '#/components/schemas/StrategyState'
+        contentHash:
+          $ref: '#/components/schemas/ContentHash'
+        hashFrozen:
+          type: boolean
+          description: >-
+            True once the version has passed `TEST -> SIMULATED`, after which
+            the definition can no longer change and `contentHash` is fixed for
+            the life of the version. A simulation record is only accepted as
+            evidence for a frozen hash.
+          example: true
+        effectiveFrom:
+          type: string
+          format: date
+          description: >-
+            Copy of `definition.effectiveFrom`, denormalised so that
+            `GET /v1/strategies/active?onDate=` can be answered without parsing
+            every definition.
+          example: '2026-08-01'
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: Copy of `definition.effectiveTo`; `null` for open-ended.
+          example: null
+        definition:
+          $ref: '#/components/schemas/StrategyDocument'
+        createdBy:
+          type: string
+          description: >-
+            Subject claim (`sub`) of the identity that created this version.
+            This is the "author" the approver-is-not-author rule compares
+            against, so it is recorded once at creation and never updated.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        createdAt:
+          type: string
+          format: date-time
+          description: When the version was created, RFC3339 UTC.
+          example: '2026-07-30T11:02:44Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the version last changed — a definition edit or a state
+            transition — RFC3339 UTC.
+          example: '2026-08-01T09:15:00Z'
+      example:
+        strategyId: EARLY_COLLECTION
+        version: 17
+        state: ACTIVE
+        contentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+        hashFrozen: true
+        effectiveFrom: '2026-08-01'
+        effectiveTo: null
+        definition:
+          schemaVersion: 1
+          id: EARLY_COLLECTION
+          name: Early collection — 1 to 60 days past due
+          effectiveFrom: '2026-08-01'
+          effectiveTo: null
+          priority: 100
+          eligibility:
+            all:
+              - field: delinquency.dpd
+                op: BETWEEN
+                value:
+                  - 1
+                  - 60
+          segments:
+            - name: DEFAULT
+              when:
+                all: []
+          ruleSetRef:
+            ruleSetId: EARLY_COLLECTION_RULES
+            version: 42
+          modelRefs:
+            - modelId: PAYMENT_PROPENSITY
+              version: '8'
+              required: false
+              timeoutMs: 300
+              onError: DEFAULT
+              defaultScore: '0.5'
+          treatments:
+            - treatmentCode: SMS_REMINDER_D35
+              type: CONTACT
+              channel: SMS
+              priority: 10
+        createdBy: 01M0MEKBHXV37E3S3E28JT97KB
+        createdAt: '2026-07-30T11:02:44Z'
+        updatedAt: '2026-08-01T09:15:00Z'
+
+    CreateStrategyVersionRequest:
+      type: object
+      title: CreateStrategyVersionRequest
+      description: >-
+        Optional body for a version clone. Both fields may be omitted, in which
+        case the latest version is cloned with no comment.
+      additionalProperties: false
+      properties:
+        sourceVersion:
+          type: integer
+          format: int32
+          description: >-
+            Version to clone from. Defaults to the highest existing version.
+            Cloning an old version is how a reverted strategy is re-proposed
+            without hand-retyping it.
+          minimum: 1
+          example: 17
+        comment:
+          type: string
+          description: >-
+            Free-text note recorded in the audit trail — why a new version is
+            being started. Must not contain PII.
+          minLength: 1
+          maxLength: 1024
+          example: Raise the low-balance segment threshold to 250.
+      example:
+        sourceVersion: 17
+        comment: Raise the low-balance segment threshold to 250.
+
+    StrategyTransitionRequest:
+      type: object
+      title: StrategyTransitionRequest
+      description: >-
+        Request to move a strategy version to `toState`. The current state is
+        not supplied by the caller: the server reads it, so two concurrent
+        approvals cannot both believe they moved the same edge.
+      additionalProperties: false
+      required:
+        - toState
+      properties:
+        toState:
+          $ref: '#/components/schemas/StrategyState'
+        comment:
+          type: string
+          description: >-
+            Reviewer's comment, recorded verbatim in the append-only transition
+            log. Strongly recommended on approvals and required by review
+            policy on `REJECTED` — a rejection without a stated reason is not
+            actionable. Must not contain PII.
+          minLength: 1
+          maxLength: 1024
+          example: Simulation shows a 4% contact-volume increase, within agreed capacity.
+      example:
+        toState: BUSINESS_APPROVED
+        comment: Simulation shows a 4% contact-volume increase, within agreed capacity.
+
+    StrategyTransition:
+      type: object
+      title: StrategyTransition
+      description: >-
+        One row of the append-only strategy transition log (D§39, CLAUDE.md
+        hard rule 4). Records the edge, the actor, the roles the actor held at
+        the time, and the content hash in force — so a later role change or
+        definition clone cannot rewrite the history of what was approved.
+      additionalProperties: false
+      required:
+        - transitionId
+        - strategyId
+        - version
+        - fromState
+        - toState
+        - actorSub
+        - actorRoles
+        - contentHash
+        - occurredAt
+      properties:
+        transitionId:
+          type: string
+          description: Platform-generated ULID of this transition row.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKD80M9S346Q3D25VT4F5
+        strategyId:
+          type: string
+          description: Strategy the transition applies to.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        version:
+          type: integer
+          format: int32
+          description: Strategy version the transition applies to.
+          minimum: 1
+          example: 17
+        fromState:
+          $ref: '#/components/schemas/StrategyState'
+        toState:
+          $ref: '#/components/schemas/StrategyState'
+        actorSub:
+          type: string
+          description: >-
+            Subject claim of the identity that drove the transition. For
+            system-driven edges — the activation scheduler, the
+            simulation-completion hook — this is the service identity, which is
+            why the log distinguishes it rather than recording "system".
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        actorRoles:
+          type: array
+          description: >-
+            Roles the actor held when the transition was applied, snapshotted.
+            Order is not significant.
+          items:
+            type: string
+            description: One role held by the actor, e.g. `business-approver`.
+            minLength: 1
+            maxLength: 64
+          minItems: 1
+          maxItems: 20
+          example:
+            - business-approver
+        comment:
+          type: string
+          description: The comment supplied on the request, verbatim. Omitted when none was given.
+          minLength: 1
+          maxLength: 1024
+          example: Simulation shows a 4% contact-volume increase, within agreed capacity.
+        contentHash:
+          $ref: '#/components/schemas/ContentHash'
+        occurredAt:
+          type: string
+          format: date-time
+          description: When the transition was applied, RFC3339 UTC.
+          example: '2026-07-31T14:22:07Z'
+      example:
+        transitionId: 01M0MEKD80M9S346Q3D25VT4F5
+        strategyId: EARLY_COLLECTION
+        version: 17
+        fromState: SIMULATED
+        toState: BUSINESS_APPROVED
+        actorSub: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        actorRoles:
+          - business-approver
+        comment: Simulation shows a 4% contact-volume increase, within agreed capacity.
+        contentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+        occurredAt: '2026-07-31T14:22:07Z'
+
+    StrategyApproval:
+      type: object
+      title: StrategyApproval
+      description: >-
+        One recorded approval. Separate from the transition log because
+        approvals are what a regulator asks for by name, and because the
+        approver-is-not-author and business-before-risk rules are enforced
+        against these rows.
+      additionalProperties: false
+      required:
+        - approvalId
+        - strategyId
+        - version
+        - approvalType
+        - actorSub
+        - actorRoles
+        - contentHash
+        - approvedAt
+      properties:
+        approvalId:
+          type: string
+          description: Platform-generated ULID of this approval row.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKGV5R8T2Y6C1H3K9J0QD
+        strategyId:
+          type: string
+          description: Strategy the approval applies to.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION
+        version:
+          type: integer
+          format: int32
+          description: Strategy version the approval applies to.
+          minimum: 1
+          example: 17
+        approvalType:
+          type: string
+          description: >-
+            Which gate was cleared. `BUSINESS` must precede `RISK`, and the two
+            must be granted by different subjects, neither of whom authored the
+            version.
+          enum:
+            - BUSINESS
+            - RISK
+          example: BUSINESS
+        actorSub:
+          type: string
+          description: Subject claim of the approver.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        actorRoles:
+          type: array
+          description: Roles the approver held at the time, snapshotted.
+          items:
+            type: string
+            description: One role held by the approver.
+            minLength: 1
+            maxLength: 64
+          minItems: 1
+          maxItems: 20
+          example:
+            - business-approver
+        comment:
+          type: string
+          description: The approver's comment, verbatim. Omitted when none was given.
+          minLength: 1
+          maxLength: 1024
+          example: Simulation shows a 4% contact-volume increase, within agreed capacity.
+        contentHash:
+          $ref: '#/components/schemas/ContentHash'
+        approvedAt:
+          type: string
+          format: date-time
+          description: When the approval was granted, RFC3339 UTC.
+          example: '2026-07-31T14:22:07Z'
+      example:
+        approvalId: 01M0MEKGV5R8T2Y6C1H3K9J0QD
+        strategyId: EARLY_COLLECTION
+        version: 17
+        approvalType: BUSINESS
+        actorSub: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+        actorRoles:
+          - business-approver
+        comment: Simulation shows a 4% contact-volume increase, within agreed capacity.
+        contentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+        approvedAt: '2026-07-31T14:22:07Z'
+
+    # ------------------------------------------------------- rule-set resources
+    RuleSetKind:
+      type: string
+      title: RuleSetKind
+      description: >-
+        Whether a document selects treatments or constrains them. `RULES`
+        documents may only `SELECT_TREATMENT` or `SUPPRESS`; `POLICY` documents
+        may additionally `FORBID_CHANNEL`, and policy is evaluated first and
+        cannot be overridden downstream (A§54, CLAUDE.md hard rule 2). Keeping
+        them one resource with two kinds — rather than two resources — is what
+        lets the same publish/immutability machinery cover both.
+      enum:
+        - RULES
+        - POLICY
+      example: RULES
+
+    PublishableState:
+      type: string
+      title: PublishableState
+      description: >-
+        Status of a rule-set or guardrail-config version. `DRAFT` is the only
+        editable status; `PUBLISHED` is immutable and referenceable; `RETIRED`
+        is immutable and no longer referenceable by a new strategy version,
+        though existing decision audit rows keep pointing at it.
+      enum:
+        - DRAFT
+        - PUBLISHED
+        - RETIRED
+      example: PUBLISHED
+
+    RuleOutcomeType:
+      type: string
+      title: RuleOutcomeType
+      description: >-
+        What a matched rule does. `SELECT_TREATMENT` nominates a treatment
+        code; `SUPPRESS` removes every treatment for this subject;
+        `FORBID_CHANNEL` removes one channel. The latter two are *narrowing*
+        only, and `FORBID_CHANNEL` is accepted exclusively in a `POLICY`
+        document — the type system of the rule language is how the
+        policy-beats-optimisation precedence is made unbreakable rather than
+        merely documented (A§54).
+      enum:
+        - SELECT_TREATMENT
+        - SUPPRESS
+        - FORBID_CHANNEL
+      example: SELECT_TREATMENT
+
+    RuleOutcome:
+      type: object
+      title: RuleOutcome
+      description: >-
+        The `then` clause of a rule. `reasonCode` is mandatory on every
+        outcome: a decision the platform cannot explain is a decision it must
+        not make (A§58).
+      additionalProperties: false
+      required:
+        - outcome
+        - reasonCode
+      properties:
+        outcome:
+          $ref: '#/components/schemas/RuleOutcomeType'
+        treatmentCode:
+          type: string
+          description: >-
+            Treatment to select. Required when `outcome` is
+            `SELECT_TREATMENT`, and must name one of the owning strategy's
+            `treatments[].treatmentCode`; forbidden otherwise.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_REMINDER_D35
+        channel:
+          $ref: '#/components/schemas/Channel'
+        reasonCode:
+          $ref: '#/components/schemas/ReasonCode'
+      example:
+        outcome: SELECT_TREATMENT
+        treatmentCode: SMS_REMINDER_D35
+        reasonCode: DPD_31_60
+
+    Rule:
+      type: object
+      title: Rule
+      description: >-
+        One rule: a condition tree and the outcome it produces (A§55).
+        Evaluation is by ascending `priority`, ties broken by ascending
+        `ruleId`, so the order is a property of the document rather than of the
+        engine's iteration order.
+      additionalProperties: false
+      required:
+        - ruleId
+        - priority
+        - when
+        - then
+      properties:
+        ruleId:
+          type: string
+          description: >-
+            Identifier of the rule within its rule set, stable across versions
+            where the rule is conceptually the same. Recorded in the decision
+            trace so an explanation can name the rule that fired.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: SMS_FOR_MID_DPD
+        priority:
+          type: integer
+          format: int32
+          description: Evaluation order — lower first. Ties broken by ascending `ruleId`.
+          minimum: 0
+          maximum: 1000000
+          example: 100
+        when:
+          $ref: '#/components/schemas/ConditionGroup'
+        then:
+          $ref: '#/components/schemas/RuleOutcome'
+      example:
+        ruleId: SMS_FOR_MID_DPD
+        priority: 100
+        when:
+          all:
+            - field: delinquency.dpd
+              op: BETWEEN
+              value:
+                - 31
+                - 60
+            - field: customer.doNotContact
+              op: EQ
+              value: false
+        then:
+          outcome: SELECT_TREATMENT
+          treatmentCode: SMS_REMINDER_D35
+          reasonCode: DPD_31_60
+
+    RuleSetDocument:
+      type: object
+      title: RuleSetDocument
+      description: >-
+        The complete declarative definition of a rule-set version (A§55).
+        Mirrors `schemas/decisioning/rule-set.v1.json`, which is the normative
+        artefact validated at runtime.
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - ruleSetId
+        - kind
+        - effectiveFrom
+        - rules
+      properties:
+        schemaVersion:
+          type: integer
+          format: int32
+          description: >-
+            Major version of the rule-set schema this instance conforms to.
+            Always 1 for this contract.
+          enum:
+            - 1
+          example: 1
+        ruleSetId:
+          type: string
+          description: Business identifier of the rule set.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION_RULES
+        kind:
+          $ref: '#/components/schemas/RuleSetKind'
+        version:
+          type: integer
+          format: int32
+          description: >-
+            Version number. Assigned by the server on create; when present in
+            a PUT body it must equal the version being replaced. Echoed back on
+            read so that a document copied out of the API can be diffed against
+            one copied out of git.
+          minimum: 1
+          example: 42
+        effectiveFrom:
+          type: string
+          format: date
+          description: First business date on which this version may be evaluated.
+          example: '2026-08-01'
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: Last business date on which it may be evaluated, or `null` for open-ended.
+          example: null
+        rules:
+          type: array
+          description: >-
+            The rules, in any order — evaluation order comes from `priority`,
+            not from the array. Must not be empty: an empty rule set decides
+            nothing and would be silently useless in production.
+          items:
+            $ref: '#/components/schemas/Rule'
+          minItems: 1
+          maxItems: 500
+      example:
+        schemaVersion: 1
+        ruleSetId: EARLY_COLLECTION_RULES
+        kind: RULES
+        version: 42
+        effectiveFrom: '2026-08-01'
+        effectiveTo: null
+        rules:
+          - ruleId: SMS_FOR_MID_DPD
+            priority: 100
+            when:
+              all:
+                - field: delinquency.dpd
+                  op: BETWEEN
+                  value:
+                    - 31
+                    - 60
+                - field: customer.doNotContact
+                  op: EQ
+                  value: false
+            then:
+              outcome: SELECT_TREATMENT
+              treatmentCode: SMS_REMINDER_D35
+              reasonCode: DPD_31_60
+
+    RuleSet:
+      type: object
+      title: RuleSet
+      description: >-
+        A rule-set aggregate: identity, kind, and pointers into its version
+        history.
+      additionalProperties: false
+      required:
+        - ruleSetId
+        - kind
+        - latestVersion
+        - publishedVersion
+        - createdAt
+        - updatedAt
+      properties:
+        ruleSetId:
+          type: string
+          description: Business identifier of the rule set.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION_RULES
+        kind:
+          $ref: '#/components/schemas/RuleSetKind'
+        latestVersion:
+          type: integer
+          format: int32
+          description: Highest version number that exists for this rule set.
+          minimum: 1
+          example: 43
+        publishedVersion:
+          type: integer
+          format: int32
+          nullable: true
+          description: >-
+            Highest `PUBLISHED` version, or `null` when none has been published
+            yet. This is the version a new strategy's `ruleSetRef` should
+            normally point at.
+          minimum: 1
+          example: 42
+        createdAt:
+          type: string
+          format: date-time
+          description: When the rule-set aggregate was created, RFC3339 UTC.
+          example: '2026-05-11T07:30:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the aggregate last changed, RFC3339 UTC.
+          example: '2026-08-01T09:00:00Z'
+      example:
+        ruleSetId: EARLY_COLLECTION_RULES
+        kind: RULES
+        latestVersion: 43
+        publishedVersion: 42
+        createdAt: '2026-05-11T07:30:00Z'
+        updatedAt: '2026-08-01T09:00:00Z'
+
+    RuleSetVersion:
+      type: object
+      title: RuleSetVersion
+      description: >-
+        One version of a rule set, with its status, content hash and full
+        definition.
+      additionalProperties: false
+      required:
+        - ruleSetId
+        - version
+        - kind
+        - status
+        - contentHash
+        - definition
+        - createdBy
+        - createdAt
+        - updatedAt
+      properties:
+        ruleSetId:
+          type: string
+          description: Business identifier of the owning rule set.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: EARLY_COLLECTION_RULES
+        version:
+          type: integer
+          format: int32
+          description: Version number, unique within the rule set and never reused.
+          minimum: 1
+          example: 42
+        kind:
+          $ref: '#/components/schemas/RuleSetKind'
+        status:
+          $ref: '#/components/schemas/PublishableState'
+        contentHash:
+          $ref: '#/components/schemas/ContentHash'
+        definition:
+          $ref: '#/components/schemas/RuleSetDocument'
+        publishedBy:
+          type: string
+          description: >-
+            Subject claim of the identity that published this version. Omitted
+            while the version is `DRAFT`.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        publishedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the version was published, RFC3339 UTC. Omitted while the
+            version is `DRAFT`.
+          example: '2026-08-01T09:00:00Z'
+        createdBy:
+          type: string
+          description: Subject claim of the identity that created this version.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        createdAt:
+          type: string
+          format: date-time
+          description: When the version was created, RFC3339 UTC.
+          example: '2026-07-28T13:45:10Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the version last changed, RFC3339 UTC.
+          example: '2026-08-01T09:00:00Z'
+      example:
+        ruleSetId: EARLY_COLLECTION_RULES
+        version: 42
+        kind: RULES
+        status: PUBLISHED
+        contentHash: 3a5b7c9d1e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b
+        definition:
+          schemaVersion: 1
+          ruleSetId: EARLY_COLLECTION_RULES
+          kind: RULES
+          version: 42
+          effectiveFrom: '2026-08-01'
+          effectiveTo: null
+          rules:
+            - ruleId: SMS_FOR_MID_DPD
+              priority: 100
+              when:
+                all:
+                  - field: delinquency.dpd
+                    op: BETWEEN
+                    value:
+                      - 31
+                      - 60
+              then:
+                outcome: SELECT_TREATMENT
+                treatmentCode: SMS_REMINDER_D35
+                reasonCode: DPD_31_60
+        publishedBy: 01M0MEKBHXV37E3S3E28JT97KB
+        publishedAt: '2026-08-01T09:00:00Z'
+        createdBy: 01M0MEKBHXV37E3S3E28JT97KB
+        createdAt: '2026-07-28T13:45:10Z'
+        updatedAt: '2026-08-01T09:00:00Z'
+
+    PublishRequest:
+      type: object
+      title: PublishRequest
+      description: >-
+        Optional body for a publish command. Present so that a publication can
+        carry the reason it happened into the audit trail without inventing a
+        second endpoint.
+      additionalProperties: false
+      properties:
+        comment:
+          type: string
+          description: >-
+            Free-text note recorded in the audit trail. Must not contain PII.
+          minLength: 1
+          maxLength: 1024
+          example: Approved at the 2026-07-31 collections governance forum.
+      example:
+        comment: Approved at the 2026-07-31 collections governance forum.
+
+    # ----------------------------------------------- guardrail-config resources
+    DayOfWeek:
+      type: string
+      title: DayOfWeek
+      description: >-
+        Day of the week a contact window applies to. Spelled out rather than
+        numbered because an off-by-one in a contact-window config means
+        contacting customers on a Sunday.
+      enum:
+        - MONDAY
+        - TUESDAY
+        - WEDNESDAY
+        - THURSDAY
+        - FRIDAY
+        - SATURDAY
+        - SUNDAY
+      example: MONDAY
+
+    ContactWindow:
+      type: object
+      title: ContactWindow
+      description: >-
+        Permitted contact hours for one channel on a set of days. A treatment
+        whose dispatch time falls outside every window for its channel is not
+        dropped: treatment-service sets `scheduledFor` to the next window
+        opening and a poller dispatches it then (plan DEC-16).
+      additionalProperties: false
+      required:
+        - channel
+        - daysOfWeek
+        - from
+        - to
+        - timezone
+      properties:
+        channel:
+          $ref: '#/components/schemas/Channel'
+        daysOfWeek:
+          type: array
+          description: >-
+            Days this window applies to. At most one window may exist per
+            (channel, day) pair, so windows never overlap and the "next
+            opening" calculation is unambiguous.
+          items:
+            $ref: '#/components/schemas/DayOfWeek'
+          minItems: 1
+          maxItems: 7
+        from:
+          type: string
+          description: >-
+            Window opening time, `HH:MM` in `timezone`, inclusive. A local wall
+            clock rather than UTC because contact-time regulation is written in
+            local time and moves with daylight saving.
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          example: '08:00'
+        to:
+          type: string
+          description: >-
+            Window closing time, `HH:MM` in `timezone`, exclusive. Must be
+            strictly after `from`; a window that crosses midnight is expressed
+            as two windows.
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          example: '20:00'
+        timezone:
+          type: string
+          description: >-
+            IANA timezone the window's wall-clock times are interpreted in,
+            e.g. `Europe/Dublin`. The only place in the platform's contracts
+            where a non-UTC time appears, and only because the rule it encodes
+            is itself expressed in local time.
+          minLength: 3
+          maxLength: 64
+          example: Europe/Dublin
+      example:
+        channel: SMS
+        daysOfWeek:
+          - MONDAY
+          - TUESDAY
+          - WEDNESDAY
+          - THURSDAY
+          - FRIDAY
+        from: '08:00'
+        to: '20:00'
+        timezone: Europe/Dublin
+
+    FrequencyCap:
+      type: object
+      title: FrequencyCap
+      description: >-
+        Maximum number of contact attempts allowed in a rolling window.
+        Evaluated against recorded contact attempts immediately before
+        dispatch, not at decision time, so a cap reached between decision and
+        execution still suppresses the treatment (plan DEC-16).
+      additionalProperties: false
+      required:
+        - windowDays
+        - maxContacts
+      properties:
+        channel:
+          $ref: '#/components/schemas/Channel'
+        windowDays:
+          type: integer
+          format: int32
+          description: >-
+            Length of the rolling window in days, counted back from the
+            dispatch instant.
+          minimum: 1
+          maximum: 365
+          example: 7
+        maxContacts:
+          type: integer
+          format: int32
+          description: >-
+            Maximum attempts permitted in the window. `0` forbids the channel
+            outright, which is a legitimate way to switch a channel off without
+            editing every strategy.
+          minimum: 0
+          maximum: 1000
+          example: 2
+      example:
+        channel: SMS
+        windowDays: 7
+        maxContacts: 2
+
+    GuardrailConfigDocument:
+      type: object
+      title: GuardrailConfigDocument
+      description: >-
+        The complete declarative definition of an execution guardrail config.
+        Mirrors `schemas/decisioning/guardrail-config.v1.json`, which is the
+        normative artefact validated at runtime.
+
+
+        A cap with no `channel` applies across all channels; a cap with a
+        `channel` applies to that channel only, and both are evaluated — the
+        stricter one wins. Guardrails can only ever *reduce* what a decision
+        selected.
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - guardrailConfigId
+        - effectiveFrom
+        - contactWindows
+        - frequencyCaps
+      properties:
+        schemaVersion:
+          type: integer
+          format: int32
+          description: >-
+            Major version of the guardrail-config schema this instance conforms
+            to. Always 1 for this contract.
+          enum:
+            - 1
+          example: 1
+        guardrailConfigId:
+          type: string
+          description: Business identifier of the guardrail config.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DEFAULT_GUARDRAILS
+        version:
+          type: integer
+          format: int32
+          description: >-
+            Version number. Assigned by the server on create; when present in
+            a PUT body it must equal the version being replaced.
+          minimum: 1
+          example: 3
+        effectiveFrom:
+          type: string
+          format: date
+          description: First business date on which this version may be enforced.
+          example: '2026-08-01'
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: Last business date on which it may be enforced, or `null` for open-ended.
+          example: null
+        contactWindows:
+          type: array
+          description: >-
+            Per-channel permitted contact hours. Must not be empty: a config
+            with no windows would permit contact at any hour, and a guardrail
+            config that guards nothing is worse than none at all because it
+            looks like protection.
+          items:
+            $ref: '#/components/schemas/ContactWindow'
+          minItems: 1
+          maxItems: 100
+        frequencyCaps:
+          type: array
+          description: >-
+            Rolling-window contact caps. May be empty when only contact hours
+            are being guarded.
+          items:
+            $ref: '#/components/schemas/FrequencyCap'
+          maxItems: 100
+      example:
+        schemaVersion: 1
+        guardrailConfigId: DEFAULT_GUARDRAILS
+        version: 3
+        effectiveFrom: '2026-08-01'
+        effectiveTo: null
+        contactWindows:
+          - channel: SMS
+            daysOfWeek:
+              - MONDAY
+              - TUESDAY
+              - WEDNESDAY
+              - THURSDAY
+              - FRIDAY
+            from: '08:00'
+            to: '20:00'
+            timezone: Europe/Dublin
+        frequencyCaps:
+          - channel: SMS
+            windowDays: 7
+            maxContacts: 2
+
+    GuardrailConfig:
+      type: object
+      title: GuardrailConfig
+      description: >-
+        A guardrail-config aggregate: identity and pointers into its version
+        history.
+      additionalProperties: false
+      required:
+        - guardrailConfigId
+        - latestVersion
+        - publishedVersion
+        - createdAt
+        - updatedAt
+      properties:
+        guardrailConfigId:
+          type: string
+          description: Business identifier of the guardrail config.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DEFAULT_GUARDRAILS
+        latestVersion:
+          type: integer
+          format: int32
+          description: Highest version number that exists for this config.
+          minimum: 1
+          example: 4
+        publishedVersion:
+          type: integer
+          format: int32
+          nullable: true
+          description: >-
+            Highest `PUBLISHED` version, or `null` when none has been published
+            yet. This is the version treatment-service enforces.
+          minimum: 1
+          example: 3
+        createdAt:
+          type: string
+          format: date-time
+          description: When the guardrail-config aggregate was created, RFC3339 UTC.
+          example: '2026-04-02T10:00:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the aggregate last changed, RFC3339 UTC.
+          example: '2026-08-01T09:00:00Z'
+      example:
+        guardrailConfigId: DEFAULT_GUARDRAILS
+        latestVersion: 4
+        publishedVersion: 3
+        createdAt: '2026-04-02T10:00:00Z'
+        updatedAt: '2026-08-01T09:00:00Z'
+
+    GuardrailConfigVersion:
+      type: object
+      title: GuardrailConfigVersion
+      description: >-
+        One version of a guardrail config, with its status, content hash and
+        full definition.
+      additionalProperties: false
+      required:
+        - guardrailConfigId
+        - version
+        - status
+        - contentHash
+        - definition
+        - createdBy
+        - createdAt
+        - updatedAt
+      properties:
+        guardrailConfigId:
+          type: string
+          description: Business identifier of the owning guardrail config.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DEFAULT_GUARDRAILS
+        version:
+          type: integer
+          format: int32
+          description: Version number, unique within the config and never reused.
+          minimum: 1
+          example: 3
+        status:
+          $ref: '#/components/schemas/PublishableState'
+        contentHash:
+          $ref: '#/components/schemas/ContentHash'
+        definition:
+          $ref: '#/components/schemas/GuardrailConfigDocument'
+        publishedBy:
+          type: string
+          description: >-
+            Subject claim of the identity that published this version. Omitted
+            while the version is `DRAFT`.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        publishedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the version was published, RFC3339 UTC. Omitted while the
+            version is `DRAFT`.
+          example: '2026-08-01T09:00:00Z'
+        createdBy:
+          type: string
+          description: Subject claim of the identity that created this version.
+          minLength: 1
+          maxLength: 128
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        createdAt:
+          type: string
+          format: date-time
+          description: When the version was created, RFC3339 UTC.
+          example: '2026-07-25T16:20:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the version last changed, RFC3339 UTC.
+          example: '2026-08-01T09:00:00Z'
+      example:
+        guardrailConfigId: DEFAULT_GUARDRAILS
+        version: 3
+        status: PUBLISHED
+        contentHash: c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2
+        definition:
+          schemaVersion: 1
+          guardrailConfigId: DEFAULT_GUARDRAILS
+          version: 3
+          effectiveFrom: '2026-08-01'
+          effectiveTo: null
+          contactWindows:
+            - channel: SMS
+              daysOfWeek:
+                - MONDAY
+                - TUESDAY
+                - WEDNESDAY
+                - THURSDAY
+                - FRIDAY
+              from: '08:00'
+              to: '20:00'
+              timezone: Europe/Dublin
+          frequencyCaps:
+            - channel: SMS
+              windowDays: 7
+              maxContacts: 2
+        publishedBy: 01M0MEKBHXV37E3S3E28JT97KB
+        publishedAt: '2026-08-01T09:00:00Z'
+        createdBy: 01M0MEKBHXV37E3S3E28JT97KB
+        createdAt: '2026-07-25T16:20:00Z'
+        updatedAt: '2026-08-01T09:00:00Z'
+
+    # ------------------------------------------------------------------- pages
+    NextCursor:
+      type: string
+      title: NextCursor
+      description: >-
+        Opaque continuation token for the next page, or `null` on the last
+        page. Pass it back verbatim as `cursor`; never parse or construct one.
+        Nullable rather than omitted so that "last page" is an explicit answer
+        (contracts/README.md §10).
+      nullable: true
+      minLength: 1
+      maxLength: 512
+      example: eyJhZnRlciI6IkVBUkxZX0NPTExFQ1RJT04ifQ
+
+    StrategyPage:
+      type: object
+      title: StrategyPage
+      description: One page of strategy aggregates.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The strategies in this page. Empty on an empty result set.
+          items:
+            $ref: '#/components/schemas/Strategy'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - strategyId: EARLY_COLLECTION
+            name: Early collection — 1 to 60 days past due
+            latestVersion: 18
+            activeVersion: 17
+            createdAt: '2026-06-02T08:41:12Z'
+            updatedAt: '2026-08-22T10:00:00Z'
+        nextCursor: null
+
+    StrategyVersionPage:
+      type: object
+      title: StrategyVersionPage
+      description: One page of strategy versions, each with its full definition.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The strategy versions in this page.
+          items:
+            $ref: '#/components/schemas/StrategyVersion'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - strategyId: EARLY_COLLECTION
+            version: 17
+            state: ACTIVE
+            contentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+            hashFrozen: true
+            effectiveFrom: '2026-08-01'
+            effectiveTo: null
+            definition:
+              schemaVersion: 1
+              id: EARLY_COLLECTION
+              name: Early collection — 1 to 60 days past due
+              effectiveFrom: '2026-08-01'
+              effectiveTo: null
+              priority: 100
+              eligibility:
+                all:
+                  - field: delinquency.dpd
+                    op: BETWEEN
+                    value:
+                      - 1
+                      - 60
+              segments:
+                - name: DEFAULT
+                  when:
+                    all: []
+              ruleSetRef:
+                ruleSetId: EARLY_COLLECTION_RULES
+                version: 42
+              modelRefs: []
+              treatments:
+                - treatmentCode: SMS_REMINDER_D35
+                  type: CONTACT
+                  channel: SMS
+                  priority: 10
+            createdBy: 01M0MEKBHXV37E3S3E28JT97KB
+            createdAt: '2026-07-30T11:02:44Z'
+            updatedAt: '2026-08-01T09:15:00Z'
+        nextCursor: null
+
+    StrategyTransitionPage:
+      type: object
+      title: StrategyTransitionPage
+      description: One page of the append-only transition log.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The transitions in this page, oldest first.
+          items:
+            $ref: '#/components/schemas/StrategyTransition'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - transitionId: 01M0MEKD80M9S346Q3D25VT4F5
+            strategyId: EARLY_COLLECTION
+            version: 17
+            fromState: SIMULATED
+            toState: BUSINESS_APPROVED
+            actorSub: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+            actorRoles:
+              - business-approver
+            comment: Simulation shows a 4% contact-volume increase, within agreed capacity.
+            contentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+            occurredAt: '2026-07-31T14:22:07Z'
+        nextCursor: null
+
+    StrategyApprovalPage:
+      type: object
+      title: StrategyApprovalPage
+      description: One page of recorded approvals.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The approvals in this page, oldest first.
+          items:
+            $ref: '#/components/schemas/StrategyApproval'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - approvalId: 01M0MEKGV5R8T2Y6C1H3K9J0QD
+            strategyId: EARLY_COLLECTION
+            version: 17
+            approvalType: BUSINESS
+            actorSub: 01M0MEKF2Q7XG7VJ2N4RB5W1PZ
+            actorRoles:
+              - business-approver
+            contentHash: 9f2c1d4bd0a8f7126b3f4e5c6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7
+            approvedAt: '2026-07-31T14:22:07Z'
+        nextCursor: null
+
+    RuleSetPage:
+      type: object
+      title: RuleSetPage
+      description: One page of rule-set aggregates.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The rule sets in this page.
+          items:
+            $ref: '#/components/schemas/RuleSet'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - ruleSetId: EARLY_COLLECTION_RULES
+            kind: RULES
+            latestVersion: 43
+            publishedVersion: 42
+            createdAt: '2026-05-11T07:30:00Z'
+            updatedAt: '2026-08-01T09:00:00Z'
+        nextCursor: null
+
+    GuardrailConfigPage:
+      type: object
+      title: GuardrailConfigPage
+      description: One page of guardrail-config aggregates.
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          description: The guardrail configs in this page.
+          items:
+            $ref: '#/components/schemas/GuardrailConfig'
+          maxItems: 200
+        nextCursor:
+          $ref: '#/components/schemas/NextCursor'
+      example:
+        items:
+          - guardrailConfigId: DEFAULT_GUARDRAILS
+            latestVersion: 4
+            publishedVersion: 3
+            createdAt: '2026-04-02T10:00:00Z'
+            updatedAt: '2026-08-01T09:00:00Z'
+        nextCursor: null
