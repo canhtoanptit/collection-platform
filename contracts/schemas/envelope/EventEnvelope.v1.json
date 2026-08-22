@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json",
+  "title": "EventEnvelope.v1",
+  "description": "Normative envelope for every domain event published on the platform (A§24). Exactly these ten fields — nothing else is permitted on the wire. The envelope is transport-agnostic: it is the Kafka message value on `collections.<context>` and `ingestion.*` topics (A§25), and the same JSON is stored in the transactional outbox and replayed from the DLQ. Ordering is guaranteed only per aggregate (A§26): the partition key is defined per event type by the topic/key map (contracts/asyncapi/collections.v1.yaml) and is normally `aggregateId`. `payload` is intentionally unconstrained here and is validated separately against `schemas/events/<context>/<eventType>.v<eventVersion>.json`. Released contract files are immutable: a breaking change ships as EventEnvelope.v2.json (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventType",
+    "eventVersion",
+    "occurredAt",
+    "producer",
+    "aggregateType",
+    "aggregateId",
+    "correlationId",
+    "payload"
+  ],
+  "properties": {
+    "eventId": {
+      "$ref": "#/$defs/ulid",
+      "description": "Identity of this event instance, assigned once by the producer and never reused. Written to the outbox `event_id` UNIQUE column and used by consumers for inbox dedupe on (consumer, eventId), which is what makes at-least-once delivery safe (D§3.5). Redeliveries of the same fact carry the same eventId; a genuinely new fact always gets a new one."
+    },
+    "eventType": {
+      "type": "string",
+      "description": "Business event name in PascalCase with no version suffix — the version lives in `eventVersion`. Must match the payload schema file name: `schemas/events/<context>/<eventType>.v<eventVersion>.json` (e.g. eventType `CaseCreated` + eventVersion 1 → schemas/events/case/CaseCreated.v1.json).",
+      "pattern": "^[A-Z][A-Za-z0-9]+$",
+      "minLength": 2,
+      "maxLength": 64,
+      "examples": [
+        "CaseCreated",
+        "DelinquencyChanged",
+        "PaymentAllocated"
+      ]
+    },
+    "eventVersion": {
+      "type": "integer",
+      "description": "Major version of the payload contract for this eventType, starting at 1. The meaning of an existing (eventType, eventVersion) pair never changes: a breaking payload change ships as a new version and both run side by side until every consumer has migrated (D§29). Consumers must ignore unknown versions rather than fail.",
+      "minimum": 1,
+      "examples": [
+        1
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "description": "When the business fact happened (not when it was published or consumed). RFC3339 date-time, always UTC with a `Z` offset and no local offsets.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T10:00:00Z"
+      ]
+    },
+    "producer": {
+      "type": "string",
+      "description": "Service or component that emitted the event, in kebab-case, matching its deployable name (A§7.2 gives the single owning producer per event type — no event has two producers).",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 64,
+      "examples": [
+        "case-service",
+        "arrangement-service",
+        "ingestion-canonicalizer"
+      ]
+    },
+    "aggregateType": {
+      "type": "string",
+      "description": "PascalCase type of the aggregate this event is about, as named in the canonical domain model (A§8).",
+      "pattern": "^[A-Z][A-Za-z0-9]+$",
+      "minLength": 2,
+      "maxLength": 64,
+      "examples": [
+        "Case",
+        "Account",
+        "Arrangement"
+      ]
+    },
+    "aggregateId": {
+      "type": "string",
+      "description": "Identifier of the aggregate instance (e.g. the caseId when aggregateType is `Case`). Non-empty; normally a ULID for platform-owned aggregates, but source-system identifiers are permitted for aggregates keyed by external references, so no pattern is imposed.",
+      "minLength": 1,
+      "maxLength": 128,
+      "examples": [
+        "01K3D0FZ8YQ2W7XN4M6VJ5RTHB"
+      ]
+    },
+    "correlationId": {
+      "$ref": "#/$defs/ulid",
+      "description": "Ties every hop of one business interaction together across HTTP, Kafka, Airflow and Snowflake QUERY_TAG (A§97). Propagated unchanged from the inbound X-Correlation-Id header or the consumed event; generated at the edge when absent. Also returned in API error bodies (A§20)."
+    },
+    "causationId": {
+      "$ref": "#/$defs/ulid",
+      "description": "OPTIONAL — the direct cause of this event: the eventId of the event being handled, or the identity of the command that produced it (typically the Idempotency-Key of the originating POST, A§21). Omit the property entirely for the first event in a chain, which by definition has no in-platform cause (e.g. an event raised by an operator action or an inbound source record). Never send null — omit the field. Together with correlationId this forms the causation graph used by decision explainability and incident forensics."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-type-specific body. Deliberately unconstrained by this schema and validated separately against `schemas/events/<context>/<eventType>.v<eventVersion>.json`, which is `additionalProperties: false` with explicit `required`. Must always be an object (never a scalar or array) so that payloads can be extended additively within a version."
+    }
+  },
+  "$defs": {
+    "ulid": {
+      "title": "ULID",
+      "description": "ULID in canonical Crockford base32 form: 26 uppercase characters, excluding I, L, O and U. Lexicographically sortable by generation time.",
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    }
+  }
+}

@@ -1,0 +1,337 @@
+# =============================================================================
+# Collections Platform — common OpenAPI components (CON-1)
+# =============================================================================
+# Components-only document: it declares no paths and is never served. Every
+# service spec in this directory references it instead of restating shared
+# shapes, e.g.
+#
+#   parameters:
+#     - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+#   responses:
+#     '400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }
+#
+# RELEASED FILE — IMMUTABLE. Anything that would change or remove an existing
+# component ships as `common.v2.yaml`; purely additive components may be added
+# here only before the `contracts-v1.0` tag. See contracts/README.md.
+#
+# Conventions this document encodes (contracts/README.md is normative):
+#
+#   * Money — every monetary value is the pair
+#       { amountMinor: int64, currency: ISO-4217 alpha-3 }
+#     e.g. { "amountMinor": 50000, "currency": "EUR" } == EUR 500.00.
+#     Minor units in int64 only: never floats, never major units, never a
+#     formatted string. A scalar amount is named `<thing>AmountMinor` (e.g.
+#     `overdueAmountMinor`) and always travels with a sibling `currency`.
+#     (The single exception in the whole platform is the decisioning context
+#     document, which carries major-unit decimal strings so business rules read
+#     "500" — converted by the context builder. See contracts/README.md.)
+#   * Time — RFC3339, UTC, `Z` suffix, e.g. `2026-08-22T10:00:00Z`. Dates are
+#     `YYYY-MM-DD`. No local offsets anywhere.
+#   * Errors — every non-2xx response of every operation uses the A§20 `Error`
+#     body from this file. No operation defines its own error schema.
+#   * Idempotency — every POST that creates a side effect requires
+#     `Idempotency-Key` (A§21): same key + same body replays the stored
+#     response, same key + different body is 422, in-flight duplicate is 409.
+#   * Concurrency — every PATCH requires `If-Match` carrying the row version
+#     returned as the resource's ETag; a stale value is 412.
+#   * Pagination — `limit` + opaque `cursor`; list responses are
+#     `{ items: [...], nextCursor: string|null }`. Offsets are not used.
+#   * Correlation — `X-Correlation-Id` is accepted on every request, generated
+#     when absent, echoed on every response, and carried into events as the
+#     envelope `correlationId` (A§97).
+# =============================================================================
+
+openapi: 3.0.3
+
+info:
+  title: Collections Platform — Common Components
+  version: 1.0.0
+  description: >-
+    Shared error contract (A§20), request parameters, response headers and
+    canned error responses referenced by every Collections Platform service
+    spec. Components only — this document defines no paths and is not a
+    deployable API.
+  license:
+    name: Apache-2.0
+
+paths: {}
+
+components:
+  schemas:
+    Error:
+      type: object
+      title: Error
+      description: >-
+        Canonical error body (A§20). Returned by every non-2xx response of
+        every operation, including errors raised by middleware (auth, panics,
+        request validation). Never contains stack traces, SQL, upstream
+        payloads, internal hostnames or PII — the `correlationId` is the only
+        handle a caller needs to have an operator find the failure.
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - correlationId
+      properties:
+        code:
+          type: string
+          description: >-
+            Stable machine-readable error code in SCREAMING_SNAKE_CASE. Clients
+            branch on this, never on `message`. Codes are part of the contract:
+            an operation's documented codes may be added to but never renamed
+            or repurposed.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: ARRANGEMENT_INVALID
+        message:
+          type: string
+          description: >-
+            Short human-readable summary, safe to log and safe to show to an
+            operator. Not localised and not intended for end-customer display.
+          minLength: 1
+          maxLength: 512
+          example: Arrangement schedule is invalid
+        correlationId:
+          type: string
+          description: >-
+            Correlation id of the failed request — the same value returned in
+            the `X-Correlation-Id` response header, propagated into logs,
+            traces and any events the request produced (A§97).
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+          example: 01M0MEKBHXV37E3S3E28JT97KB
+        details:
+          type: array
+          description: >-
+            Per-field detail. Present on validation and business-rule failures
+            (400 / 422); omitted otherwise. Order is not significant.
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+          maxItems: 100
+      example:
+        code: ARRANGEMENT_INVALID
+        message: Arrangement schedule is invalid
+        correlationId: 01M0MEKBHXV37E3S3E28JT97KB
+        details:
+          - field: firstPaymentDate
+            reason: DATE_IN_PAST
+
+    ErrorDetail:
+      type: object
+      title: ErrorDetail
+      description: One field-level reason contributing to an `Error` (A§20).
+      additionalProperties: false
+      required:
+        - field
+        - reason
+      properties:
+        field:
+          type: string
+          description: >-
+            Location of the offending value: a dot/bracket path into the
+            request body (`schedule[0].amountMinor`), or the parameter name for
+            a header, path or query violation (`If-Match`, `limit`).
+          minLength: 1
+          maxLength: 256
+          example: firstPaymentDate
+        reason:
+          type: string
+          description: >-
+            Stable machine-readable reason in SCREAMING_SNAKE_CASE, e.g.
+            `DATE_IN_PAST`, `REQUIRED`, `OUT_OF_RANGE`, `NOT_IN_ENUM`.
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: DATE_IN_PAST
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Caller-generated idempotency key for a command (A§21). Required on
+        every POST that creates a side effect: retrying with the same key and
+        the same request body replays the originally stored response instead of
+        acting twice; the same key with a different body is rejected with 422
+        `IDEMPOTENCY_KEY_REUSED`; a duplicate arriving while the first request
+        is still in flight is rejected with 409 `REQUEST_IN_PROGRESS`. Keys are
+        scoped per endpoint and retained for at least 24 hours. Non-mutating
+        POSTs (simulations, searches) must not reference this parameter.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKD80M9S346Q3D25VT4F5
+
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: >-
+        Optimistic-concurrency guard. Carries the row version of the resource
+        exactly as returned in its `ETag` response header (opaque to the
+        caller). Required on every PATCH: a value that does not match the
+        current row version is rejected with 412 `PRECONDITION_FAILED` and no
+        state changes. `*` is not accepted — blind overwrites are not allowed.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: '"7"'
+
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        Correlation id tying this call to a wider business interaction (A§97).
+        Optional: when absent the service generates one, and either way the
+        value is echoed in the `X-Correlation-Id` response header, written to
+        logs and traces, and copied into the `correlationId` of every event the
+        request produces.
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKBHXV37E3S3E28JT97KB
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return in one page.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 200
+        default: 50
+        example: 50
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque continuation token taken verbatim from the `nextCursor` of the
+        previous page. Clients must not parse, construct or modify it; a cursor
+        is only valid for the same filter and sort arguments. Omit it to fetch
+        the first page; a response whose `nextCursor` is null is the last page.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+
+  headers:
+    XCorrelationId:
+      description: >-
+        Correlation id for this request — the value supplied in the
+        `X-Correlation-Id` request header, or the one generated by the service
+        when the caller omitted it. Present on every response, success or
+        failure, and identical to `Error.correlationId` on failures.
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        example: 01M0MEKBHXV37E3S3E28JT97KB
+
+  responses:
+    BadRequest:
+      description: >-
+        400 — the request is malformed: unparseable body, schema violation,
+        unknown property, or an invalid path/query/header parameter (including
+        a missing required header). Nothing was changed.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: >-
+        401 — no bearer token, or a token that is expired, malformed, or not
+        issued by the configured Cognito issuer. The `WWW-Authenticate` header
+        is not used; clients must re-acquire a token.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Forbidden:
+      description: >-
+        403 — the caller is authenticated but lacks a required scope or group
+        for this operation (authorization is deny-by-default).
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: >-
+        404 — the addressed resource does not exist, or the caller is not
+        entitled to know that it exists. Never distinguishes the two cases.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Conflict:
+      description: >-
+        409 — the request conflicts with the current state of the resource:
+        a state-machine transition that is not legal from the current state, a
+        uniqueness violation, or a duplicate `Idempotency-Key` whose first
+        request is still in flight (A§21). Retryable only after the conflict
+        is resolved.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    PreconditionFailed:
+      description: >-
+        412 — the `If-Match` row version does not match the current version of
+        the resource (concurrent modification). Re-read the resource, re-apply
+        the change and retry with the fresh version.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    UnprocessableEntity:
+      description: >-
+        422 — the request is syntactically valid but violates a business rule
+        or domain invariant (A§11), or reuses an `Idempotency-Key` with a
+        different request body (A§21). Retrying the identical request will fail
+        identically.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InternalError:
+      description: >-
+        500 — unexpected server-side failure. The body carries a generic code,
+        a safe message and the `correlationId` for operator follow-up; internal
+        detail stays in logs and traces (A§20).
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

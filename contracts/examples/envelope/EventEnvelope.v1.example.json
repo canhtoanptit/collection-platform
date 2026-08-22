@@ -1,0 +1,16 @@
+{
+  "eventId": "01M0MEKD80M9S346Q3D25VT4F5",
+  "eventType": "CaseCreated",
+  "eventVersion": 1,
+  "occurredAt": "2026-08-22T10:00:00Z",
+  "producer": "case-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+  "correlationId": "01M0MEKBHXV37E3S3E28JT97KB",
+  "causationId": "01M0MEKCV46CQ643DZVMXXQKFB",
+  "payload": {
+    "caseId": "01M0MEKD8027CSPJ9G6GTMH6MK",
+    "accountId": "A123",
+    "customerId": "C123"
+  }
+}
