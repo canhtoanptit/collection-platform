@@ -170,7 +170,7 @@ go run ./tools/layoutcheck services/<name> && helm lint deploy/charts/<name>
 ### Phase 0 — Foundations & delegation machinery
 
 **FND-0 — Monorepo skeleton + toolchain + CI skeleton — M** · deps: none
-- Paths: `go.work`, root `Makefile` (`bootstrap, lint, build-all, verify WP=, contracts-check, tf-plan STACK=, compose-up/down, e2e-*`), `makefiles/service.mk` (canonical targets `generate build lint test test-integration coverage contract-test image`), `.golangci.yml` (incl. `exhaustive` for state-machine switches), `mise.toml` (terraform≥1.11, go 1.24, python 3.12, helmfile, kubectl, snowflake-cli), `tools/go.mod` (pinned oapi-codegen, sqlc, goose, vacuum, oasdiff, go-test-coverage — invoked via `go run`), `.github/workflows/{service-ci.yml (reusable),platform-ci.yml}`, `deploy/charts/collections-service` library chart (Deployment/Service/SA+IRSA/HPA/CronJob/migrate-hook), stub `contracts/` + `platform/` modules, dir skeleton per §3, `docs/adr/0001-technology-decisions.md` (§2 table).
+- Paths: `go.work`, root `Makefile` (`bootstrap, lint, build-all, verify WP=, contracts-check, tf-plan STACK=, compose-up/down, e2e-*`), `makefiles/service.mk` (canonical targets `generate build lint test test-integration coverage contract-test image`), `.golangci.yml` (incl. `exhaustive` for state-machine switches), `mise.toml` (terraform≥1.11, go 1.24, python 3.12, helmfile, kubectl, snowflake-cli), `tools/go.mod` (pinned oapi-codegen, sqlc, goose, vacuum, oasdiff, go-test-coverage — invoked via `go run`), `.github/workflows/{service-ci.yml (reusable),platform-ci.yml}`, `deploy/charts/collections-service` library chart (Deployment/Service/SA+IRSA/HPA/CronJob/migrate-hook), stub `contracts/` + `platform/` modules, dir skeleton per §3, ADR coverage of the §2 table (delivered as the numbered per-decision set `docs/adr/0001..0016` — see DOC-1).
 - Requirements: services use `replace` directives to `../../platform` + `../../contracts`; distroless Dockerfile template; `.gitignore` covers tfstate/secrets.
 - Accept: `mise install && make bootstrap lint build-all` green; `go work sync && git diff --exit-code`; `helm lint deploy/charts/collections-service`; trivial PR runs CI green.
 
@@ -439,7 +439,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 - Adds: Airflow success % (24h), dbt tests passed/failed (pushed from run_results), Snowflake credits MTD by warehouse (ACCOUNT_USAGE → pushgateway), parity status tile, AWS cost MTD (Cost Explorer task).
 - Accept: all v2 panels non-empty after one daily cycle; credits within 10% of console.
 
-**Phase 6 exit (Wave 3):** dbt build+tests green; parity ≤0.01 across ≥5 dates; masking verified; slim CI operating. Record `docs/adr/0002-analytics-gate.md`.
+**Phase 6 exit (Wave 3):** dbt build+tests green; parity ≤0.01 across ≥5 dates; masking verified; slim CI operating. Record `docs/adr/0017-analytics-gate.md` (0001–0016 are the design ADR set).
 
 ### Phase 7 — Exemplar + domain services wave A (Wave 4)
 
@@ -584,7 +584,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 
 **E2E-4 — MVP gate: full loop — L (verifier agent, strongest model)** · deps: everything above
 - **A§106 steps 1–23 end-to-end on dev EKS with no harness shortcuts**: simulator tick → CDC + files + webhooks → ingestion (validate/checkpoint/recon) → canonical events → account/debt/delinquency → case → daily decisioning DAG (population from Snowflake → batch decisions → outcomes loaded) → treatment (guardrails) → mock provider → contact events → promise/arrangement → payment webhook → allocation → recovery → events land in Snowflake → dbt marts → dashboard rows populated; batch reconciliation identity holds; `TreatmentSelected` topic-slice replay produces **zero duplicate dispatches** (D§49); correlation ID traceable file→case (A§97 chain sampled).
-- Accept: `docs/gates/gate-10.md` all commands green ×2 consecutive days; MVP checklist D§88 items 1–13 each linked to evidence; `docs/adr/0003-mvp-gate.md` recorded.
+- Accept: `docs/gates/gate-10.md` all commands green ×2 consecutive days; MVP checklist D§88 items 1–13 each linked to evidence; `docs/adr/0018-mvp-gate.md` recorded.
 
 ### Phase 11 — Agency & legal (Waves 8–9)
 
