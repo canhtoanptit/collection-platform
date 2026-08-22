@@ -1,0 +1,39 @@
+# The contract gate (CON-7). Everything it runs is `make contracts-check`, so a
+# green CI and a green laptop mean the same thing — there is no CI-only check and
+# no local-only check.
+name: contracts-ci
+
+on:
+  pull_request:
+    paths:
+      - 'contracts/**'
+      - 'scripts/ci/**'
+      - 'tools/contractcheck/**'
+      - '.github/workflows/contracts-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - 'scripts/ci/**'
+      - 'tools/contractcheck/**'
+      - '.github/workflows/contracts-ci.yml'
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is load-bearing, not hygiene: the immutability gate and
+      # `oasdiff breaking` both resolve the latest `contracts-v*` tag, and a
+      # shallow checkout has no tags — the gates would skip silently and a
+      # modified released contract would sail through.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+      - name: bootstrap
+        run: make bootstrap
+      - name: contracts-check
+        run: make contracts-check

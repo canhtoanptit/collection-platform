@@ -65,7 +65,7 @@ endif
 	bash tools/check-ownership.sh $(WP)
 
 .PHONY: contracts-check
-contracts-check: ## Validate contract artefacts (minimal now; extended by CON-7)
+contracts-check: ## Full contract gate: harness, contractcheck, vacuum, immutability, oasdiff
 	bash scripts/ci/contracts-check.sh
 
 # --------------------------------------------------------- local runtime ----

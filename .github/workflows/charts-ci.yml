@@ -1,0 +1,56 @@
+# Helm chart gate (FND-0 follow-up). The library chart renders nothing on its
+# own, so "it lints" proves very little: the real assertion is that the
+# render-test consumer instantiates every named template and produces objects.
+name: charts-ci
+
+on:
+  pull_request:
+    paths:
+      - 'deployment/charts/**'
+      - '.github/workflows/charts-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deployment/charts/**'
+      - '.github/workflows/charts-ci.yml'
+
+jobs:
+  charts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ubuntu-latest runner image ships helm preinstalled, so there is
+      # nothing to install and no action version to keep current. The assumption
+      # is helm 3.x or later — printed here so a runner-image change that drops
+      # or downgrades helm fails visibly on this step instead of confusingly
+      # later. If the image ever stops shipping helm, add
+      # `uses: azure/setup-helm@v4` with an explicit `version:` above this step.
+      - name: helm version (preinstalled on the runner)
+        run: helm version --short
+
+      # Vendors the library chart into render-test/charts/*.tgz. Required after a
+      # fresh checkout: the tarball is gitignored, only Chart.lock is committed
+      # (deployment/charts/README.md).
+      - name: helm dependency build
+        run: helm dependency build deployment/charts/render-test
+
+      - name: helm lint --strict
+        run: helm lint --strict deployment/charts/collections-service deployment/charts/render-test
+
+      - name: helm template render-test
+        run: |
+          helm template deployment/charts/render-test > /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+          echo "rendered $(grep -c '^kind:' /tmp/rendered.yaml) objects"
+
+      # A render that succeeds but emits nothing would pass `test -s` on
+      # whitespace alone, so assert the two objects that carry the most
+      # template logic: the Deployment, and the migration Job with its
+      # pre-install/pre-upgrade hook (migrations must run before the new
+      # container starts).
+      - name: assert the rendered objects
+        run: |
+          grep -q '^kind: Deployment' /tmp/rendered.yaml
+          grep -q '^kind: Job' /tmp/rendered.yaml
+          grep -q 'helm.sh/hook.*pre-install,pre-upgrade' /tmp/rendered.yaml

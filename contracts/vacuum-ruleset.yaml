@@ -1,0 +1,89 @@
+# contracts/vacuum-ruleset.yaml — the OpenAPI lint gate for every spec in this
+# module (CON-7). Run by `scripts/ci/contracts-check.sh` over every file in
+# `contracts/openapi/`, including the components-only `common.v1.yaml`:
+#
+#   GOWORK=off go -C tools tool vacuum lint -r ../contracts/vacuum-ruleset.yaml ../contracts/openapi/<spec>
+#
+# It extends vacuum's `recommended` set (which already carries
+# `operation-operationId`, `operation-operationId-unique`, `operation-tags`,
+# `oas3-operation-security-defined`, `oas3-valid-schema-example`, `path-params`
+# and friends) and adds the three house rules the platform cannot ship without.
+#
+# ## Gate semantics
+#
+# Only `error` severity fails the build (`vacuum lint -n error`). Warnings and
+# informs are reported and read, not enforced — with one documented consequence:
+# `common.v1.yaml` warns about `oas3-unused-component` (14×) and
+# `oas3-api-servers`, because it is a shared components library that declares
+# `paths: {}` and is never served, so its components are used by *other*
+# documents that a single-file linter cannot see. That is inherent to the file,
+# not a defect, and it is precisely why those two rules stay at warning severity
+# rather than being switched off for everyone. Nothing else in this ruleset fires
+# on a `paths: {}` document: every operation rule iterates operations, and zero
+# operations means zero violations.
+#
+# ## What is deliberately NOT here
+#
+# `Idempotency-Key` on POST commands (A§21) is enforced by
+# `tools/contractcheck` (`post-idempotency`), not by a rule here. The positive
+# rule is expressible in this DSL — a `schema` function with `contains` over
+# `$.paths.*[?(@property == 'post')].parameters` — and it works, but the two
+# legitimate exemptions are not expressible: the non-mutating
+# `POST .../score` (model.v1.yaml) and the inbound provider webhook
+# (treatment.v1.yaml), which external providers call without the header. vacuum
+# can only silence those through an ignore file, which would never notice an
+# exemption that stopped being true. contractcheck keeps the exemption list, the
+# reason for each entry, and fails when an entry goes stale. Same for the
+# artefact-wide invariants (schema $ids, reason-code closure, AsyncAPI refs,
+# catalogue coverage): they are cross-file properties, and vacuum lints one
+# document at a time.
+extends: [[vacuum:oas, recommended]]
+documentationUrl: https://quobix.com/vacuum/rulesets/understanding
+
+rules:
+  # --- operations are identifiable ------------------------------------------
+  # Restated at error severity because oapi-codegen turns operationId into the
+  # Go method name of the strict-server interface: a missing or duplicated id is
+  # a broken build downstream, not a style nit (contracts/README.md §12).
+  operation-operationId: error
+  operation-operationId-unique: error
+  operation-operationId-valid-in-url: error
+
+  # --- every operation can fail, and says how -------------------------------
+  # A§20: every non-2xx response is the shared `Error` body from
+  # common.v1.yaml. These two rules make "documented errors" mechanical: a 4xx
+  # so clients know what they did wrong, and a 500 so they know a retry is the
+  # right response. Both are built-in vacuum functions, redefined here only to
+  # raise them from warning to error.
+  operation-4xx-response:
+    description: Every operation must define at least one 4xx error response (A§20)
+    message: operation must define at least one 4xx error response
+    severity: error
+    recommended: true
+    formats: [oas3]
+    type: validation
+    given: $
+    then:
+      function: oasOpErrorResponse
+    howToFix: >-
+      Reference the canned responses from common.v1.yaml, e.g.
+      "'400': { $ref: './common.v1.yaml#/components/responses/BadRequest' }".
+      Clients branch on the stable `code` in that body, so an operation with no
+      documented failure mode cannot be consumed safely.
+
+  operation-5xx-response:
+    description: Every operation must define a 500 response with a schema (A§20)
+    message: operation must define a `500` response carrying the shared Error schema
+    severity: error
+    recommended: true
+    formats: [oas3]
+    type: validation
+    given: $
+    then:
+      function: owaspCheckErrorResponse
+      functionOptions:
+        code: "500"
+    howToFix: >-
+      Add "'500': { $ref: './common.v1.yaml#/components/responses/InternalError' }"
+      to the operation's responses. Every server can fail; a caller that has no
+      documented 500 has no documented retry contract either.

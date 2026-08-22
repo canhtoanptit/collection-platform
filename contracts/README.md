@@ -303,4 +303,5 @@ schema, an example with no mirrored schema, and an event schema with no example.
 CON-7 layers the repo-wide gates on top: `tools/contractcheck` (catalogue
 coverage, AsyncAPI ref resolution, reason-code cross-reference), the vacuum
 ruleset (operationId, error responses, `Idempotency-Key` on POST commands),
-`oasdiff breaking` versus `main`, and the immutability check.
+`oasdiff breaking` versus the latest `contracts-v*` freeze tag, and the
+immutability check.
