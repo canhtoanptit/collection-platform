@@ -230,3 +230,76 @@ ING-3:
 # separately from the implementation. Reviewers reject WPs whose diff and
 # ownership entry disagree.
 _default:
+
+# ====================== Phase 2 — cloud foundation (code) ==================
+# Code-authoring only: terraform validate/tflint pass, NO applies. The lead
+# split FND-1..13 into two parallel code WPs by stack/path.
+
+# Stacks 00-bootstrap, 10-network, 20-data (KMS/S3/ECR/RDS/MSK/Cognito) + their modules.
+INF-A:
+  - "infrastructure/terraform/stacks/00-bootstrap/**"
+  - "infrastructure/terraform/stacks/10-network/**"
+  - "infrastructure/terraform/stacks/20-data/**"
+  - "infrastructure/terraform/modules/github-oidc/**"
+  - "infrastructure/terraform/modules/budgets/**"
+  - "infrastructure/terraform/modules/network/**"
+  - "infrastructure/terraform/modules/kms/**"
+  - "infrastructure/terraform/modules/s3-data/**"
+  - "infrastructure/terraform/modules/ecr/**"
+  - "infrastructure/terraform/modules/rds-postgres/**"
+  - "infrastructure/terraform/modules/msk/**"
+  - "infrastructure/terraform/modules/cognito/**"
+  - "infrastructure/terraform/envs/**"
+  - "deployment/kafka/**"
+  - "scripts/db/**"
+  - "scripts/verify/INF-A.sh"
+
+# Stacks 30-eks, 40-snowflake + cluster baseline, observability, Airflow,
+# infra CI workflows, cost/teardown.
+INF-B:
+  - "infrastructure/terraform/stacks/30-eks/**"
+  - "infrastructure/terraform/stacks/40-snowflake/**"
+  - "infrastructure/terraform/modules/eks/**"
+  - "infrastructure/terraform/modules/irsa-role/**"
+  - "infrastructure/terraform/modules/snowflake-account/**"
+  - "deployment/helmfile.yaml"
+  - "deployment/namespaces.yaml"
+  - "deployment/values/**"
+  - "deployment/observability/**"
+  - "deployment/images/**"
+  - ".github/workflows/terraform.yml"
+  - ".github/workflows/images.yml"
+  - ".github/workflows/helmfile.yml"
+  - ".github/CODEOWNERS"
+  - "scripts/cost/**"
+  - "scripts/dr/**"
+  - "docs/runbooks/cost-and-teardown.md"
+  - "docs/cost-model.md"
+  - "Makefile"                       # stop/start/destroy-heavy/up-all targets (serialized with lead)
+  - "scripts/verify/INF-B.sh"
+
+# ======================= Phase 3 — platform libraries =======================
+# platform/** is serialized: exactly one LIB batch runs at a time (OPS-1 rule).
+
+# events, ids, clock, apierror, httpkit, health, config, otelkit, authn — unit tests only.
+LIB-A:
+  - "platform/**"
+  - "scripts/verify/LIB-A.sh"
+
+# postgres + kafka (testcontainers). Runs strictly after LIB-A.
+LIB-B:
+  - "platform/**"
+  - "scripts/verify/LIB-B.sh"
+
+# outbox, inbox, idempotency, ruledsl, allocation, modelclient, testkit. After LIB-B.
+LIB-C:
+  - "platform/**"
+  - "scripts/verify/LIB-C.sh"
+
+# Compose stack, mockidp, domain-stub, e2e harness + smoke scenario. After LIB-C.
+E2E-0:
+  - "e2e/**"
+  - "tools/domain-stub/**"
+  - "go.work"
+  - "go.work.sum"
+  - "scripts/verify/E2E-0.sh"
