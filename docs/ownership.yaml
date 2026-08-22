@@ -1,0 +1,220 @@
+# docs/ownership.yaml — work package -> allowed path globs.
+#
+# Enforced by `tools/check-ownership.sh <WP-ID>` (and `make ownership-check WP=<WP-ID>`).
+# Every file a WP touches must match at least one of that WP's globs. Nothing else may change.
+#
+# ---------------------------------------------------------------------------
+# RESTRICTED YAML SUBSET — this file is parsed by a hand-written parser
+# (python3 stdlib only, no PyYAML). Only these three line forms are legal:
+#
+#   1. comment / blank      `# anything`   or an empty line
+#   2. work-package key     `WP-ID:`       at column 0, optional trailing `# comment`
+#   3. glob list item       `  - "glob"`   indented, value in double (or single) quotes,
+#                                          optional trailing `# comment`
+#
+# Anything else (nested maps, flow lists `[a, b]`, anchors, multi-line scalars,
+# unquoted values, tabs) is a parse error naming the line. Keep it boring.
+#
+# Glob syntax (POSIX-ish, matched against repo-root-relative paths with `/`):
+#   *   any run of characters except `/`
+#   **  any number of path segments (`docs/gates/**`, `**/*.sh`)
+#   ?   one character except `/`
+#   [ ] character class
+# Keys starting with `_` are reserved documentation entries, not usable WP ids.
+#
+# RULES
+#   * Parallel WPs never share a directory (plan §4.4). If two WPs need the same
+#     file, serialize them or reassign the file to one owner.
+#   * Every WP owns its own verification script: `scripts/verify/<WP-ID>.sh`.
+#   * A WP may NOT add itself here. Amendments to this file are made by the lead
+#     agent (it is OPS-1-owned) and committed separately, before the WP starts.
+#   * Released files under `contracts/**` are immutable once tagged: ownership
+#     grants the right to add new `vN` files, never to edit a released one.
+# ---------------------------------------------------------------------------
+
+# ============================ Phase 0 — foundations ========================
+
+# Build system, toolchain, CI skeleton, library Helm chart, stub modules, ADR 0001.
+FND-0:
+  - "Makefile"
+  - "makefiles/**"
+  - "go.work"
+  - "go.work.sum"
+  - ".golangci.yml"
+  - ".gitignore"
+  - "mise.toml"
+  - "README.md"
+  # Pre-existing repo inputs. READ-ONLY — never edited by any agent; listed only
+  # so a clean-tree ownership check does not trip over them.
+  - "LICENSE"
+  - "collections_debt_management_platform_design.md"
+  - "collections_debt_management_platform_design_artefacts_1-12.md"
+  # Plan of record. Maintained by the LEAD agent only — never by an
+  # implementation WP, which reads it and follows its brief instead.
+  - "docs/implementation-plan.md"
+  - "tools/go.mod"
+  - "tools/go.sum"
+  - ".github/workflows/service-ci.yml"
+  - ".github/workflows/platform-ci.yml"
+  - "deployment/charts/README.md"
+  - "deployment/charts/collections-service/**"
+  - "deployment/charts/render-test/**"        # library-chart render harness, never deployed
+  - "docs/adr/**"
+  - "docs/service-playbook.md"          # placeholder only; content is EXE-2's
+  - "scripts/ci/contracts-check.sh"      # minimal version; CON-7 extends it
+  - "contracts/go.mod"                   # stub module (CON-1 fills it in)
+  - "contracts/embed.go"
+  - "contracts/validate_test.go"
+  - "contracts/**/README.md"
+  - "platform/go.mod"                    # stub module
+  - "platform/doc.go"
+  - "**/.gitkeep"
+  - "scripts/verify/FND-0.sh"
+
+# Conventions & delegation pack (this file's own WP).
+OPS-1:
+  - "CLAUDE.md"
+  - "docs/wp-template.md"
+  - "docs/ownership.yaml"
+  - "docs/review-policy.md"
+  - "docs/conventions.md"
+  - "docs/gates/**"
+  - "tools/check-ownership.sh"
+  - "tools/lint-runbook.sh"
+  - "scripts/verify/README.md"
+  - "scripts/verify/OPS-1.sh"
+
+# ========================= Phase 1 — contracts v1 ==========================
+# `contracts/` is one Go module with many owners; the split below is by directory
+# and by file so the Phase-1 batch can run in parallel without collisions.
+
+# Conventions doc, module wiring, event envelope, shared OpenAPI components.
+CON-1:
+  - "contracts/README.md"
+  - "contracts/go.mod"
+  - "contracts/go.sum"
+  - "contracts/embed.go"
+  - "contracts/validate_test.go"          # module self-validation harness
+  - "contracts/schemas/envelope/**"
+  - "contracts/openapi/common.v1.yaml"
+  - "contracts/examples/envelope/**"
+  - "scripts/verify/CON-1.sh"
+
+# Catalogue event schemas + examples + the normative topic/key index.
+# Sole owner of contracts/asyncapi/** — other WPs request entries via CON-2.
+# Does NOT own the decisioning event contexts (see DEC-1).
+CON-2:
+  - "contracts/schemas/events/customer/**"
+  - "contracts/schemas/events/account/**"
+  - "contracts/schemas/events/debt/**"
+  - "contracts/schemas/events/delinquency/**"
+  - "contracts/schemas/events/case/**"
+  - "contracts/schemas/events/contact/**"
+  - "contracts/schemas/events/arrangement/**"
+  - "contracts/schemas/events/payment/**"
+  - "contracts/schemas/events/recovery/**"
+  - "contracts/schemas/events/agency/**"
+  - "contracts/schemas/events/legal/**"
+  - "contracts/schemas/events/ingestion/**"
+  - "contracts/examples/events/customer/**"
+  - "contracts/examples/events/account/**"
+  - "contracts/examples/events/debt/**"
+  - "contracts/examples/events/delinquency/**"
+  - "contracts/examples/events/case/**"
+  - "contracts/examples/events/contact/**"
+  - "contracts/examples/events/arrangement/**"
+  - "contracts/examples/events/payment/**"
+  - "contracts/examples/events/recovery/**"
+  - "contracts/examples/events/agency/**"
+  - "contracts/examples/events/legal/**"
+  - "contracts/examples/events/ingestion/**"
+  - "contracts/asyncapi/**"
+  - "scripts/verify/CON-2.sh"
+
+# OpenAPI for wave-A services.
+CON-3:
+  - "contracts/openapi/customer.v1.yaml"
+  - "contracts/openapi/account.v1.yaml"
+  - "contracts/openapi/debt.v1.yaml"
+  - "contracts/openapi/delinquency.v1.yaml"
+  - "contracts/openapi/case.v1.yaml"
+  - "contracts/examples/openapi/customer/**"
+  - "contracts/examples/openapi/account/**"
+  - "contracts/examples/openapi/debt/**"
+  - "contracts/examples/openapi/delinquency/**"
+  - "contracts/examples/openapi/case/**"
+  - "scripts/verify/CON-3.sh"
+
+# OpenAPI for wave-B/C services.
+CON-4:
+  - "contracts/openapi/arrangement.v1.yaml"
+  - "contracts/openapi/payment.v1.yaml"
+  - "contracts/openapi/contact.v1.yaml"
+  - "contracts/openapi/recovery.v1.yaml"
+  - "contracts/openapi/agency.v1.yaml"
+  - "contracts/openapi/legal.v1.yaml"
+  - "contracts/examples/openapi/arrangement/**"
+  - "contracts/examples/openapi/payment/**"
+  - "contracts/examples/openapi/contact/**"
+  - "contracts/examples/openapi/recovery/**"
+  - "contracts/examples/openapi/agency/**"
+  - "contracts/examples/openapi/legal/**"
+  - "scripts/verify/CON-4.sh"
+
+# Canonical ingestion snapshot contracts. Canonical-topic entries in
+# contracts/asyncapi/** are added by CON-2 on request (single owner).
+CON-6:
+  - "contracts/schemas/ingestion/**"
+  - "contracts/examples/ingestion/**"
+  - "scripts/verify/CON-6.sh"
+
+# Contracts CI: schema/example/asyncapi checker, vacuum ruleset, immutability gate.
+CON-7:
+  - ".github/workflows/contracts-ci.yml"
+  - "tools/contractcheck/**"
+  - "contracts/vacuum-ruleset.yaml"
+  - "scripts/ci/check-contract-immutability.sh"
+  - "scripts/ci/contracts-check.sh"
+  - "scripts/verify/CON-7.sh"
+
+# Decisioning contracts, registries, golden vectors, decisioning event contexts.
+DEC-1:
+  - "contracts/openapi/strategy.v1.yaml"
+  - "contracts/openapi/decision.v1.yaml"
+  - "contracts/openapi/treatment.v1.yaml"
+  - "contracts/openapi/model.v1.yaml"
+  - "contracts/schemas/decisioning/**"
+  - "contracts/schemas/events/strategy/**"
+  - "contracts/schemas/events/decision/**"
+  - "contracts/schemas/events/treatment/**"
+  - "contracts/examples/decisioning/**"
+  - "contracts/examples/events/strategy/**"
+  - "contracts/examples/events/decision/**"
+  - "contracts/examples/events/treatment/**"
+  - "contracts/examples/openapi/strategy/**"
+  - "contracts/examples/openapi/decision/**"
+  - "contracts/examples/openapi/treatment/**"
+  - "contracts/examples/openapi/model/**"
+  - "contracts/registries/**"
+  - "contracts/testdata/**"
+  - "scripts/verify/DEC-1.sh"
+
+# File-feed contracts + the pure feedspec validation library. Creates the
+# ingestion module; ING-1 owns the rest of ingestion/** from Phase 5.
+ING-3:
+  - "contracts/files/**"
+  - "ingestion/go.mod"
+  - "ingestion/go.sum"
+  - "ingestion/internal/feedspec/**"
+  - "scripts/verify/ING-3.sh"
+
+# ============================== unlisted WPs ===============================
+#
+# `_default` owns nothing, deliberately. There is no fallback: a WP id absent
+# from this file is an error, and `check-ownership.sh` exits non-zero telling you
+# to add it. Before delegating any WP (Phase 2 onward), the lead agent appends an
+# entry here whose globs are exactly the "Deliverable paths" section of the WP
+# brief (`docs/wp-template.md`) plus `scripts/verify/<WP-ID>.sh`, and commits it
+# separately from the implementation. Reviewers reject WPs whose diff and
+# ownership entry disagree.
+_default:
