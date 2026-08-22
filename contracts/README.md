@@ -255,7 +255,7 @@ this table before adding a path to their spec.
 | `/v1/strategies*`, `/v1/rule-sets*`, `/v1/guardrail-configs*` | strategy-service | `strategy.v1.yaml` |
 | `/v1/decisions*` (incl. `…/explanation`, `…/batch`, `…/simulations`), `GET /v1/reference/reason-codes` | decision-service | `decision.v1.yaml` |
 | `/v1/treatments*` (incl. the provider webhook path) | treatment-service | `treatment.v1.yaml` |
-| `POST /v1/models/{modelId}/versions/{version}:score` | model scoring provider (`services/model-stub` in dev) | `model.v1.yaml` |
+| `POST /v1/models/{modelId}/versions/{version}/score` | model scoring provider (`services/model-stub` in dev) | `model.v1.yaml` |
 | `/v1/sources*`, `/v1/feeds*`, `/v1/ingestion/*`, `/v1/reconciliation/*` | ingestion control plane | `ingestion-control-plane.v1.yaml` |
 
 ## Spec file → service

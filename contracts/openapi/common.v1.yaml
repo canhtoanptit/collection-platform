@@ -335,3 +335,15 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: >-
+        503 — a required downstream dependency (broker, model provider, data
+        store) is unavailable and the request may be retried. Error codes are
+        operation-specific (e.g. `MODEL_TIMEOUT`, `EVENT_BUS_UNAVAILABLE`).
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
