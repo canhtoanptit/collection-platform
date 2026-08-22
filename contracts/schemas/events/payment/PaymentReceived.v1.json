@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/payment/PaymentReceived.v1.json",
+  "title": "PaymentReceived.v1",
+  "description": "Payload of the PaymentReceived event (A§23). Emitted by payment-service — the single producer (A§7.2) — once per distinct payment, whether it arrived from the intraday webhook or from the batch file/CDC path. Payments arrive twice by design (D§47, plan §6.2) and the natural key `(sourceSystem, externalPaymentRef)` absorbs the overlap: the second arrival returns the original payment and publishes nothing, so exactly one PaymentReceived exists per real-world payment. payment-service records the match; it never replaces the bank's authoritative payment system (A§5.10). Published on `collections.payment` keyed by `paymentId` (A§25/§26), immediately followed by the PaymentAllocated for the same payment on the same partition — both enqueued in one transaction through the outbox (SVC-6). Rides the A§24 envelope; a breaking change ships as PaymentReceived.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "paymentId",
+    "accountId",
+    "sourceSystem",
+    "externalPaymentRef",
+    "amountMinor",
+    "currency",
+    "receivedAt",
+    "channel"
+  ],
+  "properties": {
+    "paymentId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier minted for the payment. Equal to the envelope `aggregateId` and the Kafka partition key (A§26). Stable across redeliveries of the same payment, because the natural key resolves to the same row."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the payment was matched to."
+    },
+    "sourceSystem": {
+      "type": "string",
+      "description": "System the payment was reported by. First half of the payment natural key `UNIQUE(sourceSystem, externalPaymentRef)` that makes duplicate intake idempotent (D§47).",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "COREBANK"
+      ]
+    },
+    "externalPaymentRef": {
+      "type": "string",
+      "description": "The source system's own reference for this payment. Second half of the natural key. Source-owned format, never re-minted by the platform and never pattern-constrained here (references legitimately differ per source).",
+      "minLength": 1,
+      "maxLength": 128,
+      "examples": [
+        "CB-PMT-20260901-000123"
+      ]
+    },
+    "amountMinor": {
+      "type": "integer",
+      "description": "Amount received, in minor units of `currency`. Strictly positive: reversals and refunds are separate business facts, never a negative PaymentReceived (a negative amount here would silently corrupt recovery and control totals).",
+      "minimum": 1,
+      "maximum": 9223372036854775807,
+      "examples": [
+        40000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `amountMinor`. Converted to minor units once, by the ingestion canonicalizer, from the source NUMERIC string (D§16, plan §6.8).",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "receivedAt": {
+      "type": "string",
+      "description": "When the payment was received by the source system (the business fact), RFC3339 UTC with a `Z` offset. Distinct from the envelope `occurredAt`, which is when payment-service recorded the match: for the batch path these can be a day apart, and reconciliation and recovery reporting both key off the business time, not the processing time.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-09-01T08:30:00Z"
+      ]
+    },
+    "channel": {
+      "type": "string",
+      "description": "How the customer paid. Open SCREAMING_SNAKE vocabulary rather than a closed enum: payment channels are owned by the bank's payment rails and new ones appear without any change in the meaning of this event. Used for recovery attribution and cost-to-collect analysis (D§11).",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "BANK_TRANSFER",
+        "DIRECT_DEBIT",
+        "CARD",
+        "CASH",
+        "CHEQUE",
+        "AGENCY"
+      ]
+    }
+  }
+}

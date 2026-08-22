@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/account/AccountUpdated.v1.json",
+  "title": "AccountUpdated.v1",
+  "description": "Payload of the AccountUpdated event (A§23). Emitted by account-service — the single producer (A§7.2) — whenever the account state it owns changes (A§5.2, A§9 Account). Published on `collections.account` keyed by `accountId` (A§25/§26). This payload is load-bearing: delinquency-service consumes it as its ONLY upstream truth for DPD, bucketing, cure and re-default (SVC-4 consumes AccountUpdated, never raw ingestion), so `overdueAmountMinor`, `minimumDueMinor`, `currentBalanceMinor`, `lastPaymentAt` and `oldestUnpaidDueDate` are mandatory members of the contract and may never be dropped within v1. Money is int64 minor units with an explicit ISO-4217 sibling `currency` (D§16 conventions). Rides the A§24 envelope; a breaking change ships as AccountUpdated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accountId",
+    "customerId",
+    "sourceSystem",
+    "productCode",
+    "status",
+    "currentBalanceMinor",
+    "overdueAmountMinor",
+    "minimumDueMinor",
+    "currency",
+    "lastPaymentAt",
+    "oldestUnpaidDueDate",
+    "changedFields"
+  ],
+  "properties": {
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account. Equal to the envelope `aggregateId` and the Kafka partition key, which is what gives per-account ordering of the balance/overdue timeline (A§26)."
+    },
+    "customerId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the owning collection customer, so consumers can create customer-level work (case creation, contact frequency caps) without calling back to the account API."
+    },
+    "sourceSystem": {
+      "type": "string",
+      "description": "System of record this account is mastered in. Part of the provenance chain from source record to case (A§97) and of the payment natural key on the payment side (D§47). Never a platform-minted id.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "COREBANK"
+      ]
+    },
+    "productCode": {
+      "type": "string",
+      "description": "Source product code the account belongs to. Drives product-specific delinquency rules (D§5) and strategy eligibility (A§53). Source-owned vocabulary, so no closed enum.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "PERSONAL_LOAN",
+        "CREDIT_CARD",
+        "OVERDRAFT"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Account status after this change, as held by account-service. Open SCREAMING_SNAKE vocabulary because the values come from the source system; consumers must branch only on values they know and ignore the rest.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "ACTIVE",
+        "SUSPENDED",
+        "CLOSED",
+        "WRITTEN_OFF"
+      ]
+    },
+    "currentBalanceMinor": {
+      "type": "integer",
+      "description": "Total outstanding balance of the account in minor units of `currency` (e.g. 125000 = EUR 1,250.00). int64, never a float and never major units.",
+      "minimum": -9223372036854775808,
+      "maximum": 9223372036854775807,
+      "examples": [
+        125000
+      ]
+    },
+    "overdueAmountMinor": {
+      "type": "integer",
+      "description": "Amount currently past due in minor units of `currency`. Zero means nothing is overdue, which is the cure signal for delinquency-service (D§5). Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        50000
+      ]
+    },
+    "minimumDueMinor": {
+      "type": "integer",
+      "description": "Minimum amount contractually due at the next due date, in minor units of `currency`. Used for promise/arrangement affordability checks and for bucket rules that key off minimum-due breaches. Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        10000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of every *Minor amount in this payload. An account has exactly one currency (A§9); mixed-currency amounts are never published in one event.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "lastPaymentAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "When the account last received a payment, RFC3339 UTC with a `Z` offset. Null when no payment has ever been received. A DPD/cure input for delinquency-service and a recency input for decisioning.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-07-15T09:12:00Z"
+      ]
+    },
+    "oldestUnpaidDueDate": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Calendar due date (YYYY-MM-DD) of the oldest still-unpaid instalment or statement on the account. This is the single input delinquency-service uses to compute DPD as `asOf - oldestUnpaidDueDate` (SVC-4), so it must be the *oldest* unpaid date, not the most recent one. Null when nothing is unpaid, i.e. the account is current. Sourced from `cb_account.oldest_unpaid_dt` (plan §6.3) and normalised from YYYYMMDD to an ISO date by the ingestion canonicalizer.",
+      "format": "date",
+      "examples": [
+        "2026-07-20"
+      ]
+    },
+    "changedFields": {
+      "type": "array",
+      "description": "Names of the account fields whose values changed in this update, so consumers can skip work cheaply. account-service hash-compares each inbound canonical snapshot and suppresses no-op noise (SVC-2), so this array is normally non-empty; an empty array means the account was republished without a detected change (forced backfill or replay, D§48/§49).",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][A-Za-z0-9]{1,63}$"
+      },
+      "uniqueItems": true,
+      "examples": [
+        [
+          "overdueAmountMinor",
+          "oldestUnpaidDueDate"
+        ]
+      ]
+    }
+  }
+}

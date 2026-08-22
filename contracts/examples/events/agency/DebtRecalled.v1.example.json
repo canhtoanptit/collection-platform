@@ -1,0 +1,19 @@
+{
+  "eventId": "01M0KK5W68SEFRA5PT71A1K60T",
+  "eventType": "DebtRecalled",
+  "eventVersion": 1,
+  "occurredAt": "2026-12-01T09:00:05Z",
+  "producer": "agency-service",
+  "aggregateType": "AgencyPlacement",
+  "aggregateId": "01M0KK4ZW0R4DXA3JQ7HDWPG0K",
+  "correlationId": "01M0KK4J6G01Y28P7580JE8SQ5",
+  "causationId": "01M0KK58N8B9JD6X3F3RMRZQ32",
+  "payload": {
+    "placementId": "01M0KK4ZW0R4DXA3JQ7HDWPG0K",
+    "agencyId": "01M0KK51TGGFZN8P922WHHCQ75",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "recalledAt": "2026-12-01T09:00:00Z",
+    "reason": "LEGAL_ESCALATION"
+  }
+}

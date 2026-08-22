@@ -1,0 +1,19 @@
+{
+  "eventId": "01M0KK5FG0RG0GVH3G6KY89V93",
+  "eventType": "CaseCreated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T02:25:01Z",
+  "producer": "case-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "causationId": "01M0KK5EGRJV74HM60VSQMWMQS",
+  "payload": {
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "customerId": "01M0KK4K5RM5CNE9ZZQ52EJAC0",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "debtId": "01M0KK4N48MN0R3FG9V9ZCFDY3",
+    "status": "OPEN",
+    "priority": 2
+  }
+}

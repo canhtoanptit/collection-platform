@@ -1,0 +1,29 @@
+{
+  "eventId": "01M0KK5S8GTV8NYBY5FAEJDCKS",
+  "eventType": "PaymentAllocated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-30T08:35:00Z",
+  "producer": "payment-service",
+  "aggregateType": "Payment",
+  "aggregateId": "01M0KK4XXG1FSSYJ3NHH9TX7B8",
+  "correlationId": "01M0KK4H78PB7W9EE66Y92YFCV",
+  "causationId": "01M0KK5R987FFSDZ9NXBHXQTX9",
+  "payload": {
+    "paymentId": "01M0KK4XXG1FSSYJ3NHH9TX7B8",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "currency": "EUR",
+    "allocations": [
+      {
+        "target": "ARRANGEMENT_INSTALLMENT",
+        "arrangementId": "01M0KK4T0G81VHMMR2AHBZ0AMD",
+        "installmentId": "01M0KK4TZRTPXZVY6J9QX9TFBX",
+        "amountMinor": 40000
+      },
+      {
+        "target": "DEBT",
+        "debtId": "01M0KK4N48MN0R3FG9V9ZCFDY3",
+        "amountMinor": 10000
+      }
+    ]
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/case/CaseAssigned.v1.json",
+  "title": "CaseAssigned.v1",
+  "description": "Payload of the CaseAssigned event (A§23). Emitted by case-service — the single producer (A§7.2) — on every successful `POST /v1/cases/{caseId}/assign`, including reassignment (A§15, D§6). Published on `collections.case` keyed by `caseId`, so assignment order for a case is guaranteed and the last event wins (A§26). An assignment must name a team, a collector, or both: an event with neither carries no information and is rejected by the schema. Only the assignment delta travels; the rest of the case is read through `GET /v1/cases/{caseId}`. Rides the A§24 envelope; a breaking change ships as CaseAssigned.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "caseId",
+    "assignedTeam",
+    "assignedCollector"
+  ],
+  "anyOf": [
+    {
+      "properties": {
+        "assignedTeam": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignedTeam"
+      ]
+    },
+    {
+      "properties": {
+        "assignedCollector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignedCollector"
+      ]
+    }
+  ],
+  "properties": {
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the case that was assigned. Equal to the envelope `aggregateId` and the Kafka partition key (A§26)."
+    },
+    "assignedTeam": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Collections team the case now belongs to, or null when the case is assigned to an individual collector without a team. A team code from the operational org model, not a platform ULID.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "EARLY_COLLECTIONS"
+      ]
+    },
+    "assignedCollector": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Identity of the collector the case is now assigned to (the identity-provider subject, which is what the collector workbench and `GET /v1/cases?assignedCollector=` filter on), or null for a team-only assignment awaiting pickup. Not a platform ULID: it is owned by the identity provider (A§61).",
+      "minLength": 1,
+      "maxLength": 128,
+      "examples": [
+        "collector.aoife"
+      ]
+    }
+  }
+}

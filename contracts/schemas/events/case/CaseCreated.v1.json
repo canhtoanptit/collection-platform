@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/case/CaseCreated.v1.json",
+  "title": "CaseCreated.v1",
+  "description": "Payload of the CaseCreated event (A§23). Emitted by case-service — the single producer (A§7.2) — when a collection case is opened, either automatically from `DelinquencyChanged(status=DELINQUENT)` when the account has no open case, or from `POST /v1/cases` (A§15, EXE-1). Published on `collections.case` keyed by `caseId`, so the whole lifecycle of one case is strictly ordered (A§26). At most one case per account may be open at a time (partial unique on account while status is not RESOLVED/CLOSED, A§106 step 7). Minimal by design: identifiers plus the opening state — consumers read the rest through `GET /v1/cases/{caseId}`. Rides the A§24 envelope; a breaking change ships as CaseCreated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "caseId",
+    "customerId",
+    "accountId",
+    "debtId",
+    "status",
+    "priority"
+  ],
+  "properties": {
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the collection case. Equal to the envelope `aggregateId` and the Kafka partition key (A§26)."
+    },
+    "customerId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the customer the case is about (A§9 Collection Case)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the case is about. The one-open-case-per-account invariant is scoped to this identifier."
+    },
+    "debtId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the specific debt the case targets, or null when the case is opened at account level before a debt record exists — which is the normal path, because delinquency is detected on the account (A§9 allows the association to be absent). Structurally always present, so it is required and nullable rather than optional. Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4N48MN0R3FG9V9ZCFDY3"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Case status immediately after creation — normally NEW or OPEN. The enum is exactly the A§10.1 case state machine (NEW, OPEN, ACTIVE, SUSPENDED, ESCALATED, AGENCY, LEGAL, RESOLVED, CLOSED); it is closed because the machine is normative and adding a state is a domain change, not an additive one. Transitions are explicit, guarded and audited (D§76, invariant A§11.1: a closed case rejects everything except reopen).",
+      "enum": [
+        "NEW",
+        "OPEN",
+        "ACTIVE",
+        "SUSPENDED",
+        "ESCALATED",
+        "AGENCY",
+        "LEGAL",
+        "RESOLVED",
+        "CLOSED"
+      ]
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Work priority of the case: 1 is the most urgent, higher numbers are less urgent (A§9, D§6). Unbounded above so that a widened scale stays additive; consumers must not assume a maximum. Recomputed on later delinquency transitions, which is an update rather than a new CaseCreated.",
+      "minimum": 1,
+      "examples": [
+        2
+      ]
+    }
+  }
+}

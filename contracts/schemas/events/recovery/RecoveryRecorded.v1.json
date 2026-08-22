@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/recovery/RecoveryRecorded.v1.json",
+  "title": "RecoveryRecorded.v1",
+  "description": "Payload of the RecoveryRecorded event (A§23). Emitted by recovery-service — the single producer (A§7.2) — when recovered money is attributed to a collections channel (A§5.11, D§11). v1 creates one recovery per PaymentAllocated, deduplicated by `UNIQUE(payment_id)` so a redelivered allocation never double-counts recovery (SVC-8). Published on `collections.recovery` keyed by `recoveryId` (A§25/§26). Feeds gross/net recovery, recovery rate and cost-to-collect (D§11) and the recovery mart (A§47), which is why the attribution channel and the cost sit on the event rather than being recomputed downstream. Rides the A§24 envelope; a breaking change ships as RecoveryRecorded.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recoveryId",
+    "accountId",
+    "caseId",
+    "paymentId",
+    "amountMinor",
+    "currency",
+    "channel",
+    "costMinor"
+  ],
+  "properties": {
+    "recoveryId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the recovery record. Equal to the envelope `aggregateId` and the Kafka partition key (A§26)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the money was recovered on."
+    },
+    "caseId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the case the recovery is attributed to, or null when the money arrived with no open case (a customer who paid after cure). Structurally always present, so required and nullable. case-service appends an activity when non-null. Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4P3G0MQSQ3A1X2PMA6VX"
+      ]
+    },
+    "paymentId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the payment this recovery came from, or null for a non-payment recovery (a write-back, a settlement booked directly, or agency remittance not yet matched to a payment). This is also the deduplication key: recovery-service holds `UNIQUE(payment_id)` so one payment can never produce two recoveries (SVC-8). Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4XXG1FSSYJ3NHH9TX7B8"
+      ]
+    },
+    "amountMinor": {
+      "type": "integer",
+      "description": "Gross amount recovered, in minor units of `currency`. Strictly positive; recovery reversals are a separate business fact, never a negative recovery.",
+      "minimum": 1,
+      "maximum": 9223372036854775807,
+      "examples": [
+        40000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `amountMinor` and `costMinor`.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "channel": {
+      "type": "string",
+      "description": "Which collections channel the recovery is attributed to. DIRECT: recovered by the bank's own collections activity. AGENCY: recovered while the debt was placed with a collection agency, so an agency commission applies (SVC-9). LEGAL: recovered through legal proceedings. Closed enum, because attribution splits the whole recovery book three ways in the recovery mart (A§47) and a fourth channel changes every recovery-rate denominator.",
+      "enum": [
+        "DIRECT",
+        "AGENCY",
+        "LEGAL"
+      ]
+    },
+    "costMinor": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Cost attributed to obtaining this recovery, in minor units of `currency` — agency commission or legal fees. Null when no cost is attributable (the normal case for DIRECT recovery), which is materially different from zero cost and is why this is nullable rather than defaulted to 0. Net recovery is `amountMinor - COALESCE(costMinor, 0)` (D§11). Non-negative when present.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        4000
+      ]
+    }
+  }
+}

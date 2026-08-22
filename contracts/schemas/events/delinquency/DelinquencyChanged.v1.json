@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/delinquency/DelinquencyChanged.v1.json",
+  "title": "DelinquencyChanged.v1",
+  "description": "Payload of the DelinquencyChanged event (A§23). Emitted by delinquency-service — the single producer (A§7.2) — on a *transition* only, never as daily noise: a new delinquency, a bucket roll, a cure, or a re-default (A§5.4, D§5, SVC-4). Published on `collections.delinquency` keyed by `accountId`, so the whole delinquency timeline of one account is strictly ordered (A§26). This is the most load-bearing payload on the platform: case-service creates a case from `status=DELINQUENT` when no open case exists, resolves it with outcome CURED on `status=CURED`, and otherwise re-prioritises (EXE-1); decisioning reads dpd/bucket/overdue as context (A§52). Rides the A§24 envelope; a breaking change ships as DelinquencyChanged.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accountId",
+    "customerId",
+    "dpd",
+    "previousBucket",
+    "newBucket",
+    "status",
+    "overdueAmountMinor",
+    "currency"
+  ],
+  "properties": {
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the delinquent account. Delinquency state is one-per-account, so this is also the envelope `aggregateId` and the Kafka partition key (A§23 names `accountId` as the key for this event). The internal `delinquencyId` surrogate (A§9) is deliberately not published: it would be a second identity for the same aggregate."
+    },
+    "customerId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the owning collection customer, so case-service can open a case without a synchronous call back to account-service (A§7.3: no service reads another service's store)."
+    },
+    "dpd": {
+      "type": "integer",
+      "description": "Days past due at the moment of the transition, computed as `asOf - oldestUnpaidDueDate` in whole UTC days (SVC-4). 0 means nothing is past due, which is the value that accompanies `status=CURED`. Explicit unit in the name per the time conventions.",
+      "minimum": 0,
+      "maximum": 36500,
+      "examples": [
+        35
+      ]
+    },
+    "previousBucket": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Bucket code the account was in before this transition, or null when it had no delinquency bucket yet (first delinquency, or a re-default after a cure). Not an enum: buckets are configurable versioned rows, never hard-coded (D§5), so consumers must treat bucket codes as opaque data and read the current definitions from `GET /v1/delinquency/bucket-configs`.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "DPD_1_30",
+        "CURRENT"
+      ]
+    },
+    "newBucket": {
+      "type": "string",
+      "description": "Bucket code the account is in after this transition, taken from the bucket configuration version in force at `occurredAt`. Same opaque-code rule as `previousBucket`: configurable, never a closed enum (D§5).",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "DPD_31_60",
+        "CURRENT"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Delinquency lifecycle status reached by this transition. DELINQUENT: the account is past due (initial entry or a roll between buckets). CURED: nothing is overdue any more (dpd 0, overdueAmountMinor 0) — case-service resolves the case with outcome CURED. REDEFAULTED: the account went past due again inside the re-default observation window after a cure, which is a distinct business fact from a first delinquency and is reported separately in roll-rate analytics (D§5, A§47).",
+      "enum": [
+        "DELINQUENT",
+        "CURED",
+        "REDEFAULTED"
+      ]
+    },
+    "overdueAmountMinor": {
+      "type": "integer",
+      "description": "Amount past due at the moment of the transition, in minor units of `currency`, as last published by account-service. Zero accompanies `status=CURED`. Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        50000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `overdueAmountMinor`; the account's single currency.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    }
+  }
+}

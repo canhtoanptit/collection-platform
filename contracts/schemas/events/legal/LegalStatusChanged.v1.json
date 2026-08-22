@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/legal/LegalStatusChanged.v1.json",
+  "title": "LegalStatusChanged.v1",
+  "description": "Payload of the LegalStatusChanged event (A§23). Emitted by legal-service — the single producer (A§7.2) — once per transition of a legal case, including the first transition into OPEN (A§5.13, D§13). Published on `collections.legal` keyed by `legalCaseId` (A§23/§25), so the whole legal history of one case is strictly ordered and the append-only status history can be rebuilt from the topic (D§3.6). Legal recovery is deliberately a separate bounded capability integrated through events, never legal workflow embedded in case-service (D§13). Load-bearing for invariant A§11.6: agency-service maintains its read model from this event and rejects a placement while legal ownership is active, the mirror of legal-service's own referral guard. Referral-level transitions (REQUESTED -> ACCEPTED|REJECTED) are internal to legal-service and are not published here: this event is about the legal case, which only exists once a referral has been accepted. Rides the A§24 envelope; a breaking change ships as LegalStatusChanged.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "legalCaseId",
+    "accountId",
+    "caseId",
+    "fromStatus",
+    "toStatus",
+    "reason"
+  ],
+  "properties": {
+    "legalCaseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the legal case. Equal to the envelope `aggregateId` and the Kafka partition key (A§23)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account under legal recovery — the key on which the A§11.6 agency/legal mutual exclusion is evaluated in both directions."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the collection case the legal recovery escalates from (A§10.1 ESCALATED -> LEGAL), so the transition lands as a case activity on the right case."
+    },
+    "fromStatus": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Legal case status before this transition, or null for the first transition — the creation of the legal case, which has no predecessor. Structurally always present, so required and nullable rather than optional. Same closed vocabulary as `toStatus`.",
+      "enum": [
+        "OPEN",
+        "IN_PROCEEDINGS",
+        "JUDGMENT",
+        "ENFORCEMENT",
+        "CLOSED",
+        null
+      ]
+    },
+    "toStatus": {
+      "type": "string",
+      "description": "Legal case status reached by this transition. Closed enum, exactly the legal case machine OPEN -> IN_PROCEEDINGS -> JUDGMENT -> ENFORCEMENT -> CLOSED (SVC-10): the states are the normative lifecycle, transitions are explicit and audited, and adding one is a domain change rather than an additive contract change. Any status other than CLOSED means legal ownership is active, which blocks agency placement (A§11.6).",
+      "enum": [
+        "OPEN",
+        "IN_PROCEEDINGS",
+        "JUDGMENT",
+        "ENFORCEMENT",
+        "CLOSED"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Why the status changed, or null when the transition is the unremarkable next step of the process and no reason was recorded. Open SCREAMING_SNAKE vocabulary: legal reasons are jurisdiction-specific and cannot be enumerated centrally. Structurally always present, so required and nullable.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,47}$",
+      "examples": [
+        "PROCEEDINGS_ISSUED",
+        "JUDGMENT_OBTAINED",
+        "ENFORCEMENT_STARTED",
+        "SETTLED",
+        "CUSTOMER_INSOLVENT",
+        "WITHDRAWN"
+      ]
+    }
+  }
+}

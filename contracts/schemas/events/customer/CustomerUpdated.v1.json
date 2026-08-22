@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/customer/CustomerUpdated.v1.json",
+  "title": "CustomerUpdated.v1",
+  "description": "Payload of the CustomerUpdated event (A§23). Emitted by customer-service — the single producer (A§7.2) — whenever the collection-specific customer profile it owns changes materially: status, segment or derived contactability (A§5.1, A§9 Customer). Published on `collections.customer` keyed by `customerId` (A§25/§26). Deliberately minimal: identifiers plus the collection-relevant deltas, never a full profile dump — consumers that need the whole entity call `GET /v1/customers/{customerId}`, and PII beyond these fields is never put on the bus (D§45). Rides the A§24 envelope; a breaking change ships as CustomerUpdated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "customerId",
+    "status",
+    "segment",
+    "contactability",
+    "changedFields"
+  ],
+  "properties": {
+    "customerId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the collection customer profile. Equal to the envelope `aggregateId` and the Kafka partition key of this event. The upstream enterprise/source identifier (`enterpriseCustomerId`, A§9) is not republished here: it is a source key and is resolved through the customer API."
+    },
+    "status": {
+      "type": "string",
+      "description": "Collection status of the customer as held by customer-service after this change. Open SCREAMING_SNAKE vocabulary rather than a closed enum because the values are driven by the upstream customer master (a new source status must not force a contract v2).",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "ACTIVE",
+        "DECEASED",
+        "BANKRUPT",
+        "CLOSED"
+      ]
+    },
+    "segment": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Collections segment the customer currently falls into, used as a decisioning eligibility input (A§52 context `customer.segment`). Null when the customer has not been segmented yet. Always present as a property; null means 'no segment', never 'unchanged'.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "RETAIL_EARLY",
+        "RETAIL_LATE",
+        "SME"
+      ]
+    },
+    "contactability": {
+      "type": "string",
+      "description": "Derived contactability after applying collection constraints over communication preferences — constraints always win (A§5.1, SVC-1). Closed enum: CONTACTABLE (any permitted channel may be used), RESTRICTED (some channels are forbidden; the treatment layer must re-check the policy snapshot), DO_NOT_CONTACT (no outbound contact permitted at all). Consumers must treat this as advisory only: the authoritative guard is the fresh policy fetch performed immediately before dispatch, which fails closed (DEC-16).",
+      "enum": [
+        "CONTACTABLE",
+        "RESTRICTED",
+        "DO_NOT_CONTACT"
+      ]
+    },
+    "changedFields": {
+      "type": "array",
+      "description": "Names of the customer fields whose values changed in this update, so consumers can skip work cheaply. customer-service hash-compares each inbound canonical snapshot and suppresses no-op events (SVC-1), so this array is normally non-empty; an empty array means the profile was republished without a detected change (forced backfill or replay, D§48/§49).",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][A-Za-z0-9]{1,63}$"
+      },
+      "uniqueItems": true,
+      "examples": [
+        [
+          "contactability",
+          "segment"
+        ]
+      ]
+    }
+  }
+}

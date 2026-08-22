@@ -1,0 +1,21 @@
+{
+  "eventId": "01M0KK5T7RRNEP5S7FDMGWG2X0",
+  "eventType": "RecoveryRecorded",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-30T08:35:02Z",
+  "producer": "recovery-service",
+  "aggregateType": "Recovery",
+  "aggregateId": "01M0KK4YWR6AFT5VPX4GNG99VJ",
+  "correlationId": "01M0KK4H78PB7W9EE66Y92YFCV",
+  "causationId": "01M0KK5S8GTV8NYBY5FAEJDCKS",
+  "payload": {
+    "recoveryId": "01M0KK4YWR6AFT5VPX4GNG99VJ",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "paymentId": "01M0KK4XXG1FSSYJ3NHH9TX7B8",
+    "amountMinor": 50000,
+    "currency": "EUR",
+    "channel": "DIRECT",
+    "costMinor": null
+  }
+}

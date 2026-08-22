@@ -1,0 +1,893 @@
+asyncapi: 3.0.0
+
+info:
+  title: Collections Platform — event topic index
+  version: 1.0.0
+  description: |
+    **The normative topic -> partition-key -> payload-schema map for the whole platform**
+    (consolidating A§23 event catalogue, A§25 topics and A§26 ordering). Authored by CON-2;
+    it is the single place that answers "which topic carries this event, what is it keyed by,
+    and which schema validates it". `deployment/kafka/topics.yaml` (FND-5) is the *operational*
+    declaration of the same topics — partitions, replication and retention live there, not here,
+    so the two never drift. Auto-create is off: a topic that is not in both files does not exist.
+
+    ## Every message rides the A§24 envelope
+
+    The Kafka message value is **always** an `EventEnvelope.v1` document
+    (`../schemas/envelope/EventEnvelope.v1.json`) — exactly the ten fields
+    `eventId eventType eventVersion occurredAt producer aggregateType aggregateId correlationId
+    causationId payload`, with no extras. The `payload.schema` `$ref` under each message below is
+    the schema of the envelope's **`payload` member**, not of the whole wire document:
+
+    ```text
+    wire value = EventEnvelope.v1 {
+      eventType:    <the message name below>
+      eventVersion: 1
+      payload:      <validated against the $ref'd schema>
+    }
+    ```
+
+    That indirection is what lets a consumer locate a payload schema mechanically from an
+    envelope alone — `schemas/events/<context>/<eventType>.v<eventVersion>.json` — which is how
+    `platform/events` validates at runtime and how every golden example under
+    `contracts/examples/events/**` is checked (envelope + payload, `contracts/validate_test.go`).
+    Envelopes are built and validated only through `platform/events`; no service hand-rolls one.
+
+    ## Ordering is per aggregate, never global (A§26)
+
+    Each message declares `x-partition-key`: the **payload field whose value is used as the Kafka
+    message key**, which is also the envelope `aggregateId`. Ordering guarantees exist only within
+    one key. Nothing on this platform assumes global ordering, and consumers must tolerate
+    cross-key interleaving.
+
+    `x-partition-key` is an extension rather than the Kafka binding's `key` object on purpose: the
+    binding describes the *schema* of the key, whereas the thing that has to be normative here is
+    *which payload field supplies it*. Two channels carry more than one key, which is exactly why
+    the declaration is per message and not only per channel:
+
+    - `collections.arrangement` — `promiseId` for promise events, `arrangementId` for arrangement
+      events (A§23). Promises and arrangements are distinct aggregates sharing one context topic.
+    - `collections.strategy` — `strategyId` for strategy events, `ruleSetId` for `RuleSetPublished`,
+      `configId` for `GuardrailConfigPublished`.
+
+    ## Producers
+
+    One producer per event type (A§7.2) — declared per message as `x-producer`, and per channel as
+    `x-producers` where a context topic carries more than one producer. Two cases are deliberate and
+    easy to get wrong:
+
+    - `collections.treatment` — `TreatmentSelected` is emitted by **decision-service** (in the same
+      transaction as the decision audit row), while `TreatmentExecuted` / `TreatmentSuppressed` are
+      emitted by **treatment-service**.
+    - `collections.contact` — **contact-service alone** emits contact events. treatment-service
+      *calls* the contact API on dispatch and again on the provider webhook, and the collector
+      workbench records manual contacts through the same endpoint (plan §6.4), so contact history
+      has exactly one source of truth for frequency caps.
+
+    ## Dead letter queues (A§27)
+
+    Not modelled as channels here, because a DLQ is per *consumer*, carries the message that failed
+    rather than a contract of its own, and is named by convention:
+
+    - `collections.dlq.<service>` — one per domain-service consumer group.
+    - `dlq.ingestion.v1` — one for the whole ingestion plane.
+
+    A dead-lettered message keeps its original envelope byte-for-byte and adds error headers
+    (`x-original-topic`, `x-original-partition`, `x-original-offset`, `x-error-code`,
+    `x-error-message`, `x-retry-count`, plus the `correlationId` header). The policy is retry with
+    backoff, then DLQ, then alert, investigate and replay — **never block a partition forever and
+    never drop a message**. Replay re-publishes the original envelope, and consumers stay safe
+    because delivery is at-least-once with inbox dedupe on `(consumer, eventId)` (D§3.5).
+
+    See `x-dead-letter-queues` at the end of this document for the machine-readable form.
+
+    ## Topics deliberately absent from this index
+
+    Raw ingestion topics are internal to `ingestion/` and carry no platform contract, so they are
+    not published here: `cdc.corebank.public.cb_*` (Debezium), `cdc.corebank.schema-history`,
+    `connect.{offsets,configs,status}` and `ingestion.webhook.payment.v1` (raw provider webhook,
+    schema `../schemas/ingestion/PaymentWebhook.v1.json`). Domain services consume **only** the
+    canonical `ingestion.*.v1` topics below (plan §6.2) — never raw CDC or raw webhooks.
+
+    ## Versioning and immutability (D§29)
+
+    The meaning of an existing `(eventType, eventVersion)` pair never changes. A breaking payload
+    change ships as a new version (`PaymentReceived.v2`) published on the same topic alongside v1
+    until every consumer has migrated; consumers ignore unknown event types and unknown versions
+    rather than failing. Released files under `contracts/**` are immutable: this file changes only
+    by adding channels or messages before the `contracts-v1.0` tag, and after it by shipping
+    `collections.v2.yaml`.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  tags:
+    - name: contracts
+      description: Frozen at tag contracts-v1.0.
+
+defaultContentType: application/json
+
+servers:
+  msk-dev:
+    host: msk.colx-dev.internal:9098
+    protocol: kafka-secure
+    description: |
+      The dev Amazon MSK cluster (FND-5). The host is a placeholder for documentation only — real
+      bootstrap servers are Terraform outputs delivered to workloads as ExternalSecrets, never
+      committed. Authentication is IAM (aws-msk-iam-auth) over TLS; there is no plaintext listener.
+
+channels:
+  collections.customer:
+    address: collections.customer
+    title: Customer context
+    description: Collection-specific customer profile changes (A§5.1). Keyed by `customerId`.
+    x-context: customer
+    x-partition-key: customerId
+    x-producers: [customer-service]
+    messages:
+      CustomerUpdated:
+        $ref: '#/components/messages/CustomerUpdated'
+
+  collections.account:
+    address: collections.account
+    title: Account context
+    description: |
+      Account state, balance and overdue changes (A§5.2). Keyed by `accountId`, which is what gives
+      delinquency-service a strictly ordered per-account view of its only upstream truth.
+    x-context: account
+    x-partition-key: accountId
+    x-producers: [account-service]
+    messages:
+      AccountUpdated:
+        $ref: '#/components/messages/AccountUpdated'
+
+  collections.debt:
+    address: collections.debt
+    title: Debt context
+    description: Debt exposure and component changes (A§5.3). Keyed by `debtId`.
+    x-context: debt
+    x-partition-key: debtId
+    x-producers: [debt-service]
+    messages:
+      DebtUpdated:
+        $ref: '#/components/messages/DebtUpdated'
+
+  collections.delinquency:
+    address: collections.delinquency
+    title: Delinquency context
+    description: |
+      Delinquency lifecycle transitions — entry, bucket roll, cure, re-default (A§5.4, D§5).
+      Keyed by `accountId`, not by a delinquency surrogate: delinquency state is one-per-account
+      and A§23 names `accountId` as the key, so the whole delinquency timeline of an account is
+      strictly ordered.
+    x-context: delinquency
+    x-partition-key: accountId
+    x-producers: [delinquency-service]
+    messages:
+      DelinquencyChanged:
+        $ref: '#/components/messages/DelinquencyChanged'
+
+  collections.case:
+    address: collections.case
+    title: Case context
+    description: Collection case lifecycle (A§5.5, A§10.1). Keyed by `caseId`.
+    x-context: case
+    x-partition-key: caseId
+    x-producers: [case-service]
+    messages:
+      CaseCreated:
+        $ref: '#/components/messages/CaseCreated'
+      CaseAssigned:
+        $ref: '#/components/messages/CaseAssigned'
+      CaseResolved:
+        $ref: '#/components/messages/CaseResolved'
+
+  collections.strategy:
+    address: collections.strategy
+    title: Strategy context
+    description: |
+      Strategy governance and published decisioning configuration (A§5.6, D§77). **Three partition
+      keys on one topic** — `strategyId` for the strategy lifecycle, `ruleSetId` for published rule
+      sets, `configId` for published guardrail configuration — because they are three independent
+      aggregates that share one governance context. See each message's `x-partition-key`.
+    x-context: strategy
+    x-partition-key: strategyId | ruleSetId | configId
+    x-producers: [strategy-service]
+    messages:
+      StrategyActivated:
+        $ref: '#/components/messages/StrategyActivated'
+      StrategyStateChanged:
+        $ref: '#/components/messages/StrategyStateChanged'
+      StrategyRetired:
+        $ref: '#/components/messages/StrategyRetired'
+      RuleSetPublished:
+        $ref: '#/components/messages/RuleSetPublished'
+      GuardrailConfigPublished:
+        $ref: '#/components/messages/GuardrailConfigPublished'
+
+  collections.decision:
+    address: collections.decision
+    title: Decision context
+    description: |
+      Decisions taken, one event per decision, emitted in the same transaction as the append-only
+      decision audit row (A§5.7, D§39). Keyed by `decisionId`.
+    x-context: decision
+    x-partition-key: decisionId
+    x-producers: [decision-service]
+    messages:
+      DecisionMade:
+        $ref: '#/components/messages/DecisionMade'
+
+  collections.treatment:
+    address: collections.treatment
+    title: Treatment context
+    description: |
+      Treatment selection and execution (A§5.8, D§9). Keyed by `caseId` for all three messages, so
+      one case's treatments can never race. **Two producers**: decision-service emits
+      `TreatmentSelected`, treatment-service emits `TreatmentExecuted` and `TreatmentSuppressed`.
+    x-context: treatment
+    x-partition-key: caseId
+    x-producers: [decision-service, treatment-service]
+    messages:
+      TreatmentSelected:
+        $ref: '#/components/messages/TreatmentSelected'
+      TreatmentExecuted:
+        $ref: '#/components/messages/TreatmentExecuted'
+      TreatmentSuppressed:
+        $ref: '#/components/messages/TreatmentSuppressed'
+
+  collections.contact:
+    address: collections.contact
+    title: Contact context
+    description: |
+      Contact activity (A§5.9 contact recording, plan §6.4). Keyed by `contactId`, so an attempt and
+      its completion land on the same partition in order. contact-service is the only producer.
+    x-context: contact
+    x-partition-key: contactId
+    x-producers: [contact-service]
+    messages:
+      ContactAttempted:
+        $ref: '#/components/messages/ContactAttempted'
+      ContactCompleted:
+        $ref: '#/components/messages/ContactCompleted'
+
+  collections.arrangement:
+    address: collections.arrangement
+    title: Arrangement context (promises and payment plans)
+    description: |
+      Promises to pay and structured payment plans (A§5.9, A§10.2, A§10.3, D§10). **Two partition
+      keys on one topic**: promise events are keyed by `promiseId`, arrangement events by
+      `arrangementId` (A§23). A promise is a customer commitment; an arrangement is the plan — they
+      are distinct aggregates, so keying them together would serialise unrelated work and keying
+      arrangements by promise would break plans created without one.
+    x-context: arrangement
+    x-partition-key: promiseId | arrangementId
+    x-producers: [arrangement-service]
+    messages:
+      PromiseCreated:
+        $ref: '#/components/messages/PromiseCreated'
+      PromiseBroken:
+        $ref: '#/components/messages/PromiseBroken'
+      ArrangementCreated:
+        $ref: '#/components/messages/ArrangementCreated'
+      ArrangementBroken:
+        $ref: '#/components/messages/ArrangementBroken'
+
+  collections.payment:
+    address: collections.payment
+    title: Payment context
+    description: |
+      Payment matching and allocation (A§5.10). Keyed by `paymentId`, which is what guarantees a
+      consumer sees `PaymentReceived` before the `PaymentAllocated` for the same payment — both are
+      enqueued through the outbox in one transaction.
+    x-context: payment
+    x-partition-key: paymentId
+    x-producers: [payment-service]
+    messages:
+      PaymentReceived:
+        $ref: '#/components/messages/PaymentReceived'
+      PaymentAllocated:
+        $ref: '#/components/messages/PaymentAllocated'
+
+  collections.recovery:
+    address: collections.recovery
+    title: Recovery context
+    description: Recovery attribution, amount and cost (A§5.11, D§11). Keyed by `recoveryId`.
+    x-context: recovery
+    x-partition-key: recoveryId
+    x-producers: [recovery-service]
+    messages:
+      RecoveryRecorded:
+        $ref: '#/components/messages/RecoveryRecorded'
+
+  collections.agency:
+    address: collections.agency
+    title: Agency context
+    description: |
+      Debt placement with and recall from external collection agencies (A§5.12, D§12). Keyed by
+      `placementId`, so both events of one placement stay ordered. Carries one half of the A§11.6
+      agency/legal mutual-exclusion invariant.
+    x-context: agency
+    x-partition-key: placementId
+    x-producers: [agency-service]
+    messages:
+      DebtPlaced:
+        $ref: '#/components/messages/DebtPlaced'
+      DebtRecalled:
+        $ref: '#/components/messages/DebtRecalled'
+
+  collections.legal:
+    address: collections.legal
+    title: Legal context
+    description: |
+      Legal case status transitions (A§5.13, D§13). Keyed by `legalCaseId`, so the append-only legal
+      status history can be rebuilt from the topic. Carries the other half of the A§11.6
+      agency/legal mutual-exclusion invariant.
+    x-context: legal
+    x-partition-key: legalCaseId
+    x-producers: [legal-service]
+    messages:
+      LegalStatusChanged:
+        $ref: '#/components/messages/LegalStatusChanged'
+
+  ingestion.customers.v1:
+    address: ingestion.customers.v1
+    title: Canonical customer snapshots
+    description: |
+      The canonical bridge from raw CDC/file ingestion to the domain (A§30, plan §6.2). Emitted by
+      the stateless canonicalizer with deterministic event ids derived from `(source, PK, LSN)` so
+      replays dedupe downstream, and with source NUMERIC strings already converted to int64 minor
+      units. Keyed by the **source** customer identifier, because the platform ULID does not exist
+      until customer-service mints one.
+    x-context: ingestion
+    x-partition-key: customerId
+    x-producers: [ingestion-canonicalizer]
+    messages:
+      CustomerSnapshot:
+        $ref: '#/components/messages/CustomerSnapshot'
+
+  ingestion.accounts.v1:
+    address: ingestion.accounts.v1
+    title: Canonical account snapshots
+    description: |
+      Canonical account state (A§30, plan §6.2). Keyed by the source account identifier. Carries the
+      delinquency inputs `oldestUnpaidDueDate`, `overdueAmountMinor`, `minimumDueMinor`,
+      `currentBalanceMinor` and `lastPaymentAt`, which account-service republishes as `AccountUpdated`.
+    x-context: ingestion
+    x-partition-key: accountId
+    x-producers: [ingestion-canonicalizer]
+    messages:
+      AccountSnapshot:
+        $ref: '#/components/messages/AccountSnapshot'
+
+  ingestion.debts.v1:
+    address: ingestion.debts.v1
+    title: Canonical debt snapshots
+    description: Canonical debt exposure and components (A§30, plan §6.2/§6.3). Keyed by the source debt identifier.
+    x-context: ingestion
+    x-partition-key: debtId
+    x-producers: [ingestion-canonicalizer]
+    messages:
+      DebtSnapshot:
+        $ref: '#/components/messages/DebtSnapshot'
+
+  ingestion.payments.v1:
+    address: ingestion.payments.v1
+    title: Canonical payment notifications
+    description: |
+      Canonical payment notifications (A§30, plan §6.2). Keyed by the source `accountId` so a single
+      account's payments arrive in order. Payments arrive **twice by design** — intraday by webhook
+      and in batch by file/CDC — and payment-service's natural key
+      `UNIQUE(sourceSystem, externalPaymentRef)` absorbs the overlap (D§47), which is why duplicate
+      delivery on this topic is normal traffic rather than an incident.
+    x-context: ingestion
+    x-partition-key: accountId
+    x-producers: [ingestion-canonicalizer]
+    messages:
+      PaymentNotification:
+        $ref: '#/components/messages/PaymentNotification'
+
+  ingestion.file.lifecycle.v1:
+    address: ingestion.file.lifecycle.v1
+    title: Ingestion file lifecycle
+    description: |
+      File-registry state transitions (A§36), the published projection of the append-only
+      `file_state_transition` audit. Keyed by `fileId` (a `FIL_`-prefixed ULID). Consumed by Airflow
+      sensors and the operational dashboard — **never by domain services**, which consume only the
+      canonical `ingestion.*.v1` topics above.
+    x-context: ingestion
+    x-partition-key: fileId
+    x-producers: [ingestion-control-plane]
+    messages:
+      FileStatusChanged:
+        $ref: '#/components/messages/FileStatusChanged'
+
+components:
+  messageTraits:
+    collectionsEvent:
+      contentType: application/json
+      description: |
+        Wire value is an `EventEnvelope.v1` (A§24) whose `payload` member is validated against the
+        schema referenced by this message. Kafka headers mirror the envelope for cheap routing and
+        log correlation without deserialising the value.
+      headers:
+        type: object
+        title: Kafka message headers
+        description: |
+          Deliberately open (`additionalProperties` unset): tracing and DLQ headers are added by
+          `platform/kafka`, `platform/otelkit` and the DLQ producer. Only these three are contractual.
+        required: [eventType, eventVersion, correlationId]
+        properties:
+          eventType:
+            type: string
+            description: Copy of the envelope `eventType`, so a consumer can filter without parsing the value.
+          eventVersion:
+            type: string
+            description: Copy of the envelope `eventVersion`, as a decimal string (Kafka headers are bytes, not JSON).
+          correlationId:
+            type: string
+            description: Copy of the envelope `correlationId` (ULID), propagated end to end per A§97.
+
+  messages:
+    CustomerUpdated:
+      name: CustomerUpdated
+      title: CustomerUpdated (v1)
+      summary: Collection customer profile changed — status, segment or derived contactability.
+      x-partition-key: customerId
+      x-producer: customer-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/customer/CustomerUpdated.v1.json
+
+    AccountUpdated:
+      name: AccountUpdated
+      title: AccountUpdated (v1)
+      summary: Account state changed — carries the delinquency inputs (overdue, minimum due, balance, oldest unpaid due date).
+      x-partition-key: accountId
+      x-producer: account-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/account/AccountUpdated.v1.json
+
+    DebtUpdated:
+      name: DebtUpdated
+      title: DebtUpdated (v1)
+      summary: Debt exposure changed — principal, interest, fees, penalties and recoverable amount.
+      x-partition-key: debtId
+      x-producer: debt-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/debt/DebtUpdated.v1.json
+
+    DelinquencyChanged:
+      name: DelinquencyChanged
+      title: DelinquencyChanged (v1)
+      summary: Delinquency transition — new delinquency, bucket roll, cure or re-default. Drives case creation and resolution.
+      x-partition-key: accountId
+      x-producer: delinquency-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/delinquency/DelinquencyChanged.v1.json
+
+    CaseCreated:
+      name: CaseCreated
+      title: CaseCreated (v1)
+      summary: Collection case opened, automatically from a delinquency or explicitly via the case API.
+      x-partition-key: caseId
+      x-producer: case-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/case/CaseCreated.v1.json
+
+    CaseAssigned:
+      name: CaseAssigned
+      title: CaseAssigned (v1)
+      summary: Case assigned or reassigned to a team, a collector, or both.
+      x-partition-key: caseId
+      x-producer: case-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/case/CaseAssigned.v1.json
+
+    CaseResolved:
+      name: CaseResolved
+      title: CaseResolved (v1)
+      summary: Case resolved with an outcome — terminal for treatment, placement and escalation.
+      x-partition-key: caseId
+      x-producer: case-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/case/CaseResolved.v1.json
+
+    StrategyActivated:
+      name: StrategyActivated
+      title: StrategyActivated (v1)
+      summary: A strategy version became active. A strategy version is immutable once activated (invariant A§11.3).
+      x-partition-key: strategyId
+      x-producer: strategy-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/strategy/StrategyActivated.v1.json
+
+    StrategyStateChanged:
+      name: StrategyStateChanged
+      title: StrategyStateChanged (v1)
+      summary: Strategy governance transition (D§77 lifecycle), append-only.
+      x-partition-key: strategyId
+      x-producer: strategy-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/strategy/StrategyStateChanged.v1.json
+
+    StrategyRetired:
+      name: StrategyRetired
+      title: StrategyRetired (v1)
+      summary: A strategy version was retired and will not be selected again.
+      x-partition-key: strategyId
+      x-producer: strategy-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/strategy/StrategyRetired.v1.json
+
+    RuleSetPublished:
+      name: RuleSetPublished
+      title: RuleSetPublished (v1)
+      summary: A RULES or POLICY rule set version was published. Keyed by ruleSetId, not strategyId.
+      x-partition-key: ruleSetId
+      x-producer: strategy-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/strategy/RuleSetPublished.v1.json
+
+    GuardrailConfigPublished:
+      name: GuardrailConfigPublished
+      title: GuardrailConfigPublished (v1)
+      summary: Contact windows and frequency caps were published. Keyed by configId, not strategyId.
+      x-partition-key: configId
+      x-producer: strategy-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/strategy/GuardrailConfigPublished.v1.json
+
+    DecisionMade:
+      name: DecisionMade
+      title: DecisionMade (v1)
+      summary: A decision was taken and audited, in one transaction with the append-only audit row.
+      x-partition-key: decisionId
+      x-producer: decision-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/decision/DecisionMade.v1.json
+
+    TreatmentSelected:
+      name: TreatmentSelected
+      title: TreatmentSelected (v1)
+      summary: A treatment was selected for a case. Emitted by decision-service, consumed by treatment-service.
+      x-partition-key: caseId
+      x-producer: decision-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/treatment/TreatmentSelected.v1.json
+
+    TreatmentExecuted:
+      name: TreatmentExecuted
+      title: TreatmentExecuted (v1)
+      summary: A treatment was dispatched through a channel adapter.
+      x-partition-key: caseId
+      x-producer: treatment-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/treatment/TreatmentExecuted.v1.json
+
+    TreatmentSuppressed:
+      name: TreatmentSuppressed
+      title: TreatmentSuppressed (v1)
+      summary: A treatment was suppressed by an execution guardrail — policy re-check, contact window or frequency cap.
+      x-partition-key: caseId
+      x-producer: treatment-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/treatment/TreatmentSuppressed.v1.json
+
+    ContactAttempted:
+      name: ContactAttempted
+      title: ContactAttempted (v1)
+      summary: A contact was recorded on a channel. No message content ever travels on the bus.
+      x-partition-key: contactId
+      x-producer: contact-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/contact/ContactAttempted.v1.json
+
+    ContactCompleted:
+      name: ContactCompleted
+      title: ContactCompleted (v1)
+      summary: A contact's outcome was recorded — the disposition or the provider delivery result.
+      x-partition-key: contactId
+      x-producer: contact-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/contact/ContactCompleted.v1.json
+
+    PromiseCreated:
+      name: PromiseCreated
+      title: PromiseCreated (v1)
+      summary: A customer promised to pay one amount by one date.
+      x-partition-key: promiseId
+      x-producer: arrangement-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/arrangement/PromiseCreated.v1.json
+
+    PromiseBroken:
+      name: PromiseBroken
+      title: PromiseBroken (v1)
+      summary: A promise passed its due date unsatisfied, detected by the deterministic breach tick.
+      x-partition-key: promiseId
+      x-producer: arrangement-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/arrangement/PromiseBroken.v1.json
+
+    ArrangementCreated:
+      name: ArrangementCreated
+      title: ArrangementCreated (v1)
+      summary: A payment plan was created. Embeds the full instalment schedule so allocation needs no callback.
+      x-partition-key: arrangementId
+      x-producer: arrangement-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/arrangement/ArrangementCreated.v1.json
+
+    ArrangementBroken:
+      name: ArrangementBroken
+      title: ArrangementBroken (v1)
+      summary: An active payment plan was broken — missed instalment past grace, or an explicit break.
+      x-partition-key: arrangementId
+      x-producer: arrangement-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/arrangement/ArrangementBroken.v1.json
+
+    PaymentReceived:
+      name: PaymentReceived
+      title: PaymentReceived (v1)
+      summary: A payment was matched to an account. Exactly one per real-world payment, natural-key deduped.
+      x-partition-key: paymentId
+      x-producer: payment-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/payment/PaymentReceived.v1.json
+
+    PaymentAllocated:
+      name: PaymentAllocated
+      title: PaymentAllocated (v1)
+      summary: A payment was attributed to instalments and/or debt. The platform's money-movement fan-out event.
+      x-partition-key: paymentId
+      x-producer: payment-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/payment/PaymentAllocated.v1.json
+
+    RecoveryRecorded:
+      name: RecoveryRecorded
+      title: RecoveryRecorded (v1)
+      summary: Recovered money was attributed to a channel (DIRECT, AGENCY or LEGAL) with its cost.
+      x-partition-key: recoveryId
+      x-producer: recovery-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/recovery/RecoveryRecorded.v1.json
+
+    DebtPlaced:
+      name: DebtPlaced
+      title: DebtPlaced (v1)
+      summary: A debt is now being worked by an external agency. Blocks legal referral (A§11.6).
+      x-partition-key: placementId
+      x-producer: agency-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/agency/DebtPlaced.v1.json
+
+    DebtRecalled:
+      name: DebtRecalled
+      title: DebtRecalled (v1)
+      summary: A placement ended and the debt is back under bank control. Releases the A§11.6 lock.
+      x-partition-key: placementId
+      x-producer: agency-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/agency/DebtRecalled.v1.json
+
+    LegalStatusChanged:
+      name: LegalStatusChanged
+      title: LegalStatusChanged (v1)
+      summary: A legal case transitioned. Any status other than CLOSED blocks agency placement (A§11.6).
+      x-partition-key: legalCaseId
+      x-producer: legal-service
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/legal/LegalStatusChanged.v1.json
+
+    CustomerSnapshot:
+      name: CustomerSnapshot
+      title: CustomerSnapshot (v1)
+      summary: Canonical customer state from the source system, converted and keyed by the canonicalizer.
+      x-partition-key: customerId
+      x-producer: ingestion-canonicalizer
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/ingestion/CustomerSnapshot.v1.json
+
+    AccountSnapshot:
+      name: AccountSnapshot
+      title: AccountSnapshot (v1)
+      summary: Canonical account state, carrying the delinquency DPD inputs.
+      x-partition-key: accountId
+      x-producer: ingestion-canonicalizer
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/ingestion/AccountSnapshot.v1.json
+
+    DebtSnapshot:
+      name: DebtSnapshot
+      title: DebtSnapshot (v1)
+      summary: Canonical debt exposure and components.
+      x-partition-key: debtId
+      x-producer: ingestion-canonicalizer
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/ingestion/DebtSnapshot.v1.json
+
+    PaymentNotification:
+      name: PaymentNotification
+      title: PaymentNotification (v1)
+      summary: Canonical payment notification. Arrives twice by design (webhook + batch); deduped by natural key.
+      x-partition-key: accountId
+      x-producer: ingestion-canonicalizer
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/ingestion/PaymentNotification.v1.json
+
+    FileStatusChanged:
+      name: FileStatusChanged
+      title: FileStatusChanged (v1)
+      summary: A file-registry state transition (A§36), the published projection of the append-only audit.
+      x-partition-key: fileId
+      x-producer: ingestion-control-plane
+      traits:
+        - $ref: '#/components/messageTraits/collectionsEvent'
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schemas/events/ingestion/FileStatusChanged.v1.json
+
+x-dead-letter-queues:
+  description: |
+    A§27 convention, machine-readable. DLQs are not channels in this index: they are per consumer,
+    they carry the failed message rather than a contract of their own, and their names are derived.
+  domainServices:
+    addressPattern: collections.dlq.{service}
+    description: One per domain-service consumer group; `{service}` is the deployable name, e.g. collections.dlq.case-service.
+  ingestion:
+    address: dlq.ingestion.v1
+    description: One for the whole ingestion plane (control plane, workers, canonicalizer).
+  policy: retry with backoff, then DLQ, then alert, investigate, replay — never block a partition, never drop.
+  valuePreserved: The original EventEnvelope.v1 document, byte for byte, so a replay is indistinguishable from the first delivery.
+  headers:
+    - x-original-topic
+    - x-original-partition
+    - x-original-offset
+    - x-error-code
+    - x-error-message
+    - x-retry-count
+    - correlationId
+
+x-internal-topics:
+  description: |
+    Raw topics internal to `ingestion/`, listed here so nobody mistakes their absence for an
+    omission. They carry no platform contract and no domain service may consume them (plan §6.2).
+  topics:
+    - address: cdc.corebank.public.cb_*
+      description: Debezium change events from the corebank Postgres. Shape is Debezium's, not ours.
+    - address: cdc.corebank.schema-history
+      description: Debezium schema history (compacted, single partition).
+    - address: connect.offsets, connect.configs, connect.status
+      description: Kafka Connect internal topics.
+    - address: ingestion.webhook.payment.v1
+      description: Raw provider payment webhook, schema ../schemas/ingestion/PaymentWebhook.v1.json.

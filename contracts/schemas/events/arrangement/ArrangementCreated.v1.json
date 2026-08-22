@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/arrangement/ArrangementCreated.v1.json",
+  "title": "ArrangementCreated.v1",
+  "description": "Payload of the ArrangementCreated event (A§23). Emitted by arrangement-service — the single producer (A§7.2) — when a payment plan is created via `POST /v1/arrangements` (A§17, A§10.3 DRAFT -> ACTIVE). The instalment schedule is embedded deliberately, not linked: payment-service allocates incoming money to specific instalments oldest-first and must be able to build its `active_arrangements` read model from the event stream alone, without calling back into arrangement-service (A§7.3, SVC-6). Published on `collections.arrangement` keyed by `arrangementId` (A§23). Schedule invariants, enforced at creation and rejected with 400 ARRANGEMENT_INVALID otherwise (invariant A§11.5, SVC-5): at least one instalment; the sum of `schedule[].amountMinor` equals `totalAmountMinor` exactly in integer minor units (rounding remainder assigned to the last instalment); `dueDate` values strictly ascending; `installmentId` values unique. Rides the A§24 envelope; a breaking change ships as ArrangementCreated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "arrangementId",
+    "accountId",
+    "caseId",
+    "promiseId",
+    "totalAmountMinor",
+    "currency",
+    "schedule"
+  ],
+  "properties": {
+    "arrangementId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the arrangement. Equal to the envelope `aggregateId` and the Kafka partition key (A§23)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the plan repays. Payment allocation is account-scoped, so this is the field payment-service keys its read model on."
+    },
+    "caseId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the case the arrangement was agreed on, or null for an arrangement created outside a case (e.g. a self-service plan taken in the customer portal before a case exists). Structurally always present, so required and nullable. Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4P3G0MQSQ3A1X2PMA6VX"
+      ]
+    },
+    "promiseId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the promise this plan formalises, or null when the arrangement was agreed without a preceding promise. Keeps the promise-to-arrangement conversion rate measurable from the event stream (A§47). Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4S18NPWJ059ZA293REG6"
+      ]
+    },
+    "totalAmountMinor": {
+      "type": "integer",
+      "description": "Total amount the plan repays, in minor units of `currency`. Exactly equal to the sum of `schedule[].amountMinor` — it is published explicitly so a consumer can validate the schedule it received rather than trusting it (integer arithmetic only, no floats anywhere in the chain). Strictly positive.",
+      "minimum": 1,
+      "maximum": 9223372036854775807,
+      "examples": [
+        120000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `totalAmountMinor` and of every instalment amount in `schedule`. One arrangement has exactly one currency, which is why the instalment objects carry no currency of their own.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "schedule": {
+      "type": "array",
+      "description": "The full instalment schedule, ordered by `dueDate` ascending. Embedded rather than referenced so payment allocation needs no synchronous call (SVC-6). Instalment amounts are in the arrangement `currency`.",
+      "minItems": 1,
+      "maxItems": 120,
+      "items": {
+        "$ref": "#/$defs/installment"
+      }
+    }
+  },
+  "$defs": {
+    "installment": {
+      "title": "Installment",
+      "description": "One scheduled instalment of the plan. `installmentId` is the allocation target payment-service names in PaymentAllocated, which is how a payment is attributed to a specific instalment rather than to the plan as a whole.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installmentId",
+        "dueDate",
+        "amountMinor"
+      ],
+      "properties": {
+        "installmentId": {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+          "description": "Platform identifier of this instalment, unique within the arrangement and stable for its whole life. Quoted back by PaymentAllocated so arrangement-service can mark exactly this instalment PAID (SVC-5/SVC-6)."
+        },
+        "dueDate": {
+          "type": "string",
+          "description": "Calendar date (YYYY-MM-DD) this instalment is due. Strictly greater than the previous instalment's due date; the first is on or after the arrangement creation date.",
+          "format": "date",
+          "examples": [
+            "2026-09-30"
+          ]
+        },
+        "amountMinor": {
+          "type": "integer",
+          "description": "Amount due for this instalment, in minor units of the arrangement `currency`. Strictly positive; the rounding remainder of an uneven split is assigned to the last instalment by an explicit documented rule, never spread by floating point (SVC-5).",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "examples": [
+            40000
+          ]
+        }
+      }
+    }
+  }
+}

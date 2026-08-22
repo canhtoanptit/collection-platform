@@ -1,0 +1,20 @@
+{
+  "eventId": "01M0KK5BK09ZSSV2W6610G4MTK",
+  "eventType": "CustomerUpdated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T02:20:00Z",
+  "producer": "customer-service",
+  "aggregateType": "Customer",
+  "aggregateId": "01M0KK4K5RM5CNE9ZZQ52EJAC0",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "causationId": "01M0KK5Z40PJVXKBGGK2WH26Q7",
+  "payload": {
+    "customerId": "01M0KK4K5RM5CNE9ZZQ52EJAC0",
+    "status": "ACTIVE",
+    "segment": "RETAIL_EARLY",
+    "contactability": "CONTACTABLE",
+    "changedFields": [
+      "contactability"
+    ]
+  }
+}

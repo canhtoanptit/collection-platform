@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/ingestion/FileStatusChanged.v1.json",
+  "title": "FileStatusChanged.v1",
+  "description": "Payload of the FileStatusChanged event — an ingestion-internal catalogue extension beyond the 22 A§23 events (plan §6.5). Emitted by the ingestion control plane — the single producer — once per file-registry state transition, mirroring the append-only `file_state_transition` audit row that is written in the same transaction (A§36, D§20, D§3.6: the audit is INSERT + SELECT only, and this event is its published projection). Published on `ingestion.file.lifecycle.v1` keyed by `fileId`, so the whole lifecycle of one file is strictly ordered (A§26). Consumed by Airflow sensors and the operational dashboard, never by domain services: domain services consume only the canonical `ingestion.{customers,accounts,debts,payments}.v1` topics (plan §6.2). Rides the A§24 envelope; a breaking change ships as FileStatusChanged.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fileId",
+    "feedId",
+    "sourceId",
+    "fileName",
+    "businessDate",
+    "fromStatus",
+    "toStatus",
+    "reason",
+    "at"
+  ],
+  "properties": {
+    "fileId": {
+      "type": "string",
+      "description": "File registry identifier: the `FIL_` prefix followed by a bare ULID, e.g. `FIL_01M0KK53S0DQ9PSTK0206PRD7M` (operational entities carry a type prefix — docs/conventions.md §1). Equal to the envelope `aggregateId` and the Kafka partition key. Declared with an explicit pattern rather than reusing the envelope's bare-ULID definition precisely because of the prefix.",
+      "pattern": "^FIL_[0-9A-HJKMNP-TV-Z]{26}$",
+      "examples": [
+        "FIL_01M0KK53S0DQ9PSTK0206PRD7M"
+      ]
+    },
+    "feedId": {
+      "type": "string",
+      "description": "Identifier of the feed this file belongs to, as declared in the feed contract under `contracts/files/<feedId>.v1.yaml` (D§81). Lower snake_case, owned by the ingestion configuration rather than minted as a ULID, so a human reading an alert can tell which feed broke.",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "examples": [
+        "loan_accounts",
+        "payments",
+        "delinquency_snapshot"
+      ]
+    },
+    "sourceId": {
+      "type": "string",
+      "description": "Identifier of the source system the feed belongs to (A§28.1 `source` registry entry). Lower snake_case, configuration-owned like `feedId`.",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "examples": [
+        "corebank_sftp"
+      ]
+    },
+    "fileName": {
+      "type": "string",
+      "description": "File name exactly as received from the source, before any normalisation — the value the `UNIQUE(feedId, fileName)` dedup constraint and the A§33 filename-reuse quarantine rule are evaluated on, so it must never be rewritten.",
+      "minLength": 1,
+      "maxLength": 260,
+      "examples": [
+        "loan_accounts_20260901.csv"
+      ]
+    },
+    "businessDate": {
+      "type": "string",
+      "description": "Business date the file's content belongs to, as an ISO calendar date (YYYY-MM-DD). Feeds carry it as YYYYMMDD in the file name and header because the source systems emit it that way (contracts/files/*.v1.yaml); it is normalised to an ISO date here so every consumer parses one format. This is the date reconciliation, backfills and Airflow data intervals key on — not the arrival time.",
+      "format": "date",
+      "examples": [
+        "2026-09-01"
+      ]
+    },
+    "fromStatus": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Registry status before this transition, or null for the very first transition of a file (its discovery, which has no predecessor state). Structurally always present, so required and nullable. Same closed vocabulary as `toStatus`.",
+      "enum": [
+        "DISCOVERED",
+        "RECEIVED",
+        "VALIDATING",
+        "VALIDATED",
+        "PROCESSING",
+        "PROCESSED",
+        "RECONCILING",
+        "RECONCILED",
+        "FAILED",
+        "QUARANTINED",
+        "ARCHIVED",
+        "DUPLICATE",
+        null
+      ]
+    },
+    "toStatus": {
+      "type": "string",
+      "description": "Registry status reached by this transition. Exactly the twelve A§36 ingestion states, no more and no fewer: the happy path DISCOVERED -> RECEIVED -> VALIDATING -> VALIDATED -> PROCESSING -> PROCESSED -> RECONCILING -> RECONCILED -> ARCHIVED, with FAILED, QUARANTINED and DUPLICATE as the exception paths. Closed enum because the transition map is table-driven and an unknown state is an ingestion bug, not an extension: a file reaches ARCHIVED only after a reconciliation PASS, a checksum repeat is terminal DUPLICATE, and a filename reuse with different content is QUARANTINED (A§33).",
+      "enum": [
+        "DISCOVERED",
+        "RECEIVED",
+        "VALIDATING",
+        "VALIDATED",
+        "PROCESSING",
+        "PROCESSED",
+        "RECONCILING",
+        "RECONCILED",
+        "FAILED",
+        "QUARANTINED",
+        "ARCHIVED",
+        "DUPLICATE"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Why the transition happened, or null for an unremarkable happy-path step. Mandatory in content terms for every exception transition — FAILED, QUARANTINED and DUPLICATE must always carry one, because an unexplained quarantine cannot be triaged from the alert alone. Open SCREAMING_SNAKE vocabulary shared with the registry's `error_code` column (e.g. FILENAME_REUSED per A§33).",
+      "pattern": "^[A-Z][A-Z0-9_]{1,47}$",
+      "examples": [
+        "FILENAME_REUSED",
+        "CHECKSUM_DUPLICATE",
+        "SCHEMA_VALIDATION_FAILED",
+        "CONTROL_TOTAL_MISMATCH",
+        "SLA_BREACH",
+        "RECONCILIATION_PASSED"
+      ]
+    },
+    "at": {
+      "type": "string",
+      "description": "When the transition was recorded in the append-only audit, RFC3339 UTC with a `Z` offset. Equal to the envelope `occurredAt` for a transition published as it happens; it is carried explicitly so that a lifecycle republished from the audit table (backfill or DLQ replay, D§48/§49) still states the original transition time rather than the republication time.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-09-01T02:14:30Z"
+      ]
+    }
+  }
+}

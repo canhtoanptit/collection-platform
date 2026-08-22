@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/arrangement/PromiseCreated.v1.json",
+  "title": "PromiseCreated.v1",
+  "description": "Payload of the PromiseCreated event (A§23). Emitted by arrangement-service — the single producer (A§7.2) — when a promise to pay is captured via `POST /v1/promises` (by a collector in the workbench or by treatment execution). A promise is a customer *commitment* to pay one amount by one date; an arrangement is the structured multi-instalment plan — they are distinct aggregates with distinct state machines (D§10, A§10.2 PROPOSED -> ACCEPTED -> KEPT|BROKEN|CANCELLED). Published on `collections.arrangement` keyed by `promiseId`, not by the channel context, so both promise events for one promise stay ordered (A§23/§26). Rides the A§24 envelope; a breaking change ships as PromiseCreated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "promiseId",
+    "caseId",
+    "accountId",
+    "amountMinor",
+    "currency",
+    "dueDate"
+  ],
+  "properties": {
+    "promiseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the promise. Equal to the envelope `aggregateId` and the Kafka partition key of this event (A§23 names `promiseId` as the key for promise events, even though they share the `collections.arrangement` topic with arrangement events)."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the case the promise was made on. A promise is always taken in the context of a case (it is the output of a collections conversation), so this is required and never null."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the promised money is for, so payment-service and analytics can join on the account without calling the arrangement API."
+    },
+    "amountMinor": {
+      "type": "integer",
+      "description": "Amount the customer promised to pay, in minor units of `currency`. Strictly positive: a promise of zero is not a promise.",
+      "minimum": 1,
+      "maximum": 9223372036854775807,
+      "examples": [
+        50000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `amountMinor`; always the account's currency.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "dueDate": {
+      "type": "string",
+      "description": "Calendar date (YYYY-MM-DD) by which the promised amount is due. The breach tick compares this against its `--as-of` date to decide whether the promise is broken (SVC-5), which is why it is a business date and not a timestamp.",
+      "format": "date",
+      "examples": [
+        "2026-09-05"
+      ]
+    }
+  }
+}

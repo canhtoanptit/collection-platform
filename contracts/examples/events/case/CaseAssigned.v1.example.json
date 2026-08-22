@@ -1,0 +1,16 @@
+{
+  "eventId": "01M0KK5GF814KT2V1PHZHYHMFC",
+  "eventType": "CaseAssigned",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T08:05:00Z",
+  "producer": "case-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "causationId": "01M0KK54R860AE15PS0DHYQ50R",
+  "payload": {
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "assignedTeam": "EARLY_COLLECTIONS",
+    "assignedCollector": "collector.aoife"
+  }
+}

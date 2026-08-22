@@ -1,0 +1,36 @@
+{
+  "eventId": "01M0KK5PAR641NA26K7JB6WM4F",
+  "eventType": "ArrangementCreated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-06T10:25:00Z",
+  "producer": "arrangement-service",
+  "aggregateType": "Arrangement",
+  "aggregateId": "01M0KK4T0G81VHMMR2AHBZ0AMD",
+  "correlationId": "01M0KK4H78PB7W9EE66Y92YFCV",
+  "causationId": "01M0KK56PR5V3NCT1Q7D0A1KAR",
+  "payload": {
+    "arrangementId": "01M0KK4T0G81VHMMR2AHBZ0AMD",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "promiseId": "01M0KK4S18NPWJ059ZA293REG6",
+    "totalAmountMinor": 120000,
+    "currency": "EUR",
+    "schedule": [
+      {
+        "installmentId": "01M0KK4TZRTPXZVY6J9QX9TFBX",
+        "dueDate": "2026-09-30",
+        "amountMinor": 40000
+      },
+      {
+        "installmentId": "01M0KK4VZ00JTCTNEHSE1FN2Q4",
+        "dueDate": "2026-10-31",
+        "amountMinor": 40000
+      },
+      {
+        "installmentId": "01M0KK4WY8WHA0ESRG9SH488ZH",
+        "dueDate": "2026-11-30",
+        "amountMinor": 40000
+      }
+    ]
+  }
+}

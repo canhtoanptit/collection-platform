@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/agency/DebtPlaced.v1.json",
+  "title": "DebtPlaced.v1",
+  "description": "Payload of the DebtPlaced event (A§23). Emitted by agency-service — the single producer (A§7.2) — when a placement reaches PLACED, i.e. the debt is now being worked by an external collection agency (A§5.12, D§12, placement machine REQUESTED -> PLACED -> RECALL_REQUESTED -> RECALLED). Published on `collections.agency` keyed by `placementId` (A§23/§25), so both events of one placement stay ordered. Load-bearing for invariant A§11.6: an active placement and active legal ownership of the same debt are mutually exclusive, and legal-service maintains its read model from this event to reject a referral while the debt is placed (SVC-10) — the mirror of agency-service's own 409 PLACEMENT_LEGAL_CONFLICT guard. Rides the A§24 envelope; a breaking change ships as DebtPlaced.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "placementId",
+    "agencyId",
+    "accountId",
+    "caseId",
+    "placedAt"
+  ],
+  "properties": {
+    "placementId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the placement. Equal to the envelope `aggregateId` and the Kafka partition key (A§23)."
+    },
+    "agencyId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the collection agency the debt was placed with. The commission terms behind the fee calculation belong to the agency contract and are deliberately not published on the event: fee amounts travel as computed money in FeeEntry, so a contract change never rewrites history (SVC-9)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the placed account. At most one placement per account may be active at a time (partial unique, SVC-9), so this is the key consumers use to answer 'is this account with an agency right now?'."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the case the placement escalates from. Always present: a placement is a case escalation (A§10.1 ESCALATED -> AGENCY), never a standalone action, and agency-service closes the placement when it sees CaseResolved for this case."
+    },
+    "placedAt": {
+      "type": "string",
+      "description": "When the placement became effective with the agency (the business fact), RFC3339 UTC with a `Z` offset. Distinct from the envelope `occurredAt`, which is when agency-service recorded it: a placement confirmed by an agency file is effective from the file's business date, not from the moment the file was processed.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-09-10T09:00:00Z"
+      ]
+    }
+  }
+}

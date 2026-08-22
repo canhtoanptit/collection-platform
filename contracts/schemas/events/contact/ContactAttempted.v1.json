@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/contact/ContactAttempted.v1.json",
+  "title": "ContactAttempted.v1",
+  "description": "Payload of the ContactAttempted event (A§23). Emitted by contact-service — the single producer of contact events (A§7.2, plan §6.4) — when a contact is recorded via `POST /v1/contacts`. treatment-service does NOT publish contact events: it calls the contact API on dispatch and again on the provider webhook, and the collector workbench records manual contacts through the same endpoint, so there is exactly one source of contact-history truth for frequency caps (DEC-16). Published on `collections.contact` keyed by `contactId` (A§25/§26). No message body, phone number, email address or letter content is ever put on the bus (D§45): only the fact, the channel and the linkage. Rides the A§24 envelope; a breaking change ships as ContactAttempted.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contactId",
+    "caseId",
+    "customerId",
+    "channel",
+    "direction",
+    "treatmentId"
+  ],
+  "properties": {
+    "contactId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the contact record. Equal to the envelope `aggregateId` and the Kafka partition key, so the attempt and its later completion stay ordered on the same partition (A§26)."
+    },
+    "caseId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the case this contact belongs to, or null for a customer-level contact with no open case — e.g. an inbound call about an account that has already cured. Structurally always present, so required and nullable. case-service appends a case activity when it is non-null (EXE-1). Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4P3G0MQSQ3A1X2PMA6VX"
+      ]
+    },
+    "customerId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the customer contacted. Always present, including for case-less contacts, because frequency caps and contact windows are enforced per customer (DEC-16)."
+    },
+    "channel": {
+      "type": "string",
+      "description": "Channel the contact was attempted on (D§9 channel abstraction). Closed enum: SMS, EMAIL, LETTER, CALL, DIGITAL (in-app/portal notification). Closed because guardrail configuration declares contact windows and frequency caps per channel, so an unknown channel could not be governed.",
+      "enum": [
+        "SMS",
+        "EMAIL",
+        "LETTER",
+        "CALL",
+        "DIGITAL"
+      ]
+    },
+    "direction": {
+      "type": "string",
+      "description": "OUTBOUND for platform-initiated contact (treatment execution or a collector action), INBOUND for customer-initiated contact recorded by an agent. Frequency caps and contact windows constrain OUTBOUND only; INBOUND is always recordable.",
+      "enum": [
+        "OUTBOUND",
+        "INBOUND"
+      ]
+    },
+    "treatmentId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the treatment execution that caused this contact, or null for a manual or inbound contact with no treatment behind it. This is the join that lets decision effectiveness be measured end to end (decision -> treatment -> contact -> outcome, A§47 fct_collection_action). Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK52SRX1Y8FQATFCBB992Q"
+      ]
+    }
+  }
+}

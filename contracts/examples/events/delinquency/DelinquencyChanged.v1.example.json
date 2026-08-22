@@ -1,0 +1,21 @@
+{
+  "eventId": "01M0KK5EGRJV74HM60VSQMWMQS",
+  "eventType": "DelinquencyChanged",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T02:25:00Z",
+  "producer": "delinquency-service",
+  "aggregateType": "Delinquency",
+  "aggregateId": "01M0KK4M5029NKNFZXF7805T91",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "causationId": "01M0KK5CJ8E2S555M8ZR9CZQK6",
+  "payload": {
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "customerId": "01M0KK4K5RM5CNE9ZZQ52EJAC0",
+    "dpd": 12,
+    "previousBucket": null,
+    "newBucket": "DPD_1_30",
+    "status": "DELINQUENT",
+    "overdueAmountMinor": 50000,
+    "currency": "EUR"
+  }
+}

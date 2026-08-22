@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/arrangement/PromiseBroken.v1.json",
+  "title": "PromiseBroken.v1",
+  "description": "Payload of the PromiseBroken event (A§23). Emitted by arrangement-service — the single producer (A§7.2) — when a promise passes its due date without being satisfied by an allocated payment, detected by the deterministic `tick breach-check --as-of=<date>` job rather than by wall-clock timers (SVC-5, A§10.2 ACCEPTED -> BROKEN). Published on `collections.arrangement` keyed by `promiseId` (A§23), so it is ordered behind the PromiseCreated it invalidates. case-service appends a case activity and re-prioritises on it, and broken-promise counts in the last 90 days are a decisioning context input (A§52). Carries the same fields as PromiseCreated so that a consumer can act on the breach without holding the creation. Rides the A§24 envelope; a breaking change ships as PromiseBroken.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "promiseId",
+    "caseId",
+    "accountId",
+    "amountMinor",
+    "currency",
+    "dueDate"
+  ],
+  "properties": {
+    "promiseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the broken promise. Equal to the envelope `aggregateId` and the Kafka partition key (A§23)."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the case the promise was made on, so case-service can append the activity and set `next_action_at` without a lookup."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the promise was for."
+    },
+    "amountMinor": {
+      "type": "integer",
+      "description": "Amount that was promised and not paid, in minor units of `currency` — the originally promised amount, unchanged by any partial payment (partial settlement is visible through PaymentAllocated, and keeping this value stable makes the promise-kept rate computable from these events alone). Strictly positive.",
+      "minimum": 1,
+      "maximum": 9223372036854775807,
+      "examples": [
+        50000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `amountMinor`; always the account's currency.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "dueDate": {
+      "type": "string",
+      "description": "Calendar date (YYYY-MM-DD) the promise was due, i.e. the date the breach check found to be in the past. Always strictly before the `--as-of` business date of the tick that raised this event.",
+      "format": "date",
+      "examples": [
+        "2026-09-05"
+      ]
+    }
+  }
+}

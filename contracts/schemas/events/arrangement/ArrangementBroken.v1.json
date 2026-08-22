@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/arrangement/ArrangementBroken.v1.json",
+  "title": "ArrangementBroken.v1",
+  "description": "Payload of the ArrangementBroken event (A§23). Emitted by arrangement-service — the single producer (A§7.2) — when an ACTIVE plan is broken (A§10.3 ACTIVE -> BROKEN): an instalment stays unpaid past its grace period, detected by `tick breach-check --as-of=<date>` (SVC-5), or the plan is broken explicitly via `POST /v1/arrangements/{id}/break`. Published on `collections.arrangement` keyed by `arrangementId` (A§23), so it is ordered behind the ArrangementCreated it terminates. case-service appends a case activity and sets `next_action_at` to now on it (EXE-1), and payment-service drops the plan from its active-arrangement read model so later money goes to DEBT instead of instalments (SVC-6). Rides the A§24 envelope; a breaking change ships as ArrangementBroken.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "arrangementId",
+    "accountId",
+    "reason"
+  ],
+  "properties": {
+    "arrangementId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the broken arrangement. Equal to the envelope `aggregateId` and the Kafka partition key (A§23)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account whose plan was broken — the key payment-service maintains its `active_arrangements` read model on, so it can invalidate the entry without holding the creation event."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why the arrangement was broken. Open SCREAMING_SNAKE vocabulary rather than a closed enum: breach detection rules are configurable per product and grow over time, and a new reason must not force a v2. INSTALLMENT_MISSED is the value the automated breach tick emits.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,47}$",
+      "examples": [
+        "INSTALLMENT_MISSED",
+        "GRACE_PERIOD_EXPIRED",
+        "CUSTOMER_CANCELLED",
+        "PAYMENT_REVERSED",
+        "OPERATOR_BREAK"
+      ]
+    }
+  }
+}

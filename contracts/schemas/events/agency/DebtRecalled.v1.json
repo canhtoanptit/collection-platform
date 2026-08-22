@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/agency/DebtRecalled.v1.json",
+  "title": "DebtRecalled.v1",
+  "description": "Payload of the DebtRecalled event (A§23). Emitted by agency-service — the single producer (A§7.2) — when a placement reaches RECALLED and the debt is back under bank control (A§5.12, D§12). Published on `collections.agency` keyed by `placementId` (A§23/§25), so it is ordered behind the DebtPlaced it terminates. Releases the A§11.6 mutual-exclusion lock: once legal-service has consumed this event the account becomes eligible for legal referral again (SVC-10), which is why the recall is a published fact rather than an internal status change. Rides the A§24 envelope; a breaking change ships as DebtRecalled.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "placementId",
+    "agencyId",
+    "accountId",
+    "caseId",
+    "recalledAt",
+    "reason"
+  ],
+  "properties": {
+    "placementId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the recalled placement — the same value as the DebtPlaced it ends. Equal to the envelope `aggregateId` and the Kafka partition key (A§23)."
+    },
+    "agencyId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the agency the debt is recalled from. Repeated from the placement so agency performance consumers need no prior state."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the recalled account — the key on which the 'no active placement' condition is re-evaluated (A§11.6)."
+    },
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the case the placement belonged to, so the recall lands as a case activity on the right case."
+    },
+    "recalledAt": {
+      "type": "string",
+      "description": "When the recall became effective with the agency (the business fact), RFC3339 UTC with a `Z` offset. Always on or after the matching `placedAt`.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-10-01T09:00:00Z"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why the debt was recalled. Open SCREAMING_SNAKE vocabulary rather than a closed enum: recall reasons are commercially and operationally driven (agency performance, customer dispute, legal escalation, end of placement term) and grow without changing what the event means. Required — an unexplained recall is not auditable (D§3.6).",
+      "pattern": "^[A-Z][A-Z0-9_]{1,47}$",
+      "examples": [
+        "PLACEMENT_TERM_EXPIRED",
+        "CUSTOMER_DISPUTE",
+        "AGENCY_UNDERPERFORMANCE",
+        "LEGAL_ESCALATION",
+        "PAID_IN_FULL",
+        "OPERATOR_RECALL"
+      ]
+    }
+  }
+}

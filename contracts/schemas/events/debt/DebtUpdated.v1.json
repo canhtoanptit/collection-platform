@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/debt/DebtUpdated.v1.json",
+  "title": "DebtUpdated.v1",
+  "description": "Payload of the DebtUpdated event (A§23). Emitted by debt-service — the single producer (A§7.2) — whenever the debt exposure it owns changes (A§5.3, A§9 Debt). Published on `collections.debt` keyed by `debtId` (A§25/§26). Carries the four debt components separately because collections economics, agency commission and write-off decisions are component-sensitive; v1 invariant (SVC-3): every component is non-negative, all components share one `currency`, and `recoverableAmountMinor` equals the sum of the components. Rides the A§24 envelope; a breaking change ships as DebtUpdated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "debtId",
+    "accountId",
+    "principalMinor",
+    "interestMinor",
+    "feesMinor",
+    "penaltiesMinor",
+    "recoverableAmountMinor",
+    "currency",
+    "changedFields"
+  ],
+  "properties": {
+    "debtId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the debt/exposure. Equal to the envelope `aggregateId` and the Kafka partition key (A§26)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the debt belongs to, so account-scoped consumers (case, payment allocation, agency placement) can join without calling the debt API."
+    },
+    "principalMinor": {
+      "type": "integer",
+      "description": "Principal component of the exposure, in minor units of `currency` (A§9 DebtComponent). Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        100000
+      ]
+    },
+    "interestMinor": {
+      "type": "integer",
+      "description": "Accrued interest component, in minor units of `currency`. Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        18000
+      ]
+    },
+    "feesMinor": {
+      "type": "integer",
+      "description": "Fees component (arrears fees, servicing fees), in minor units of `currency`. Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        5000
+      ]
+    },
+    "penaltiesMinor": {
+      "type": "integer",
+      "description": "Penalties component (late-payment penalties), in minor units of `currency`. Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        2000
+      ]
+    },
+    "recoverableAmountMinor": {
+      "type": "integer",
+      "description": "Amount considered recoverable, in minor units of `currency`. In v1 this is exactly the sum of principal + interest + fees + penalties (SVC-3 enforces the identity with a property test); it is published explicitly rather than derived so that a future recoverability haircut is a value change, not a consumer-side formula change. Non-negative.",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "examples": [
+        125000
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of every *Minor amount in this payload. A debt has exactly one currency; components are never mixed.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "changedFields": {
+      "type": "array",
+      "description": "Names of the debt fields whose values changed in this update, so consumers can skip work cheaply. debt-service suppresses events for duplicate snapshots (SVC-3), so this array is normally non-empty; an empty array means the debt was republished without a detected change (forced backfill or replay, D§48/§49).",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][A-Za-z0-9]{1,63}$"
+      },
+      "uniqueItems": true,
+      "examples": [
+        [
+          "interestMinor",
+          "recoverableAmountMinor"
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "eventId": "01M0KK5Y4R5DESYBVTWD94H25D",
+  "eventType": "FileStatusChanged",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T02:14:30Z",
+  "producer": "ingestion-control-plane",
+  "aggregateType": "IngestionFile",
+  "aggregateId": "FIL_01M0KK53S0DQ9PSTK0206PRD7M",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "payload": {
+    "fileId": "FIL_01M0KK53S0DQ9PSTK0206PRD7M",
+    "feedId": "loan_accounts",
+    "sourceId": "corebank_sftp",
+    "fileName": "loan_accounts_20260901.csv",
+    "businessDate": "2026-09-01",
+    "fromStatus": null,
+    "toStatus": "DISCOVERED",
+    "reason": null,
+    "at": "2026-09-01T02:14:30Z"
+  }
+}

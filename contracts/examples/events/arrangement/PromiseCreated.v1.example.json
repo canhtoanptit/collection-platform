@@ -1,0 +1,19 @@
+{
+  "eventId": "01M0KK5MC88M3PZQ54J2MZBGWG",
+  "eventType": "PromiseCreated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-02T10:20:00Z",
+  "producer": "arrangement-service",
+  "aggregateType": "Promise",
+  "aggregateId": "01M0KK4S18NPWJ059ZA293REG6",
+  "correlationId": "01M0KK4H78PB7W9EE66Y92YFCV",
+  "causationId": "01M0KK55QGX1BF82P99CVS5AZ6",
+  "payload": {
+    "promiseId": "01M0KK4S18NPWJ059ZA293REG6",
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "amountMinor": 50000,
+    "currency": "EUR",
+    "dueDate": "2026-09-05"
+  }
+}

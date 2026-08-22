@@ -1,0 +1,25 @@
+{
+  "eventId": "01M0KK5DHGWGJ82XN2GEZ16ZNE",
+  "eventType": "DebtUpdated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T02:20:10Z",
+  "producer": "debt-service",
+  "aggregateType": "Debt",
+  "aggregateId": "01M0KK4N48MN0R3FG9V9ZCFDY3",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "causationId": "01M0KK612G3Q68FBJVXJBAW0H6",
+  "payload": {
+    "debtId": "01M0KK4N48MN0R3FG9V9ZCFDY3",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "principalMinor": 100000,
+    "interestMinor": 18000,
+    "feesMinor": 5000,
+    "penaltiesMinor": 2000,
+    "recoverableAmountMinor": 125000,
+    "currency": "EUR",
+    "changedFields": [
+      "interestMinor",
+      "recoverableAmountMinor"
+    ]
+  }
+}

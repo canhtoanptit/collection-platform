@@ -1,0 +1,15 @@
+{
+  "eventId": "01M0KK5HEGYAZA4CBCWA7BDE8C",
+  "eventType": "CaseResolved",
+  "eventVersion": 1,
+  "occurredAt": "2027-01-15T14:00:00Z",
+  "producer": "case-service",
+  "aggregateType": "Case",
+  "aggregateId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+  "correlationId": "01M0KK4J6G01Y28P7580JE8SQ5",
+  "causationId": "01M0KK64ZGD376PHN7Z9BKF04N",
+  "payload": {
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "outcome": "RECOVERED_LEGAL"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/case/CaseResolved.v1.json",
+  "title": "CaseResolved.v1",
+  "description": "Payload of the CaseResolved event (A§23). Emitted by case-service — the single producer (A§7.2) — when a case reaches RESOLVED: automatically on `DelinquencyChanged(status=CURED)`, or from `POST /v1/cases/{caseId}/close` (A§15, EXE-1). Published on `collections.case` keyed by `caseId` (A§26). Downstream this is a terminal signal: agency-service closes an active placement on it, treatment execution stops (invariant A§11.1 — a closed case takes no new treatment unless explicitly reopened), and the case fact is finalised in analytics (A§47). Rides the A§24 envelope; a breaking change ships as CaseResolved.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "caseId",
+    "outcome"
+  ],
+  "properties": {
+    "caseId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the case that was resolved. Equal to the envelope `aggregateId` and the Kafka partition key (A§26)."
+    },
+    "outcome": {
+      "type": "string",
+      "description": "Business outcome recorded on resolution (A§9 Collection Case `outcome`). Open SCREAMING_SNAKE vocabulary rather than a closed enum: outcome taxonomies are reporting-driven and grow with the collections operation, and a new outcome must not force a CaseResolved.v2 that every consumer has to migrate to. Consumers must therefore branch only on the outcomes they know and treat the rest as 'resolved, other'. CURED is the value emitted for the automatic cure path.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,47}$",
+      "examples": [
+        "CURED",
+        "PAID_IN_FULL",
+        "SETTLED",
+        "ARRANGEMENT_COMPLETED",
+        "WRITTEN_OFF",
+        "RECOVERED_AGENCY",
+        "RECOVERED_LEGAL",
+        "NOT_COLLECTABLE"
+      ]
+    }
+  }
+}

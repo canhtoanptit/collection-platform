@@ -1,0 +1,20 @@
+{
+  "eventId": "01M0KK5KD0VDBDDPFV3ZTQS821",
+  "eventType": "ContactCompleted",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-02T10:18:00Z",
+  "producer": "contact-service",
+  "aggregateType": "Contact",
+  "aggregateId": "01M0KK4Q2RT5RYMTKNYNDPCSV7",
+  "correlationId": "01M0KK4H78PB7W9EE66Y92YFCV",
+  "causationId": "01M0KK5JDR500GSYVV9QN21C5G",
+  "payload": {
+    "contactId": "01M0KK4Q2RT5RYMTKNYNDPCSV7",
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "customerId": "01M0KK4K5RM5CNE9ZZQ52EJAC0",
+    "channel": "SMS",
+    "direction": "OUTBOUND",
+    "treatmentId": "01M0KK52SRX1Y8FQATFCBB992Q",
+    "outcome": "PROMISE_TO_PAY"
+  }
+}

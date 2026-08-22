@@ -1,0 +1,29 @@
+{
+  "eventId": "01M0KK5CJ8E2S555M8ZR9CZQK6",
+  "eventType": "AccountUpdated",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-01T02:20:05Z",
+  "producer": "account-service",
+  "aggregateType": "Account",
+  "aggregateId": "01M0KK4M5029NKNFZXF7805T91",
+  "correlationId": "01M0KK4G8042Z1PTCGJA3G3KMK",
+  "causationId": "01M0KK6038JBFN9PYTCJHFG9CH",
+  "payload": {
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "customerId": "01M0KK4K5RM5CNE9ZZQ52EJAC0",
+    "sourceSystem": "COREBANK",
+    "productCode": "PERSONAL_LOAN",
+    "status": "ACTIVE",
+    "currentBalanceMinor": 125000,
+    "overdueAmountMinor": 50000,
+    "minimumDueMinor": 10000,
+    "currency": "EUR",
+    "lastPaymentAt": "2026-07-15T09:12:00Z",
+    "oldestUnpaidDueDate": "2026-08-20",
+    "changedFields": [
+      "currentBalanceMinor",
+      "overdueAmountMinor",
+      "oldestUnpaidDueDate"
+    ]
+  }
+}

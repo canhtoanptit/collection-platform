@@ -1,0 +1,19 @@
+{
+  "eventId": "01M0KK5X5GNGW48JEN01QVAY7K",
+  "eventType": "LegalStatusChanged",
+  "eventVersion": 1,
+  "occurredAt": "2026-12-02T11:00:00Z",
+  "producer": "legal-service",
+  "aggregateType": "LegalCase",
+  "aggregateId": "01M0KK50V898FRJ9RK4QDK41FW",
+  "correlationId": "01M0KK4J6G01Y28P7580JE8SQ5",
+  "causationId": "01M0KK59MGMW8MAW1KE9STV46F",
+  "payload": {
+    "legalCaseId": "01M0KK50V898FRJ9RK4QDK41FW",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "caseId": "01M0KK4P3G0MQSQ3A1X2PMA6VX",
+    "fromStatus": null,
+    "toStatus": "OPEN",
+    "reason": null
+  }
+}

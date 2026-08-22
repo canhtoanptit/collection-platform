@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/payment/PaymentAllocated.v1.json",
+  "title": "PaymentAllocated.v1",
+  "description": "Payload of the PaymentAllocated event (A§23). Emitted by payment-service — the single producer (A§7.2) — exactly once per payment, in the same transaction as the PaymentReceived it follows, when the money has been attributed to what it repays (A§5.10). v1 allocation rule: active-arrangement instalments oldest-first, remainder to DEBT (SVC-6). Published on `collections.payment` keyed by `paymentId` (A§25/§26). This is the platform's money-movement fan-out event: arrangement-service marks the named instalments PAID and completes or keeps the plan, recovery-service records the recovery, case-service appends an activity, and agency-service raises the commission fee when the account is placed. Invariant A§11.2 — a payment is never allocated twice — is enforced by `UNIQUE(payment_id)` on the allocation, so a redelivery of this event carries identical content and consumers stay idempotent through inbox dedupe (D§3.5). Allocation arithmetic is integer minor units end to end: the sum of `allocations[].amountMinor` equals the PaymentReceived `amountMinor` for the same `paymentId`. Rides the A§24 envelope; a breaking change ships as PaymentAllocated.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "paymentId",
+    "accountId",
+    "currency",
+    "allocations"
+  ],
+  "properties": {
+    "paymentId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the allocated payment — the same value as the PaymentReceived it follows. Equal to the envelope `aggregateId` and the Kafka partition key, which is what guarantees a consumer sees Received before Allocated (A§26)."
+    },
+    "accountId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the account the payment was allocated on. Required by every consumer of this event that is account-scoped rather than payment-scoped (delinquency effects, agency fees, recovery attribution)."
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of every `allocations[].amountMinor`. One payment allocates in exactly one currency — the account's — so the allocation lines carry no currency of their own.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "allocations": {
+      "type": "array",
+      "description": "The allocation lines, in the order they were applied (oldest instalment first, DEBT remainder last). At least one line: an allocation with no lines would mean money vanished. Amounts sum to the payment amount exactly, in integer minor units.",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "$ref": "#/$defs/allocation"
+      }
+    }
+  },
+  "$defs": {
+    "allocation": {
+      "title": "Allocation line",
+      "description": "One attribution of part (or all) of the payment. `target` is the discriminator and the reference fields are conditional on it, enforced by the if/then rules below: target ARRANGEMENT_INSTALLMENT requires BOTH `arrangementId` and `installmentId` and forbids `debtId`; target DEBT requires `debtId` and forbids the arrangement references. Optional-by-shape fields are omitted, never sent as null (contracts README §2), which is why they are absent from the unconditional `required` list.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "amountMinor"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "const": "ARRANGEMENT_INSTALLMENT"
+              }
+            },
+            "required": [
+              "target"
+            ]
+          },
+          "then": {
+            "required": [
+              "arrangementId",
+              "installmentId"
+            ],
+            "not": {
+              "required": [
+                "debtId"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "const": "DEBT"
+              }
+            },
+            "required": [
+              "target"
+            ]
+          },
+          "then": {
+            "required": [
+              "debtId"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "arrangementId"
+                  ]
+                },
+                {
+                  "required": [
+                    "installmentId"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "What this line repays. ARRANGEMENT_INSTALLMENT: a specific instalment of an active payment plan, which is how a plan progresses to COMPLETED and a promise to KEPT. DEBT: the debt itself, used for the remainder after instalments are satisfied and for any payment on an account with no active plan. Closed enum, because the two targets are the whole allocation model of v1 and a third target changes the arithmetic every consumer performs.",
+          "enum": [
+            "ARRANGEMENT_INSTALLMENT",
+            "DEBT"
+          ]
+        },
+        "arrangementId": {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+          "description": "Platform identifier of the arrangement whose instalment is being repaid. Present if and only if `target` is ARRANGEMENT_INSTALLMENT."
+        },
+        "installmentId": {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+          "description": "Platform identifier of the exact instalment being repaid, as published in the ArrangementCreated schedule. Present if and only if `target` is ARRANGEMENT_INSTALLMENT. arrangement-service marks this instalment PAID (SVC-5); allocating by instalment rather than by plan is what makes partial progress unambiguous."
+        },
+        "debtId": {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+          "description": "Platform identifier of the debt being repaid. Present if and only if `target` is DEBT."
+        },
+        "amountMinor": {
+          "type": "integer",
+          "description": "Amount allocated to this target, in minor units of the payload `currency`. Strictly positive — a zero line carries no information — and the lines sum exactly to the payment amount, with any split remainder assigned by the documented allocation rule rather than by rounding (SVC-6).",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "examples": [
+            40000
+          ]
+        }
+      }
+    }
+  }
+}

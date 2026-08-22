@@ -1,0 +1,21 @@
+{
+  "eventId": "01M0KK5R987FFSDZ9NXBHXQTX9",
+  "eventType": "PaymentReceived",
+  "eventVersion": 1,
+  "occurredAt": "2026-09-30T08:35:00Z",
+  "producer": "payment-service",
+  "aggregateType": "Payment",
+  "aggregateId": "01M0KK4XXG1FSSYJ3NHH9TX7B8",
+  "correlationId": "01M0KK4H78PB7W9EE66Y92YFCV",
+  "causationId": "01M0KK6BT8979TQ5Y34C00HTCE",
+  "payload": {
+    "paymentId": "01M0KK4XXG1FSSYJ3NHH9TX7B8",
+    "accountId": "01M0KK4M5029NKNFZXF7805T91",
+    "sourceSystem": "COREBANK",
+    "externalPaymentRef": "CB-PMT-20260930-000123",
+    "amountMinor": 50000,
+    "currency": "EUR",
+    "receivedAt": "2026-09-30T08:30:00Z",
+    "channel": "BANK_TRANSFER"
+  }
+}

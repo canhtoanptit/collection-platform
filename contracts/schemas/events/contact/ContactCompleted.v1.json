@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/events/contact/ContactCompleted.v1.json",
+  "title": "ContactCompleted.v1",
+  "description": "Payload of the ContactCompleted event (A§23). Emitted by contact-service — the single producer of contact events (A§7.2, plan §6.4) — when the result of a contact is recorded via `POST /v1/contacts/{contactId}/outcome`: an agent dispositioning a call, or treatment-service relaying a provider delivery webhook. Published on `collections.contact` keyed by `contactId`, so it always lands after the matching ContactAttempted on the same partition (A§26). Same identifiers as ContactAttempted plus the outcome, so a consumer can process the completion alone without holding the attempt. No message content is ever published (D§45). Rides the A§24 envelope; a breaking change ships as ContactCompleted.v2 (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contactId",
+    "caseId",
+    "customerId",
+    "channel",
+    "direction",
+    "treatmentId",
+    "outcome"
+  ],
+  "properties": {
+    "contactId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the contact record being completed — the same value as the ContactAttempted it concludes. Equal to the envelope `aggregateId` and the Kafka partition key (A§26)."
+    },
+    "caseId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the case this contact belongs to, or null for a customer-level contact with no open case. case-service appends a case activity when it is non-null (EXE-1). Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK4P3G0MQSQ3A1X2PMA6VX"
+      ]
+    },
+    "customerId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Platform identifier of the customer contacted. Repeated from the attempt so that frequency-cap and contactability consumers need no prior state."
+    },
+    "channel": {
+      "type": "string",
+      "description": "Channel the contact happened on — identical to the ContactAttempted value (D§9). Closed enum, because guardrails are configured per channel.",
+      "enum": [
+        "SMS",
+        "EMAIL",
+        "LETTER",
+        "CALL",
+        "DIGITAL"
+      ]
+    },
+    "direction": {
+      "type": "string",
+      "description": "OUTBOUND for platform-initiated contact, INBOUND for customer-initiated contact. Identical to the ContactAttempted value.",
+      "enum": [
+        "OUTBOUND",
+        "INBOUND"
+      ]
+    },
+    "treatmentId": {
+      "anyOf": [
+        {
+          "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Platform identifier (bare ULID) of the treatment execution behind this contact, or null for a manual or inbound contact. Carries the decision-effectiveness join through to the outcome (A§47). Nullable ULID: expressed as the envelope's ULID definition unioned with null, so the pattern lives in exactly one place (contracts/README §6) and is never re-declared here.",
+      "examples": [
+        "01M0KK52SRX1Y8FQATFCBB992Q"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "description": "How the contact ended. Open SCREAMING_SNAKE vocabulary rather than a closed enum: the disposition list is operationally owned, differs per channel (a letter is DELIVERED or RETURNED, a call is CONTACTED or NO_ANSWER) and grows without any change in event meaning — closing it would force a v2 for a new disposition code. Consumers branch only on the values they know; PROMISE_TO_PAY is the one value with cross-service meaning, since it is the disposition that precedes a PromiseCreated.",
+      "pattern": "^[A-Z][A-Z0-9_]{1,47}$",
+      "examples": [
+        "CONTACTED",
+        "PROMISE_TO_PAY",
+        "NO_ANSWER",
+        "LEFT_MESSAGE",
+        "WRONG_NUMBER",
+        "REFUSED",
+        "DISPUTED",
+        "DELIVERED",
+        "FAILED"
+      ]
+    }
+  }
+}
