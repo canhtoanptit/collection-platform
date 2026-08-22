@@ -1,0 +1,83 @@
+# Feed contract — legacy_daily_summary v1 (D§80/81, meta-schema: contracts/files/SPEC.md)
+#
+# DELIVERY: S3, NOT SFTP. The legacy MI extractor (SIM-6, cmd/legacyreport)
+# writes this report straight to
+#   s3://colx-dev-raw/legacy_reports/daily_collections_summary/business_date=<YYYYMMDD>/*.csv
+# so there is no SFTP directory, no host key and no .tmp/rename dance for this
+# feed. Everything else — the D§21 HEADER/DATA/TRAILER shape, the control
+# total, the validation order — is identical, which is the point: one contract
+# meta-schema covers both delivery channels.
+#
+# CONSUMER: the analytical parity harness (ANA-7). This file is the *legacy
+# truth* the platform's own marts are compared against during shadow mode and
+# parallel run (D§68/69, A§88). It is deliberately validated with the same
+# library as the operational feeds: a parity result computed from an unvalidated
+# report would prove nothing.
+#
+# Released contract — immutable. Any breaking change ships as legacy_daily_summary.v2.yaml.
+feed_id: legacy_daily_summary
+version: 1
+source_id: LEGACY_MI_S3
+description: >-
+  Daily legacy MI report (daily_collections_summary): account count, total
+  overdue and total balance per delinquency bucket, computed by SQL directly on
+  the core banking database. Parity baseline for the analytics marts.
+
+filename_regex: '^legacy_daily_summary_(?P<business_date>\d{8})\.csv$'
+encoding: UTF-8
+format: RFC4180
+
+header:
+  feed_code: LEGACY_DAILY_SUMMARY
+  fields: [feed_code, business_date, record_count]
+
+trailer:
+  fields: [record_count, control_total]
+  control_total_column: total_overdue
+
+columns:
+  - name: report_dt
+    type: date_yyyymmdd
+    required: true
+    description: Report date. Equal to the file's business date for a normal daily run.
+  - name: bucket_cd
+    type: enum
+    required: true
+    enum: [CURRENT, B1_30, B31_60, B61_90, B90P]
+    description: Delinquency bucket the aggregate row covers (D§5). One row per bucket per report date.
+  - name: account_count
+    type: integer
+    required: true
+    min: 0
+    description: Number of accounts in the bucket on the report date.
+  - name: total_overdue
+    type: decimal
+    required: true
+    scale: 2
+    description: Sum of overdue amounts in the bucket, major units, 2dp. Control-total column.
+  - name: total_balance
+    type: decimal
+    required: true
+    scale: 2
+    description: Sum of outstanding balances in the bucket, major units, 2dp.
+
+business_rules:
+  - id: overdue_within_balance
+    expr: total_overdue <= total_balance
+    severity: WARN
+    description: >-
+      Bucket overdue should not exceed bucket balance, since overdue is a
+      subset of balance. WARN rather than ERROR on purpose: this is the legacy
+      system's own arithmetic, and quarantining the parity baseline would
+      remove the very evidence needed to explain a parity gap.
+
+sla:
+  expected_by: "03:00"
+  late_by: "04:00"
+  timezone: UTC
+
+reconciliation:
+  count: declared_equals_parsed
+  amount:
+    column: total_overdue
+    vs: trailer_control_total

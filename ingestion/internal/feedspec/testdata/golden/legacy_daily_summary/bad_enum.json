@@ -1,0 +1,23 @@
+{
+  "input": {
+    "business_date": "20260822"
+  },
+  "expect": {
+    "ok": false,
+    "header_count": 5,
+    "declared_count": 5,
+    "parsed_count": 5,
+    "rejected_count": 1,
+    "warn_count": 0,
+    "declared_control_total": "470001.50",
+    "computed_control_total": "470001.50",
+    "failures": [
+      {
+        "row_number": 6,
+        "reason": "ENUM_INVALID",
+        "severity": "ERROR",
+        "column": "bucket_cd"
+      }
+    ]
+  }
+}

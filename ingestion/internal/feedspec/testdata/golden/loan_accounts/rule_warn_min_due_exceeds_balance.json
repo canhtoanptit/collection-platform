@@ -1,0 +1,23 @@
+{
+  "input": {
+    "business_date": "20260822"
+  },
+  "expect": {
+    "ok": true,
+    "header_count": 3,
+    "declared_count": 3,
+    "parsed_count": 3,
+    "rejected_count": 0,
+    "warn_count": 1,
+    "declared_control_total": "1801.00",
+    "computed_control_total": "1801.00",
+    "failures": [
+      {
+        "row_number": 3,
+        "reason": "BUSINESS_RULE_FAILED",
+        "severity": "WARN",
+        "rule_id": "min_due_within_balance"
+      }
+    ]
+  }
+}

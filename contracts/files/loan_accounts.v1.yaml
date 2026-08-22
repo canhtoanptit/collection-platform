@@ -1,0 +1,105 @@
+# Feed contract — loan_accounts v1 (D§80/81, meta-schema: contracts/files/SPEC.md)
+#
+# Daily full snapshot of collectable accounts from the core banking system,
+# delivered over SFTP to outbound/loan_accounts/ (A§31, SIM-3/SIM-4).
+# Columns mirror the legacy `cb_account` table verbatim, quirks included:
+# YYYYMMDD integer dates, two-character status codes, nullable
+# oldest_unpaid_dt. Canonicalisation to the platform model (ISO dates, minor
+# units) happens after validation, in ING-4.
+#
+# Released contract — immutable. Any breaking change ships as loan_accounts.v2.yaml.
+feed_id: loan_accounts
+version: 1
+source_id: COREBANK_SFTP
+description: >-
+  Daily full snapshot of loan, card and mortgage accounts with balance,
+  overdue amount, minimum due and delinquency-dating columns. Primary input to
+  the delinquency DPD calculation.
+
+filename_regex: '^loan_accounts_(?P<business_date>\d{8})\.csv$'
+encoding: UTF-8
+format: RFC4180
+
+header:
+  feed_code: LOAN_ACCOUNTS
+  fields: [feed_code, business_date, record_count]
+
+trailer:
+  fields: [record_count, control_total]
+  control_total_column: curr_bal
+
+columns:
+  - name: acct_no
+    type: string
+    required: true
+    pattern: '^[A-Z0-9]{6,12}$'
+    description: Source account number (cb_account.acct_no). Never re-minted by the platform.
+  - name: cust_no
+    type: string
+    required: true
+    description: Source customer number (cb_customer.cust_no), owner of the account.
+  - name: prod_cd
+    type: enum
+    required: true
+    enum: [LOAN, CARD, MORT]
+    description: Product code. LOAN = instalment loan, CARD = revolving card, MORT = mortgage.
+  - name: open_dt
+    type: date_yyyymmdd
+    required: true
+    description: Account opening date.
+  - name: status_cd
+    type: string
+    required: true
+    description: Source account status code (two characters in the source, e.g. AC, CL, DQ).
+  - name: curr_bal
+    type: decimal
+    required: true
+    scale: 2
+    description: Current outstanding balance in account currency, major units, 2dp. Control-total column.
+  - name: od_amt
+    type: decimal
+    required: true
+    scale: 2
+    description: Overdue amount (past-due portion of curr_bal), major units, 2dp.
+  - name: min_due
+    type: decimal
+    required: true
+    scale: 2
+    description: Minimum amount due this cycle, major units, 2dp.
+  - name: last_pay_dt
+    type: date_yyyymmdd
+    required: false
+    description: Date of the most recent payment. Absent for accounts that have never paid.
+  - name: oldest_unpaid_dt
+    type: date_yyyymmdd
+    required: false
+    description: >-
+      Due date of the oldest unpaid instalment; the DPD anchor (D§5).
+      Absent when the account is current.
+
+business_rules:
+  - id: od_amt_within_balance
+    expr: od_amt <= curr_bal
+    severity: ERROR
+    description: >-
+      The overdue amount is a subset of the outstanding balance. A larger
+      od_amt means the source extract is internally inconsistent, and every
+      downstream DPD/bucket figure derived from it would be wrong.
+  - id: min_due_within_balance
+    expr: min_due <= curr_bal
+    severity: WARN
+    description: >-
+      The minimum due should not exceed the balance. Legitimate edge cases
+      exist (fees billed on a settled account), so this is recorded and
+      investigated rather than quarantining the file.
+
+sla:
+  expected_by: "02:00"
+  late_by: "03:00"
+  timezone: UTC
+
+reconciliation:
+  count: declared_equals_parsed
+  amount:
+    column: curr_bal
+    vs: trailer_control_total

@@ -1,0 +1,16 @@
+{
+  "input": {
+    "business_date": "20260822"
+  },
+  "expect": {
+    "ok": true,
+    "header_count": 5,
+    "declared_count": 5,
+    "parsed_count": 5,
+    "rejected_count": 0,
+    "warn_count": 0,
+    "declared_control_total": "470001.50",
+    "computed_control_total": "470001.50",
+    "failures": []
+  }
+}

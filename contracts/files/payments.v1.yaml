@@ -1,0 +1,84 @@
+# Feed contract — payments v1 (D§80/81, meta-schema: contracts/files/SPEC.md)
+#
+# Daily batch of payments booked in the core banking system, delivered over
+# SFTP to outbound/payments/ (A§31, SIM-3/SIM-4). The same payments also arrive
+# intraday as webhooks (SIM-5, ING-6) — the file is the settled record and the
+# reconciliation truth for the webhook stream (ING-8 cross-source recon).
+#
+# Released contract — immutable. Any breaking change ships as payments.v2.yaml.
+feed_id: payments
+version: 1
+source_id: COREBANK_SFTP
+description: >-
+  Daily batch of payments (cb_payment) for the business date, including
+  reversals. Reconciled against the intraday payment webhook stream.
+
+filename_regex: '^payments_(?P<business_date>\d{8})\.csv$'
+encoding: UTF-8
+format: RFC4180
+
+header:
+  feed_code: PAYMENTS
+  fields: [feed_code, business_date, record_count]
+
+trailer:
+  fields: [record_count, control_total]
+  control_total_column: amount
+
+columns:
+  - name: pay_id
+    type: integer
+    required: true
+    min: 1
+    description: >-
+      Source payment identifier (cb_payment.pay_id bigserial). The external
+      payment reference; the platform never re-mints it, and the webhook
+      stream derives its deterministic event id from it.
+  - name: acct_no
+    type: string
+    required: true
+    pattern: '^[A-Z0-9]{6,12}$'
+    description: Account the payment was applied to (cb_account.acct_no).
+  - name: pay_dt
+    type: date_yyyymmdd
+    required: true
+    description: Value date of the payment.
+  - name: amount
+    type: decimal
+    required: true
+    scale: 2
+    min: 0.01
+    description: >-
+      Payment amount in account currency, major units, 2dp. Strictly positive:
+      a reversal is a row with reversed_flag=Y, never a negative amount.
+      Control-total column.
+  - name: channel_cd
+    type: string
+    required: true
+    description: Source payment channel code (e.g. DD for direct debit, BT bank transfer, CS cash).
+  - name: reversed_flag
+    type: enum
+    required: true
+    enum: [Y, N]
+    description: Y when the payment has been reversed/charged back, N otherwise.
+
+business_rules:
+  - id: amount_positive
+    expr: amount > 0
+    severity: ERROR
+    description: >-
+      Payments are positive amounts; reversals are flagged, not negated.
+      A non-positive amount would corrupt the control total and every
+      downstream allocation. Redundant with min by construction, and
+      deliberately so: the rule names the intent in the reject record.
+
+sla:
+  expected_by: "02:00"
+  late_by: "03:00"
+  timezone: UTC
+
+reconciliation:
+  count: declared_equals_parsed
+  amount:
+    column: amount
+    vs: trailer_control_total

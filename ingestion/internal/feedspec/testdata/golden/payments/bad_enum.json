@@ -1,0 +1,23 @@
+{
+  "input": {
+    "business_date": "20260822"
+  },
+  "expect": {
+    "ok": false,
+    "header_count": 3,
+    "declared_count": 3,
+    "parsed_count": 3,
+    "rejected_count": 1,
+    "warn_count": 0,
+    "declared_control_total": "236.00",
+    "computed_control_total": "236.00",
+    "failures": [
+      {
+        "row_number": 4,
+        "reason": "ENUM_INVALID",
+        "severity": "ERROR",
+        "column": "reversed_flag"
+      }
+    ]
+  }
+}

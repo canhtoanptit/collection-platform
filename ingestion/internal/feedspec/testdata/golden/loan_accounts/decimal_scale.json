@@ -1,0 +1,29 @@
+{
+  "input": {
+    "business_date": "20260822"
+  },
+  "expect": {
+    "ok": false,
+    "header_count": 3,
+    "declared_count": 3,
+    "parsed_count": 3,
+    "rejected_count": 1,
+    "warn_count": 0,
+    "declared_control_total": "1801.00",
+    "computed_control_total": "1801.01",
+    "failures": [
+      {
+        "row_number": 2,
+        "reason": "DECIMAL_SCALE_EXCEEDED",
+        "severity": "ERROR",
+        "column": "curr_bal"
+      },
+      {
+        "row_number": 5,
+        "reason": "CONTROL_TOTAL_MISMATCH",
+        "severity": "ERROR",
+        "column": "curr_bal"
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "input": {
+    "business_date": "20260822"
+  },
+  "expect": {
+    "ok": false,
+    "header_count": 3,
+    "declared_count": 3,
+    "parsed_count": 2,
+    "rejected_count": 1,
+    "warn_count": 0,
+    "declared_control_total": "1801.00",
+    "computed_control_total": "1801.00",
+    "failures": [
+      {
+        "row_number": 4,
+        "reason": "ROW_FIELD_COUNT",
+        "severity": "ERROR"
+      },
+      {
+        "row_number": 5,
+        "reason": "RECORD_COUNT_MISMATCH",
+        "severity": "ERROR"
+      }
+    ]
+  }
+}

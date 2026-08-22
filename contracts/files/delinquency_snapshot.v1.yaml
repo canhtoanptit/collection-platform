@@ -1,0 +1,77 @@
+# Feed contract — delinquency_snapshot v1 (D§80/81, meta-schema: contracts/files/SPEC.md)
+#
+# Daily as-of snapshot of the source system's own delinquency view
+# (cb_delq), delivered over SFTP to outbound/delinquency_snapshot/
+# (A§31, SIM-3/SIM-4). The platform recomputes DPD and buckets itself from
+# loan_accounts (D§5); this feed is the source's opinion, and the difference
+# between the two is a reconciliation signal, not an input.
+#
+# Released contract — immutable. Any breaking change ships as delinquency_snapshot.v2.yaml.
+feed_id: delinquency_snapshot
+version: 1
+source_id: COREBANK_SFTP
+description: >-
+  Daily delinquency snapshot per account as computed by the core banking
+  system: days past due, bucket code and overdue amount as of the business
+  date. Used for parity checks against the platform's own bucketing.
+
+filename_regex: '^delinquency_snapshot_(?P<business_date>\d{8})\.csv$'
+encoding: UTF-8
+format: RFC4180
+
+header:
+  feed_code: DELQ_SNAPSHOT
+  fields: [feed_code, business_date, record_count]
+
+trailer:
+  fields: [record_count, control_total]
+  control_total_column: od_amt
+
+columns:
+  - name: acct_no
+    type: string
+    required: true
+    pattern: '^[A-Z0-9]{6,12}$'
+    description: Account the snapshot row describes (cb_account.acct_no).
+  - name: as_of_dt
+    type: date_yyyymmdd
+    required: true
+    description: Snapshot date. Equal to the file's business date for a normal daily drop.
+  - name: dpd
+    type: integer
+    required: true
+    min: 0
+    description: Days past due as computed by the source system. 0 for a current account.
+  - name: bucket_cd
+    type: enum
+    required: true
+    enum: [CURRENT, B1_30, B31_60, B61_90, B90P]
+    description: >-
+      Source delinquency bucket (D§5): CURRENT, 1-30, 31-60, 61-90 and 90+
+      days past due. The platform's own buckets are configurable and computed
+      independently.
+  - name: od_amt
+    type: decimal
+    required: true
+    scale: 2
+    description: Overdue amount as of the snapshot date, major units, 2dp. Control-total column.
+
+business_rules:
+  - id: dpd_non_negative
+    expr: dpd >= 0
+    severity: ERROR
+    description: >-
+      Days past due cannot be negative. A negative value means the source
+      computed the snapshot against the wrong as-of date, which would
+      mis-bucket the account and mis-drive treatment selection.
+
+sla:
+  expected_by: "02:00"
+  late_by: "03:00"
+  timezone: UTC
+
+reconciliation:
+  count: declared_equals_parsed
+  amount:
+    column: od_amt
+    vs: trailer_control_total
