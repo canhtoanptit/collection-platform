@@ -1,0 +1,14 @@
+{
+  "eventId": "01M0MEKF4VQ2W7XN4M6VJ5RTHB",
+  "payment": {
+    "sourceSystem": "COREBANK",
+    "externalPaymentRef": "PAY-2026-08-22-000917431",
+    "accountId": "ACC000004711",
+    "amountMinor": 8900,
+    "currency": "EUR",
+    "paidAt": "2026-08-22T09:41:03Z",
+    "channel": "BANK_TRANSFER",
+    "reversed": false
+  },
+  "sentAt": "2026-08-22T09:41:05Z"
+}

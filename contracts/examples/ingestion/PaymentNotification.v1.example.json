@@ -1,0 +1,10 @@
+{
+  "sourceSystem": "COREBANK",
+  "externalPaymentRef": "PAY-2026-08-22-000917431",
+  "accountId": "ACC000004711",
+  "amountMinor": 8900,
+  "currency": "EUR",
+  "paidAt": "2026-08-22T09:41:03Z",
+  "channel": "BANK_TRANSFER",
+  "reversed": false
+}

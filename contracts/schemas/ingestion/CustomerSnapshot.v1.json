@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/ingestion/CustomerSnapshot.v1.json",
+  "title": "CustomerSnapshot.v1",
+  "description": "Canonical customer snapshot: the complete collections-relevant state of one source-system customer as observed at `asOf`, emitted by the ingestion canonicalizer (ING-11) from the corebank CDC stream (`cb_customer`) and, for backfills, from file feeds. Snapshot semantics — every field is present on every message and carries the current value, so a consumer applies the whole document as an idempotent upsert and never reconstructs state from deltas; Debezium initial-snapshot floods and DLQ replays are therefore harmless (customer-service dedupes on the envelope `eventId` and suppresses no-op writes). Source quirks are resolved at this boundary and never travel inward: `segment_cd char(1)` becomes a canonical segment code, `dob` becomes an ISO calendar date, strings are trimmed, and the source's `created_dt int YYYYMMDD` is not carried at all — no consumer needs it, and a field nobody needs is a field nobody has to keep clean. On the wire this document is the `payload` of an A§24 EventEnvelope (eventType `CustomerSnapshot`, eventVersion 1, aggregateType `Customer`, aggregateId = `customerId`, producer `ingestion-canonicalizer`) published to `ingestion.customers.v1` keyed by `customerId`; `asyncapi/collections.v1.yaml` (CON-2) is the authoritative topic index. PII — `fullName`, `dob`, `phone` and `email` are personal data and flow to **customer-service only**: it is the sole store of the collections customer profile and no other domain service subscribes to this topic (A§7.3), so no PII fans out across the platform. Analytics does not consume this topic; PII reaches Snowflake on the RAW/CDC path where masking is applied at the mart (`dim_customer.{full_name,dob,phone,email}` MASKING POLICY — `COLX_REPORTER` sees `***MASKED***`, A§69, `security/masking-matrix.md`). Masking is an analytics control, never a substitute for minimisation here, which is why every PII field is nullable: the canonicalizer emits `null` when the source holds no value or holds one it cannot normalise (recording a data-quality warning — never a silent drop, D§38), and a consumer that does not need a PII field must not require one. Released contract files are immutable: a breaking change ships as CustomerSnapshot.v2.json (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "customerId",
+    "sourceSystem",
+    "status",
+    "segment",
+    "fullName",
+    "dob",
+    "phone",
+    "email",
+    "asOf"
+  ],
+  "properties": {
+    "customerId": {
+      "type": "string",
+      "description": "Customer identifier as owned by the source system (`cb_customer.cust_no`, varchar(10)), trimmed. Source-owned identifiers keep their source format and are never re-minted as platform ULIDs (contracts/README §6). Unique within `sourceSystem` only, so consumers key their upsert on the pair (`sourceSystem`, `customerId`). Also the envelope `aggregateId` and the partition key of `ingestion.customers.v1`, which is what makes ordering per customer guaranteed (A§26).",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "CUS0000042"
+      ]
+    },
+    "sourceSystem": {
+      "type": "string",
+      "description": "System of record this customer belongs to (SCREAMING_SNAKE_CASE, stable for the life of the source). Part of every natural key on this topic: source identifiers are unique per source system, not globally, and further sources are onboarded during the migration waves (A§72). Deliberately the **business system of record, not the ingestion channel**: `COREBANK_CDC` and `COREBANK_SFTP` are two ingestion `source_id`s onto the same system of record `COREBANK`, and both must emit `COREBANK` here — otherwise the same customer arriving by two paths would carry two different natural keys and upsert twice instead of once. Which channel a record arrived on is the ingestion control plane's business (file registry, CDC checkpoints), never the canonical topic's.",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "COREBANK"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Canonical customer lifecycle status, mapped by the canonicalizer from the source's legacy code column. Closed vocabulary: the platform owns this meaning, so a source code with no mapping is dead-lettered to `dlq.ingestion.v1` and alerted rather than passed through or defaulted — a canonical topic never carries a legacy code and never invents an `UNKNOWN`. `DECEASED` is load-bearing: customer-service derives contactability from status, preferences and constraints (constraints override preferences, A§5.1).",
+      "enum": [
+        "ACTIVE",
+        "INACTIVE",
+        "DECEASED",
+        "CLOSED"
+      ]
+    },
+    "segment": {
+      "type": "string",
+      "description": "Canonical customer segment code in SCREAMING_SNAKE_CASE, mapped from `cb_customer.segment_cd char(1)`. Pattern-constrained rather than enumerated on purpose: the segment taxonomy is owned by the business and grows without a platform release, whereas the lifecycle vocabulary in `status` is owned by the platform and closed. Always a code, never null: a source row with no segment maps to the taxonomy's own unclassified code, so no consumer and no decision rule has to handle an absent segment (that is also why a missing segment is not a reason to dead-letter a customer — the mapping always has an answer). Read by decisioning as `customer.segment` (A§52) and by strategy eligibility rules, which compare it with `EQ`/`IN` against values declared in the context field catalogue.",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9_]*$",
+      "examples": [
+        "RETAIL",
+        "SME",
+        "PRIVATE"
+      ]
+    },
+    "fullName": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "PII. Legal name as held by the source, trimmed with internal whitespace collapsed. `null` when the source holds no usable value. Used for collector display and correspondence only — no collections decision branches on a name, which is why this field may be withheld entirely without affecting decisioning.",
+      "minLength": 1,
+      "maxLength": 256,
+      "examples": [
+        "Aoife Nolan"
+      ]
+    },
+    "dob": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "PII. Date of birth as an ISO calendar date (`YYYY-MM-DD`), converted at this boundary from the source's `int YYYYMMDD` column: YYYYMMDD integers never travel inward (docs/conventions.md §2). `null` when absent or unparseable. Used for identity verification on inbound contact and for vulnerability policy; no v1 decision rule performs arithmetic on it.",
+      "format": "date",
+      "examples": [
+        "1987-04-02"
+      ]
+    },
+    "phone": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "PII. Single best contact number in E.164 form: `+`, country code, subscriber number, digits only, no spaces or punctuation. The canonicalizer normalises the source value; a value it cannot normalise to E.164 becomes `null` plus a data-quality warning, so one malformed phone number never quarantines a customer record.",
+      "pattern": "^\\+[1-9]\\d{7,14}$",
+      "examples": [
+        "+353871234567"
+      ]
+    },
+    "email": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "PII. Contact email address, trimmed and lower-cased. Same normalisation rule as `phone`: unparseable source values become `null` with a data-quality warning rather than propagating junk into a canonical topic.",
+      "format": "email",
+      "minLength": 3,
+      "maxLength": 320,
+      "examples": [
+        "aoife.nolan@example.ie"
+      ]
+    },
+    "asOf": {
+      "type": "string",
+      "description": "Instant at which this state was observed in the source: the CDC event's source commit timestamp, or 00:00:00Z of the file's `business_date` for a file-feed backfill. RFC3339, UTC, `Z` only — local offsets are rejected. Normally equal to the envelope `occurredAt`; it is repeated inside the payload so the snapshot is self-contained and remains orderable and ageable when it is replayed from object storage, read by dbt, or used as a test fixture. Consumers use it as the last-writer-wins ordering key per aggregate when replays and snapshot floods interleave.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T02:14:07Z"
+      ]
+    }
+  }
+}

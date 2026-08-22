@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/ingestion/AccountSnapshot.v1.json",
+  "title": "AccountSnapshot.v1",
+  "description": "Canonical account snapshot: the complete collections-relevant state of one source-system account as observed at `asOf`, emitted by the ingestion canonicalizer (ING-11) from the corebank CDC stream (`cb_account`) and from the `loan_accounts` file feed. This is the load-bearing ingestion contract — the delinquency clock starts here: `oldestUnpaidDueDate` plus `asOf` are the inputs from which delinquency-service computes `dpd = asOf − oldestUnpaidDueDate` in whole UTC days and assigns a bucket from its configurable versioned rows (D§5). Snapshot semantics — every field is present on every message and carries the current value, so a consumer applies the whole document as an idempotent upsert; account-service hash-compares against stored state to suppress no-op noise and emits `AccountUpdated` only on a real change, which is why Debezium initial-snapshot floods and DLQ replays are harmless. Money is `int64` minor units with a single sibling `currency` for the whole document (contracts/README §4): the canonicalizer converts the source's `NUMERIC(18,2)` decimal strings once, here, and no float is ever created in the process. Dates are ISO: the source's `int YYYYMMDD` columns (`open_dt`, `last_pay_dt`, `oldest_unpaid_dt`) are converted at this boundary and never travel inward (docs/conventions.md §2). On the wire this document is the `payload` of an A§24 EventEnvelope (eventType `AccountSnapshot`, eventVersion 1, aggregateType `Account`, aggregateId = `accountId`, producer `ingestion-canonicalizer`) published to `ingestion.accounts.v1` keyed by `accountId`; `asyncapi/collections.v1.yaml` (CON-2) is the authoritative topic index. No PII: this topic carries balances and codes only, so it fans out to account-service (and, through `AccountUpdated`, to delinquency-service) without a PII control. Released contract files are immutable: a breaking change ships as AccountSnapshot.v2.json (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accountId",
+    "customerId",
+    "sourceSystem",
+    "productCode",
+    "status",
+    "currentBalanceMinor",
+    "overdueAmountMinor",
+    "minimumDueMinor",
+    "currency",
+    "openedAt",
+    "closedAt",
+    "lastPaymentAt",
+    "oldestUnpaidDueDate",
+    "asOf"
+  ],
+  "properties": {
+    "accountId": {
+      "type": "string",
+      "description": "Account identifier as owned by the source system (`cb_account.acct_no`, varchar(12)), trimmed. Source-owned identifiers keep their source format and are never re-minted as platform ULIDs (contracts/README §6). Unique within `sourceSystem` only, so consumers key their upsert on the pair (`sourceSystem`, `accountId`). Also the envelope `aggregateId` and the partition key of `ingestion.accounts.v1`, which makes ordering per account guaranteed (A§26) — and per-account ordering is all the delinquency calculation needs.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "ACC000004711"
+      ]
+    },
+    "customerId": {
+      "type": "string",
+      "description": "Owning customer, as `CustomerSnapshot.customerId` within the same `sourceSystem`. There is no cross-topic ordering guarantee (A§26): an account snapshot may arrive before the customer snapshot it references, so a consumer stores the reference and reconciles later rather than rejecting the message — a dangling reference is a reconciliation exception, never a hard failure.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "CUS0000042"
+      ]
+    },
+    "sourceSystem": {
+      "type": "string",
+      "description": "System of record this account belongs to (SCREAMING_SNAKE_CASE, stable for the life of the source). Part of every natural key on this topic: source identifiers are unique per source system, not globally, and further sources are onboarded during the migration waves (A§72). Deliberately the **business system of record, not the ingestion channel**: `COREBANK_CDC` and `COREBANK_SFTP` are two ingestion `source_id`s onto the same system of record `COREBANK`, and both must emit `COREBANK` here — otherwise the same account arriving by CDC and by the `loan_accounts` file would carry two different natural keys and be upserted as two accounts. Which channel a record arrived on is the ingestion control plane's business (file registry, CDC checkpoints), never the canonical topic's.",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "COREBANK"
+      ]
+    },
+    "productCode": {
+      "type": "string",
+      "description": "Canonical product code in SCREAMING_SNAKE_CASE, mapped from the source's `prod_cd`. Pattern-constrained rather than enumerated on purpose: the product catalogue is owned by the business and grows without a platform release, whereas the lifecycle vocabulary in `status` is owned by the platform and closed. Read by decisioning as `account.productCode` (A§52) and used by strategy eligibility to scope a strategy to a product family.",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9_]*$",
+      "examples": [
+        "CREDIT_CARD",
+        "PERSONAL_LOAN",
+        "MORTGAGE"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Canonical account lifecycle status, mapped by the canonicalizer from the source's `status_cd char(2)`. Closed vocabulary: the platform owns this meaning, so a source code with no mapping is dead-lettered to `dlq.ingestion.v1` and alerted rather than passed through or defaulted — a canonical topic never carries a legacy code and never invents an `UNKNOWN`. `DELINQUENT` here is the *source system's* opinion and is informational only: the platform's delinquency state is computed by delinquency-service from `oldestUnpaidDueDate`/`overdueAmountMinor` and lives on the `Delinquency` aggregate, so nothing downstream may branch on this value to decide delinquency (that would reintroduce two competing truths).",
+      "enum": [
+        "ACTIVE",
+        "DELINQUENT",
+        "SUSPENDED",
+        "CLOSED",
+        "WRITTEN_OFF"
+      ]
+    },
+    "currentBalanceMinor": {
+      "$ref": "#/$defs/minorUnits",
+      "description": "Total outstanding balance of the account at `asOf`, in minor units of `currency` (e.g. 184255 = EUR 1,842.55). Converted once here from the source's `NUMERIC(18,2)`. Signed: a negative value is a credit balance (overpayment or refund pending) and is a legitimate state, so consumers must not clamp it at zero."
+    },
+    "overdueAmountMinor": {
+      "$ref": "#/$defs/nonNegativeMinorUnits",
+      "description": "Amount contractually due and unpaid at `asOf`, in minor units of `currency`. Never negative. `0` means nothing is overdue and is the trigger for a cure downstream: delinquency-service transitions `DELINQUENT → CURED` on a snapshot whose overdue amount has fallen to zero, and case-service resolves the open case on the resulting `DelinquencyChanged` (D§5). Consistency rule, checked by the canonicalizer: `overdueAmountMinor == 0` exactly when `oldestUnpaidDueDate` is null. A snapshot where the two disagree — overdue money with no oldest unpaid date, or an oldest unpaid date with nothing overdue — is reported as a data-quality exception, never silently reconciled by a consumer (D§38)."
+    },
+    "minimumDueMinor": {
+      "$ref": "#/$defs/nonNegativeMinorUnits",
+      "description": "Contractual minimum payment due for the current billing period at `asOf`, in minor units of `currency`. Never negative. Used as the floor when treatment logic proposes a payment amount and when an arrangement's affordability is checked; it is not the overdue amount and the two are independent."
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of every `*Minor` amount in this document. One currency per account: an account whose source rows disagree on currency is a data-quality exception, not something a consumer resolves. The dev portfolio is `EUR` throughout.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "openedAt": {
+      "type": "string",
+      "description": "Calendar date the account was opened (`YYYY-MM-DD`), converted at this boundary from the source's `open_dt int YYYYMMDD`. Used for account-age features in decisioning and for cohort analysis in the marts.",
+      "format": "date",
+      "examples": [
+        "2019-03-14"
+      ]
+    },
+    "closedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Calendar date the account was closed (`YYYY-MM-DD`), or `null` while it is open. The key is always present and the value is `null` — an absent key would be indistinguishable from an unknown value on a snapshot topic. A non-null value is expected only with `status` `CLOSED` or `WRITTEN_OFF`; the pair disagreeing is a data-quality exception.",
+      "format": "date",
+      "examples": [
+        "2026-06-30"
+      ]
+    },
+    "lastPaymentAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Instant of the most recent payment known to the source at `asOf` (RFC3339, UTC, `Z`), or `null` when the account has never paid. Precision caveat: the source column is `last_pay_dt int YYYYMMDD`, so on the CDC and file paths the canonicalizer emits 00:00:00Z of that business date and the time component carries no information. True intraday payment times arrive separately as `PaymentNotification` from the payment webhook, which is the reason that path exists — consumers needing payment timing must use the payment stream, not this field.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-07-18T00:00:00Z"
+      ]
+    },
+    "oldestUnpaidDueDate": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "**The delinquency input.** Due date (`YYYY-MM-DD`) of the oldest still-unpaid instalment or statement at `asOf`, converted at this boundary from `cb_account.oldest_unpaid_dt int YYYYMMDD` (nullable in the source). delinquency-service computes `dpd = asOf − oldestUnpaidDueDate` in whole UTC days and buckets the result with its configurable, versioned bucket rows (`1-30 / 31-60 / 61-90 / 90+`, validated contiguous and non-overlapping, never hard-coded — D§5); nothing recomputes DPD from balances or from a payment history, so this single field is the whole delinquency clock. The key is ALWAYS present and the value is `null` exactly when the account has no unpaid due amount — in which case DPD is **undefined, not zero**. That distinction is the point of making this a nullable value rather than an optional key: `null` means `CURRENT`, `0` would mean 'due today and unpaid', and a consumer that saw an absent key could not tell either from a truncated message.",
+      "format": "date",
+      "examples": [
+        "2026-07-31"
+      ]
+    },
+    "asOf": {
+      "type": "string",
+      "description": "Instant at which this state was observed in the source: the CDC event's source commit timestamp, or 00:00:00Z of the file's `business_date` for a file feed. RFC3339, UTC, `Z` only — local offsets are rejected. Two uses: (1) the DPD anchor, `dpd = asOf − oldestUnpaidDueDate` (whole UTC days, so the date part is what matters); (2) the last-writer-wins ordering key per aggregate when replays and snapshot floods interleave. Normally equal to the envelope `occurredAt`; it is repeated inside the payload so the snapshot is self-contained and stays orderable and ageable when replayed from object storage, read by dbt, or used as a test fixture.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T02:14:07Z"
+      ]
+    }
+  },
+  "$defs": {
+    "minorUnits": {
+      "title": "MinorUnits",
+      "description": "Signed monetary amount in minor units of the document's `currency`, transported as a JSON integer within the `int64` range — never a float, never major units, never a formatted string (contracts/README §4). Consumers deserialize into `int64`.",
+      "type": "integer",
+      "minimum": -9223372036854775808,
+      "maximum": 9223372036854775807
+    },
+    "nonNegativeMinorUnits": {
+      "title": "NonNegativeMinorUnits",
+      "description": "As `minorUnits`, restricted to zero or a positive amount: the field's business meaning has no negative reading.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    }
+  }
+}

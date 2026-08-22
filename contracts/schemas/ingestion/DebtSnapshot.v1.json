@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/ingestion/DebtSnapshot.v1.json",
+  "title": "DebtSnapshot.v1",
+  "description": "Canonical debt snapshot: the component breakdown of one source-system debt as observed at `asOf`, emitted by the ingestion canonicalizer (ING-11) from the corebank CDC stream (`cb_debt`). Snapshot semantics — every field is present on every message and carries the current value, so debt-service applies the whole document as an idempotent upsert and emits `DebtUpdated` only when something actually changed. Components only, no total: `recoverableAmount = principal + interest + fees + penalties` is derived by debt-service (its v1 invariant) and is deliberately **not** transmitted, so the parts and the total can never disagree on the wire. All four components are non-negative and share the single `currency` of this document (debt-service's single-currency invariant); money is `int64` minor units, converted once here from the source's `NUMERIC(18,2)` decimal strings with no float in the path (contracts/README §4). On the wire this document is the `payload` of an A§24 EventEnvelope (eventType `DebtSnapshot`, eventVersion 1, aggregateType `Debt`, aggregateId = `debtId`, producer `ingestion-canonicalizer`) published to `ingestion.debts.v1` keyed by `debtId`; `asyncapi/collections.v1.yaml` (CON-2) is the authoritative topic index. No PII. Released contract files are immutable: a breaking change ships as DebtSnapshot.v2.json (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "debtId",
+    "accountId",
+    "sourceSystem",
+    "principalMinor",
+    "interestMinor",
+    "feesMinor",
+    "penaltiesMinor",
+    "currency",
+    "asOf"
+  ],
+  "properties": {
+    "debtId": {
+      "type": "string",
+      "description": "Debt identifier as owned by the source system (`cb_debt.debt_id`, a bigserial rendered as its decimal string), trimmed. Numeric source keys travel as strings so that no consumer, log line or S3 partition has to care about integer width, and so the field shape is identical across sources that use alphanumeric keys. Never re-minted as a platform ULID (contracts/README §6). Unique within `sourceSystem` only. Also the envelope `aggregateId` and the partition key of `ingestion.debts.v1`.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "8891274"
+      ]
+    },
+    "accountId": {
+      "type": "string",
+      "description": "Account this debt belongs to, as `AccountSnapshot.accountId` within the same `sourceSystem`. There is no cross-topic ordering guarantee (A§26): a debt snapshot may arrive before the account snapshot it references, so a consumer stores the reference and reconciles later rather than rejecting the message.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "ACC000004711"
+      ]
+    },
+    "sourceSystem": {
+      "type": "string",
+      "description": "System of record this debt belongs to (SCREAMING_SNAKE_CASE, stable for the life of the source). Part of the natural key: `debtId` is a per-source sequence value and is emphatically not globally unique, so consumers key their upsert on the pair (`sourceSystem`, `debtId`). Deliberately the **business system of record, not the ingestion channel**: `COREBANK_CDC` and `COREBANK_SFTP` are two ingestion `source_id`s onto the same system of record `COREBANK`, and both must emit `COREBANK` here. Carried on debts for the same reason as on the other three canonical schemas, and with more force: a bare bigserial `debtId` stops being a usable key the moment a second source is onboarded.",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "COREBANK"
+      ]
+    },
+    "principalMinor": {
+      "$ref": "#/$defs/nonNegativeMinorUnits",
+      "description": "Outstanding principal at `asOf`, in minor units of `currency` (e.g. 155300 = EUR 1,553.00)."
+    },
+    "interestMinor": {
+      "$ref": "#/$defs/nonNegativeMinorUnits",
+      "description": "Accrued unpaid interest at `asOf`, in minor units of `currency`."
+    },
+    "feesMinor": {
+      "$ref": "#/$defs/nonNegativeMinorUnits",
+      "description": "Outstanding fees at `asOf`, in minor units of `currency` (arrears, service and collection fees as the source classifies them)."
+    },
+    "penaltiesMinor": {
+      "$ref": "#/$defs/nonNegativeMinorUnits",
+      "description": "Outstanding penalty charges at `asOf`, in minor units of `currency`. Kept separate from `feesMinor` because penalties are the component most often waived as part of a settlement, and a waiver must be visible as a component change."
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of every `*Minor` amount in this document. One currency per debt (debt-service invariant): components in mixed currencies are a data-quality exception, not something a consumer resolves. The dev portfolio is `EUR` throughout.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "asOf": {
+      "type": "string",
+      "description": "Instant at which this state was observed in the source: the CDC event's source commit timestamp, or 00:00:00Z of the file's `business_date` for a file feed. RFC3339, UTC, `Z` only — local offsets are rejected. Normally equal to the envelope `occurredAt`; it is repeated inside the payload so the snapshot is self-contained and stays orderable and ageable when replayed from object storage, read by dbt, or used as a test fixture. Consumers use it as the last-writer-wins ordering key per aggregate when replays and snapshot floods interleave.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T02:14:07Z"
+      ]
+    }
+  },
+  "$defs": {
+    "nonNegativeMinorUnits": {
+      "title": "NonNegativeMinorUnits",
+      "description": "Monetary amount in minor units of the document's `currency`, transported as a JSON integer within the non-negative `int64` range — never a float, never major units, never a formatted string (contracts/README §4). Debt components are never negative: a credit is a reduction of a component, not a negative component.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    }
+  }
+}

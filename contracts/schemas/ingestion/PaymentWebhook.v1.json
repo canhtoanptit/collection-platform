@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/ingestion/PaymentWebhook.v1.json",
+  "title": "PaymentWebhook.v1",
+  "description": "The RAW inbound request body of `POST /v1/webhooks/payments` — the payment provider's intraday notification, as it arrives from outside the platform. This is not an event payload and never appears in an A§24 envelope: it is the HTTP body the webhook receiver (ING-6) validates against this schema before anything else happens, so a malformed delivery is rejected with `422` and the A§20 error body instead of reaching Kafka. Security is transport-level and deliberately absent from the body (A§34, defence in depth): the HMAC over the raw bytes travels in `X-Signature` — a signature carried inside the payload it signs cannot authenticate that payload — and the caller's identity is a Cognito JWT with scope `webhook/write`. Both are verified before this schema is applied. Idempotency is the receiver's, not the provider's: `eventId` is inserted into `webhook_event(event_id)` and a conflict returns `200 {\"status\":\"duplicate\"}` with no republish (D§3.5), which is why the simulator derives a deterministic ULID from the source payment id — a replay is then a true duplicate rather than a new fact (SIM-5). Flow: accepted bodies are published verbatim to the ingestion-internal topic `ingestion.webhook.payment.v1` keyed by the account (raw topics never leave `ingestion/`), and the canonicalizer (ING-11) lifts `payment` onto `ingestion.payments.v1` as a `PaymentNotification` payload. That lift needs no conversion: this webhook is the one source interface that already speaks the canonical shapes — `int64` minor units and RFC3339 UTC — whereas the CDC and file paths for the same payments must convert `NUMERIC(18,2)` and `int YYYYMMDD`. Both paths carry the same payments on purpose; payment-service's natural-key dedup absorbs the overlap (D§47). Released contract files are immutable: a breaking change ships as PaymentWebhook.v2.json (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "payment",
+    "sentAt"
+  ],
+  "properties": {
+    "eventId": {
+      "$ref": "https://contracts.collections.internal/schemas/envelope/EventEnvelope.v1.json#/$defs/ulid",
+      "description": "Identity of this delivery, minted by the provider and mirrored from the `X-Event-Id` header into the body. A platform ULID (the provider is issued the format as part of the integration contract), so the same definition as every other platform identifier is reused here. The receiver requires header and body to agree and answers a mismatch with `422` — never a silent preference for one of them, because the two are used for different things: the header is what the HMAC and the request log see, and the body is what the persisted `webhook_event` row and the published message carry. Retrying the same delivery MUST reuse this value; a genuinely new payment MUST get a new one."
+    },
+    "payment": {
+      "$ref": "https://contracts.collections.internal/schemas/ingestion/PaymentNotification.v1.json",
+      "description": "The payment itself, in exactly the canonical `PaymentNotification.v1` shape — referenced rather than restated so that the provider contract and the canonical topic can never drift apart, and so a change to one is mechanically a change to both. Read its schema for the natural dedup key (`sourceSystem`, `externalPaymentRef`), the minor-unit money rule and the reversal semantics."
+    },
+    "sentAt": {
+      "type": "string",
+      "description": "Instant the provider sent this delivery attempt (RFC3339, UTC, `Z` only — local offsets are rejected). Not the payment's time: that is `payment.paidAt`, and the gap between them is provider lag, which is what this field is for (a metric and a late-webhook alert). A retry of the same `eventId` carries a later `sentAt`; the receiver must still treat it as a duplicate, so nothing may key idempotency on this field.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T09:41:05Z"
+      ]
+    }
+  }
+}

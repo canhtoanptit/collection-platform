@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.collections.internal/schemas/ingestion/PaymentNotification.v1.json",
+  "title": "PaymentNotification.v1",
+  "description": "Canonical notification that one payment was taken against one account. Unlike its three sibling schemas this is an event about a discrete fact, not a state snapshot: it is never restated with new values, and a correction arrives as a further notification carrying the same natural key. Emitted by the ingestion canonicalizer (ING-11) from two paths that deliberately overlap — the intraday payment webhook (`ingestion.webhook.payment.v1`, republished with no unit conversion because `PaymentWebhook.v1` already speaks this shape) and the batch path (`cb_payment` CDC plus the `payments` file feed, where `NUMERIC(18,2)` becomes minor units and `pay_dt int YYYYMMDD` becomes a timestamp). **Dedup key: (`sourceSystem`, `externalPaymentRef`)** — the natural key of a payment, which is exactly the `UNIQUE(source_system, external_payment_ref)` constraint payment-service enforces on intake. That constraint, not upstream cleverness, is what makes the webhook/batch overlap safe and at-least-once delivery harmless (D§47, D§3.5): the second arrival of the same payment is absorbed, whichever path it came from and however many times it is replayed. Money is `int64` minor units with a sibling `currency` (contracts/README §4). On the wire this document is the `payload` of an A§24 EventEnvelope (eventType `PaymentNotification`, eventVersion 1, aggregateType `Account`, aggregateId = `accountId`, producer `ingestion-canonicalizer`) published to `ingestion.payments.v1` keyed by `accountId` — the aggregate here is the account, not the payment: no platform `paymentId` exists yet (payment-service mints it on intake), and keying by account is what keeps all payments of one account ordered relative to each other (A§26), which allocation against an arrangement schedule needs. The payment's own identity lives inside the payload as the natural key below. `asyncapi/collections.v1.yaml` (CON-2) is the authoritative topic index. No PII. Released contract files are immutable: a breaking change ships as PaymentNotification.v2.json (D§29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sourceSystem",
+    "externalPaymentRef",
+    "accountId",
+    "amountMinor",
+    "currency",
+    "paidAt",
+    "channel",
+    "reversed"
+  ],
+  "properties": {
+    "sourceSystem": {
+      "type": "string",
+      "description": "System of record that recorded the payment (SCREAMING_SNAKE_CASE, stable for the life of the source). First half of the natural dedup key: payment references are unique per source system, never globally, so the same reference string from two different sources is two different payments. Deliberately the **business system of record, not the ingestion channel** — and here that distinction is what makes dedup work at all: the webhook path (`COREBANK_WEBHOOK`) and the batch path (`COREBANK_CDC`, `COREBANK_SFTP`) are three ingestion channels reporting the SAME payments, so all three must emit `COREBANK`. Emitting the channel id instead would give one payment three natural keys and payment-service would book it three times (D§47).",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9_]{1,31}$",
+      "examples": [
+        "COREBANK"
+      ]
+    },
+    "externalPaymentRef": {
+      "type": "string",
+      "description": "The source system's own reference for this payment (`cb_payment.pay_id` or the provider's reference), trimmed and never re-minted as a platform ULID (contracts/README §6). Second half of the natural dedup key: together with `sourceSystem` it identifies the payment for the rest of its life, so it must be stable across the webhook and batch representations of the same payment — if the two paths disagreed on this value the dedup would silently double-count, which is why the webhook simulator derives it from the same `pay_id` the batch path reports (SIM-5).",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "PAY-2026-08-22-000917431"
+      ]
+    },
+    "accountId": {
+      "type": "string",
+      "description": "Account the payment was taken against, as `AccountSnapshot.accountId` within the same `sourceSystem`. Also the partition key of `ingestion.payments.v1`. A payment naming an account the platform does not yet know is held as a reconciliation exception, never dropped (D§38).",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^\\S+$",
+      "examples": [
+        "ACC000004711"
+      ]
+    },
+    "amountMinor": {
+      "type": "integer",
+      "description": "Amount paid, in minor units of `currency` (e.g. 8900 = EUR 89.00). Strictly positive: a reversal is never a negative amount, it is a further notification with the same natural key and `reversed` set to `true`. Transported as a JSON integer within the `int64` range — never a float, never major units, never a formatted string (contracts/README §4).",
+      "exclusiveMinimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "currency": {
+      "type": "string",
+      "description": "ISO-4217 alpha-3 currency of `amountMinor`. Must match the account's currency; a mismatch is a reconciliation exception for the ops team, not an FX conversion the platform performs. The dev portfolio is `EUR` throughout.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "EUR"
+      ]
+    },
+    "paidAt": {
+      "type": "string",
+      "description": "Instant the payment was taken (RFC3339, UTC, `Z` only — local offsets are rejected). This is the business fact's time, not the notification's: it is what promise-kept and arrangement-instalment due-date comparisons use. Precision differs by path and the difference is contractual, not accidental: the webhook path carries the true intraday instant, while the CDC and file paths only have `cb_payment.pay_dt int YYYYMMDD` and therefore report 00:00:00Z of that business date. A consumer must not infer ordering within a day from a batch-sourced value.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "examples": [
+        "2026-08-22T09:41:03Z"
+      ]
+    },
+    "channel": {
+      "type": "string",
+      "description": "Canonical payment channel, mapped by the canonicalizer from the source's `channel_cd`. Closed vocabulary: the platform owns this meaning, so a source code with no mapping is dead-lettered to `dlq.ingestion.v1` and alerted rather than passed through or defaulted — a canonical topic never carries a legacy code and never invents an `OTHER`. Used by reconciliation to corroborate the webhook stream against the source's intraday channels (`webhooks:payments` scope, ING-8) and by recovery reporting to attribute payments to a collection route (`AGENCY` payments are recoveries collected by a placed agency).",
+      "enum": [
+        "BANK_TRANSFER",
+        "DIRECT_DEBIT",
+        "CARD",
+        "CASH",
+        "CHEQUE",
+        "ONLINE",
+        "AGENCY"
+      ]
+    },
+    "reversed": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this notification reports a reversal (chargeback, bounced direct debit, or a bank error correction) of the payment identified by (`sourceSystem`, `externalPaymentRef`). A real boolean, not the source's `Y`/`N` character flag — that conversion happens in the canonicalizer, like every other legacy-type conversion. Always present on the wire, set explicitly from `reversed_flag`, so a consumer never has to distinguish 'absent' from 'false'; the declared default `false` states that a plain payment is the normal case and matches the zero value a consumer decodes into. Semantics of `true`: the referenced payment must be treated as no longer received — payment-service reverses its allocations, which can re-open an instalment and break a promise. A reversal does not cancel the natural key: the original notification and its reversal share it, and the pair is ordered by `paidAt` then arrival, so a consumer applies 'reversed wins'.",
+      "examples": [
+        false
+      ]
+    }
+  }
+}

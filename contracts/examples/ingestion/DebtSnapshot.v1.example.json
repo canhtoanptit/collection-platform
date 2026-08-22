@@ -1,0 +1,11 @@
+{
+  "debtId": "8891274",
+  "accountId": "ACC000004711",
+  "sourceSystem": "COREBANK",
+  "principalMinor": 155300,
+  "interestMinor": 21455,
+  "feesMinor": 5000,
+  "penaltiesMinor": 2500,
+  "currency": "EUR",
+  "asOf": "2026-08-22T02:14:07Z"
+}

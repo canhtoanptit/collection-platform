@@ -1,0 +1,16 @@
+{
+  "accountId": "ACC000004711",
+  "customerId": "CUS0000042",
+  "sourceSystem": "COREBANK",
+  "productCode": "CREDIT_CARD",
+  "status": "DELINQUENT",
+  "currentBalanceMinor": 184255,
+  "overdueAmountMinor": 31240,
+  "minimumDueMinor": 8900,
+  "currency": "EUR",
+  "openedAt": "2019-03-14",
+  "closedAt": null,
+  "lastPaymentAt": "2026-07-18T00:00:00Z",
+  "oldestUnpaidDueDate": "2026-07-31",
+  "asOf": "2026-08-22T02:14:07Z"
+}
