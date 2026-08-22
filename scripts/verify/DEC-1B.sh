@@ -101,9 +101,13 @@ for s in "${SPECS[@]}"; do
   n="$(awk "/^ {8}'[45][0-9][0-9]': *\$/{getline nxt; if (nxt !~ /^ {10}\\\$ref: '\\.\\/common\\.v1\\.yaml#\\/components\\/responses\\//) c++} END{print c+0}" "$SPEC_DIR/$s.v1.yaml")"
   nonstd=$((nonstd + n))
 done
-assert_eq "error responses \$ref common.v1.yaml (1 documented exception: model 503)" "1" "$nonstd"
-check "model 503 is the documented exception and reuses the shared Error schema" \
-      "grep -q \"components/responses/ServiceUnavailable\" '$SPEC_DIR/model.v1.yaml' && grep -q \"common.v1.yaml#/components/schemas/Error\" '$SPEC_DIR/model.v1.yaml'"
+assert_eq "every error response \$refs common.v1.yaml (no local exceptions)" "0" "$nonstd"
+check "model 503 \$refs the shared common.v1.yaml ServiceUnavailable response" \
+      "grep -q \"common.v1.yaml#/components/responses/ServiceUnavailable\" '$SPEC_DIR/model.v1.yaml'"
+check "model.v1.yaml declares no local components.responses" \
+      "! grep -qE '^  responses:' '$SPEC_DIR/model.v1.yaml'"
+check "model.v1.yaml still documents both 503 codes in the operation description" \
+      "grep -q 'MODEL_TIMEOUT' '$SPEC_DIR/model.v1.yaml' && grep -q 'MODEL_UNAVAILABLE' '$SPEC_DIR/model.v1.yaml'"
 check "no spec defines its own error schema" \
       "! grep -qE '^ +(Error|ErrorDetail|ApiError|Problem):' $(printf \"'%s' \" \"$SPEC_DIR\"/{strategy,decision,treatment,model}.v1.yaml)"
 
@@ -146,7 +150,11 @@ for s in "${SPECS[@]}"; do
   f="$(grep -c '^ *additionalProperties: false$' "$SPEC_DIR/$s.v1.yaml" || true)"
   maps=$((maps + o - f))
 done
-assert_eq "typed-map exceptions to additionalProperties:false" "2" "$maps"
+# Four typed string/int maps, all deliberate and documented: treatment params
+# in strategy.v1.yaml and treatment.v1.yaml, and contactHistory.byChannel7d in
+# decision.v1.yaml and model.v1.yaml (open key set owned by contact-service,
+# every value a non-negative integer).
+assert_eq "typed-map exceptions to additionalProperties:false" "4" "$maps"
 
 # 3f. Self-contained: no $ref out of the OpenAPI world into the JSON Schemas.
 for s in "${SPECS[@]}"; do
@@ -182,6 +190,64 @@ check "treatment.v1.yaml documents treatments:read and treatments:write scopes" 
       "grep -q 'treatments:read' '$SPEC_DIR/treatment.v1.yaml' && grep -q 'treatments:write' '$SPEC_DIR/treatment.v1.yaml'"
 check "model.v1.yaml documents the scope its scoring call requires" \
       "grep -q 'decisions:write' '$SPEC_DIR/model.v1.yaml'"
+
+# 3j. Alignment with DEC-1A's normative decisioning JSON Schemas. The inline
+#     OpenAPI copies are self-contained by necessity, so drift is the standing
+#     risk; these assertions are the mechanical guard.
+printf -- '\n--- alignment with contracts/schemas/decisioning (DEC-1A, normative)\n'
+CTXDOC="$REPO_ROOT/contracts/schemas/decisioning/context-document.v1.json"
+check "DEC-1A context-document.v1.json is present to align against" "test -f '$CTXDOC'"
+
+# contactability is exactly HIGH|MEDIUM|LOW|UNCONTACTABLE (a reachability band;
+# permission lives in doNotContact and the CustomerUpdated constraint tri-state).
+for f in decision model; do
+  got="$(awk '/^        contactability:$/{f=1} f && /^          enum:$/{e=1;next} e && /^            - /{v=$0; sub(/^ *- /,"",v); printf "%s ", v; next} e{exit}' "$SPEC_DIR/$f.v1.yaml")"
+  assert_eq "contactability enum in $f.v1.yaml" "HIGH MEDIUM LOW UNCONTACTABLE " "$got"
+done
+check "no stale UNKNOWN contactability member survives in any spec" \
+      "! grep -qw UNKNOWN $(printf \"'%s' \" \"$SPEC_DIR\"/{strategy,decision,treatment,model}.v1.yaml)"
+check "DEC-1A schema agrees: UNCONTACTABLE, not UNKNOWN" \
+      "grep -q 'UNCONTACTABLE' '$CTXDOC' && ! grep -q '\"UNKNOWN\"' '$CTXDOC'"
+
+# byChannel7d is an open-but-typed map keyed by SCREAMING_SNAKE channel codes.
+# OpenAPI 3.0.3 has no propertyNames, so the key rule is documented here and
+# enforced by the JSON Schema; the value type is enforced in both.
+for f in decision model; do
+  check "byChannel7d is an open typed map in $f.v1.yaml" \
+        "awk '/^    ContextChannelCounts:\$/{b=1} b && /^      additionalProperties:\$/{a=1} b && a && /^        type: integer\$/{ok=1} b && /^      example:\$/{exit} END{exit !ok}' '$SPEC_DIR/$f.v1.yaml'"
+  check "byChannel7d declares no closed lowerCamelCase channel properties in $f.v1.yaml" \
+        "! awk '/^    ContextChannelCounts:\$/{b=1} b && /^        - (sms|email|letter|digital)\$/{print} b && /^    ContextContactHistory:\$/{exit}' '$SPEC_DIR/$f.v1.yaml' | grep -q ."
+  check "byChannel7d examples use SCREAMING_SNAKE channel keys in $f.v1.yaml" \
+        "grep -qE '^ +SMS: [0-9]+\$' '$SPEC_DIR/$f.v1.yaml' && ! grep -qE '^ +sms: [0-9]+\$' '$SPEC_DIR/$f.v1.yaml'"
+done
+check "DEC-1A schema agrees: byChannel7d keys are SCREAMING_SNAKE, values typed" \
+      "grep -q 'propertyNames' '$CTXDOC'"
+
+# A rule must be able to address a map entry, so a field path may carry an
+# uppercase or underscored segment after the first: contactHistory.byChannel7d.SMS.
+check "rule field paths can address a byChannel7d channel entry" \
+      "printf 'contactHistory.byChannel7d.SMS' | grep -qE '^[a-z][A-Za-z0-9]*(\.[A-Za-z0-9][A-Za-z0-9_]*)+\$'"
+check "strategy.v1.yaml ConditionLeaf.field uses the catalogue path pattern" \
+      "grep -qF -- '[A-Za-z0-9][A-Za-z0-9_]*)+' '$SPEC_DIR/strategy.v1.yaml'"
+for f in decision model; do
+  check "$f.v1.yaml provenance path permits a map-entry segment" \
+        "grep -qF -- '[A-Za-z0-9][A-Za-z0-9_]*){0,4}' '$SPEC_DIR/$f.v1.yaml'"
+done
+
+# The two inline context documents must stay structurally identical: the model
+# scores exactly the document the decision was made on.
+ctx_sig() {
+  awk '
+    /^    (DecisionSubject|ContextDelinquency|ContextAccount|ContextCustomer|ContextArrangement|ContextChannelCounts|ContextContactHistory|ContextProvenance|ContextDocument):$/ { inblk=1; print "## " $0; next }
+    /^    [A-Za-z]+:$/ { inblk=0 }
+    inblk && /^ *(type|format|pattern|enum|minimum|maximum|minItems|maxItems|minLength|maxLength|additionalProperties|required|properties|\$ref):/ { print }
+    inblk && /^ *- [A-Za-z0-9_]+$/ { print }
+  ' "$1"
+}
+ctx_sig "$SPEC_DIR/decision.v1.yaml" > "$TMP/ctx-decision.txt"
+ctx_sig "$SPEC_DIR/model.v1.yaml"    > "$TMP/ctx-model.txt"
+check "inline ContextDocument is structurally identical in decision and model specs" \
+      "test -s '$TMP/ctx-decision.txt' && diff -q '$TMP/ctx-decision.txt' '$TMP/ctx-model.txt'"
 
 # ---------------------------------------------- 4. A§16 catalogue and example
 printf -- '\n--- A§16 decision API catalogue and worked example\n'

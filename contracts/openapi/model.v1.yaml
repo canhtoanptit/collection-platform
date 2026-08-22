@@ -149,14 +149,22 @@ paths:
         **Timeouts are the caller's, and are reported as 503.** The strategy's
         `modelRefs[].timeoutMs` bounds how long decision-service waits; when
         this endpoint cannot answer in time — its own upstream inference call
-        hanging, a cold model — it responds **503 `MODEL_TIMEOUT`**. HTTP 504 is
-        deliberately not used: 504 belongs to a gateway reporting on something
-        behind it, whereas this is the addressed service saying it could not
-        complete in the time available. Decision-service then follows the
-        strategy's declared `onError` behaviour — substitute `defaultScore` and
-        record a reason code, or fail the decision — so the *strategy* decides
-        how much a missing score matters, rather than the model client guessing
-        (A§56, plan DEC-7/DEC-8).
+        hanging, a cold model — it responds **503 with code `MODEL_TIMEOUT`**.
+        A model that is temporarily unable to serve this version at all —
+        loading, upstream inference unavailable — is **503 with code
+        `MODEL_UNAVAILABLE`**. Both are retryable, and both use the shared A§20
+        `ServiceUnavailable` response from `common.v1.yaml`; the `code`
+        distinguishes them, which is the whole reason clients branch on `code`
+        and never on `message`.
+
+
+        HTTP 504 is deliberately not used: 504 belongs to a gateway reporting on
+        something behind it, whereas this is the addressed service saying it
+        could not complete in the time available. Decision-service then follows
+        the strategy's declared `onError` behaviour — substitute `defaultScore`
+        and record a reason code, or fail the decision — so the *strategy*
+        decides how much a missing score matters, rather than the model client
+        guessing (A§56, plan DEC-7/DEC-8).
 
 
         **Reason codes come from the model.** A§58 requires a decision to be
@@ -198,7 +206,7 @@ paths:
         '500':
           $ref: './common.v1.yaml#/components/responses/InternalError'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: './common.v1.yaml#/components/responses/ServiceUnavailable'
 
 components:
   securitySchemes:
@@ -214,35 +222,6 @@ components:
         without either is rejected with 403. In dev the caller is
         decision-service's own service identity; the model server never sees an
         end-user token.
-
-  responses:
-    ServiceUnavailable:
-      description: >-
-        503 — the model could not produce a score in the time available, or is
-        temporarily unable to serve this version (loading, upstream inference
-        unavailable). The body is the standard A§20 `Error` from
-        `common.v1.yaml`, with `code` `MODEL_TIMEOUT` for the timeout case and
-        `MODEL_UNAVAILABLE` for the rest. Retryable.
-
-
-        This response is declared locally rather than referenced from
-        `common.v1.yaml` only because that file — which is released and
-        immutable — has no 503 among its canned responses. The *body schema* is
-        still the shared `Error`: no operation in this repository defines its
-        own error schema (contracts/README.md §7). CON-1 should add a
-        `ServiceUnavailable` response to the common components; when it does,
-        this local copy becomes a `$ref` in `model.v2.yaml`.
-      headers:
-        X-Correlation-Id:
-          $ref: './common.v1.yaml#/components/headers/XCorrelationId'
-      content:
-        application/json:
-          schema:
-            $ref: './common.v1.yaml#/components/schemas/Error'
-          example:
-            code: MODEL_TIMEOUT
-            message: Model PAYMENT_PROPENSITY version 8 did not respond within the time available
-            correlationId: 01M0MEKBHXV37E3S3E28JT97KB
 
   parameters:
     ModelIdPath:
@@ -466,15 +445,23 @@ components:
         contactability:
           type: string
           description: >-
-            Derived contactability band, computed by the context builder from
-            contact history and available channels. A band rather than a raw
-            score so that features stay stable when the derivation is tuned;
-            `UNKNOWN` when there is not enough history to say.
+            Derived contactability band — how reachable the customer is.
+            Derived by customer-service rather than by the context builder, so
+            that recorded constraints override stated preferences (plan §7
+            SVC-1); a band rather than a raw score so that rules authored
+            against it stay stable when the derivation is tuned.
+
+
+            `UNCONTACTABLE` means no channel has usable contact details. It is a
+            *reachability* statement, not a permission one — permission lives in
+            `doNotContact` here and in the constraint tri-state carried on
+            `CustomerUpdated`. Conflating the two is how a customer with a valid
+            phone number and a do-not-contact flag gets called.
           enum:
             - HIGH
             - MEDIUM
             - LOW
-            - UNKNOWN
+            - UNCONTACTABLE
           example: HIGH
         preferredChannel:
           $ref: '#/components/schemas/Channel'
@@ -546,55 +533,40 @@ components:
       type: object
       title: ContextChannelCounts
       description: >-
-        Contact attempts in the last 7 days by channel. Every channel is
-        present with an explicit count, zero included, so the canonical JSON of
-        a context document — and therefore its content hash, and therefore a
-        deterministic score — does not depend on which channels happened to be
-        used.
+        Contact attempts in the last 7 days broken down by channel, e.g.
+        `{"SMS": 1, "EMAIL": 1}` — a per-channel contact-pressure feature.
 
 
-        One property per member of the `Channel` enum, named in the platform's
-        lowerCamelCase property convention.
-      additionalProperties: false
-      required:
-        - sms
-        - email
-        - letter
-        - digital
-      properties:
-        sms:
-          type: integer
-          format: int32
-          description: '`SMS` attempts in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 1
-        email:
-          type: integer
-          format: int32
-          description: '`EMAIL` attempts in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 0
-        letter:
-          type: integer
-          format: int32
-          description: '`LETTER` dispatches in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 0
-        digital:
-          type: integer
-          format: int32
-          description: '`DIGITAL` notifications in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 0
+        **Keys are SCREAMING_SNAKE channel codes** matching
+        `^[A-Z][A-Z0-9_]{1,31}$`. `SMS`, `EMAIL`, `LETTER`, `CALL` and
+        `DIGITAL` are the five the field catalogue lists as addressable paths,
+        so a rule reads `contactHistory.byChannel7d.SMS`. A channel absent from
+        the map means zero contacts on that channel; the context builder emits
+        an entry for every channel it has data for, and canonicalisation sorts
+        keys, so the input content hash is stable either way.
+
+
+        This is the one deliberate `additionalProperties` exception in the
+        decisioning contracts, and it is open-but-**typed**: the key set is the
+        channel vocabulary owned by contact-service, and adding a channel there
+        must not force a new version of every decisioning contract, so the keys
+        are open — while every value is constrained to a non-negative integer
+        count, so no free-form blob can hide here. OpenAPI 3.0.3 has no
+        `propertyNames`, so the key constraint is documented here rather than
+        enforced; `schemas/decisioning/context-document.v1.json` — the
+        normative artefact — enforces it with `propertyNames` and is what
+        validates every context document at runtime.
+      additionalProperties:
+        type: integer
+        format: int32
+        description: Contact attempts on the keyed channel in the last 7 days.
+        minimum: 0
       example:
-        sms: 1
-        email: 0
-        letter: 0
-        digital: 0
+        SMS: 1
+        EMAIL: 0
+        LETTER: 0
+        CALL: 0
+        DIGITAL: 0
 
     ContextContactHistory:
       type: object
@@ -636,10 +608,11 @@ components:
         contacts7d: 1
         contacts30d: 2
         byChannel7d:
-          sms: 1
-          email: 0
-          letter: 0
-          digital: 0
+          SMS: 1
+          EMAIL: 0
+          LETTER: 0
+          CALL: 0
+          DIGITAL: 0
         lastContactAt: '2026-08-19T09:14:00Z'
 
     ContextProvenance:
@@ -660,8 +633,14 @@ components:
           type: string
           description: >-
             Dotted path of the context section or field this entry describes,
-            e.g. `delinquency` or `contactHistory.byChannel7d`.
-          pattern: '^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){0,4}$'
+            e.g. `delinquency`, `contactHistory.byChannel7d`, or a single map
+            entry such as `contactHistory.byChannel7d.SMS`. Segments after the
+            first may start with a capital or contain underscores because
+            `byChannel7d` is keyed by SCREAMING_SNAKE channel codes; the pattern
+            matches the context field catalogue's, minus its requirement of at
+            least one dot, since a provenance entry normally covers a whole
+            section.
+          pattern: '^[a-z][A-Za-z0-9]*(\.[A-Za-z0-9][A-Za-z0-9_]*){0,4}$'
           example: delinquency
         source:
           type: string
@@ -758,10 +737,11 @@ components:
           contacts7d: 1
           contacts30d: 2
           byChannel7d:
-            sms: 1
-            email: 0
-            letter: 0
-            digital: 0
+            SMS: 1
+            EMAIL: 0
+            LETTER: 0
+            CALL: 0
+            DIGITAL: 0
           lastContactAt: '2026-08-19T09:14:00Z'
         provenance:
           - path: delinquency

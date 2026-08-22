@@ -1499,8 +1499,20 @@ components:
           type: string
           description: >-
             Dotted path of the context-document field to test. Must be present
-            in the context field catalogue.
-          pattern: '^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){0,4}$'
+            in the context field catalogue, whose `field` pattern this matches
+            byte for byte.
+
+
+            Segments after the first may start with a capital or contain
+            underscores, because the last segment of a map path is a channel
+            code: `contactHistory.byChannel7d.SMS` is a legal, catalogued field
+            (the `byChannel7d` map is keyed by SCREAMING_SNAKE channel codes —
+            see `context-document.v1.json`). Restricting every segment to
+            lowerCamelCase would make per-channel contact counts unaddressable
+            by a rule.
+          pattern: '^[a-z][A-Za-z0-9]*(\.[A-Za-z0-9][A-Za-z0-9_]*)+$'
+          minLength: 3
+          maxLength: 128
           example: delinquency.dpd
         op:
           $ref: '#/components/schemas/ConditionOperator'

@@ -239,10 +239,11 @@ paths:
                       contacts7d: 1
                       contacts30d: 2
                       byChannel7d:
-                        sms: 1
-                        email: 0
-                        letter: 0
-                        digital: 0
+                        SMS: 1
+                        EMAIL: 0
+                        LETTER: 0
+                        CALL: 0
+                        DIGITAL: 0
                       lastContactAt: '2026-08-19T09:14:00Z'
                     provenance:
                       - path: delinquency
@@ -1413,18 +1414,23 @@ components:
         contactability:
           type: string
           description: >-
-            Derived contactability band — how reachable the customer has proved
-            to be, computed by the context builder from contact history and
-            available channels. A band rather than a raw score so that rules
-            authored against it stay stable when the derivation is tuned.
-            `UNKNOWN` when there is not enough history to say, and rules must
-            treat `UNKNOWN` explicitly rather than assuming the worst or the
-            best.
+            Derived contactability band — how reachable the customer is.
+            Derived by customer-service rather than by the context builder, so
+            that recorded constraints override stated preferences (plan §7
+            SVC-1); a band rather than a raw score so that rules authored
+            against it stay stable when the derivation is tuned.
+
+
+            `UNCONTACTABLE` means no channel has usable contact details. It is a
+            *reachability* statement, not a permission one — permission lives in
+            `doNotContact` here and in the constraint tri-state carried on
+            `CustomerUpdated`. Conflating the two is how a customer with a valid
+            phone number and a do-not-contact flag gets called.
           enum:
             - HIGH
             - MEDIUM
             - LOW
-            - UNKNOWN
+            - UNCONTACTABLE
           example: HIGH
         preferredChannel:
           $ref: '#/components/schemas/Channel'
@@ -1498,56 +1504,40 @@ components:
       type: object
       title: ContextChannelCounts
       description: >-
-        Contact attempts in the last 7 days broken down by channel. Every
-        channel is present with an explicit count, zero included, so the
-        canonical JSON of a context document — and therefore its content hash —
-        does not depend on which channels happened to be used.
+        Contact attempts in the last 7 days broken down by channel, e.g.
+        `{"SMS": 1, "EMAIL": 1}`. Sums to at most `contacts7d`.
 
 
-        One property per member of the `Channel` enum, named in the platform's
-        lowerCamelCase property convention rather than by the enum spelling: a
-        field name is a field name, and a rule references it as
-        `contactHistory.byChannel7d.sms`.
-      additionalProperties: false
-      required:
-        - sms
-        - email
-        - letter
-        - digital
-      properties:
-        sms:
-          type: integer
-          format: int32
-          description: '`SMS` attempts in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 1
-        email:
-          type: integer
-          format: int32
-          description: '`EMAIL` attempts in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 0
-        letter:
-          type: integer
-          format: int32
-          description: '`LETTER` dispatches in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 0
-        digital:
-          type: integer
-          format: int32
-          description: '`DIGITAL` notifications in the last 7 days.'
-          minimum: 0
-          maximum: 10000
-          example: 0
+        **Keys are SCREAMING_SNAKE channel codes** matching
+        `^[A-Z][A-Z0-9_]{1,31}$`. `SMS`, `EMAIL`, `LETTER`, `CALL` and
+        `DIGITAL` are the five the field catalogue lists as addressable paths,
+        so a rule reads `contactHistory.byChannel7d.SMS`. A channel absent from
+        the map means zero contacts on that channel; the context builder emits
+        an entry for every channel it has data for, and canonicalisation sorts
+        keys, so the input content hash is stable either way.
+
+
+        This is the one deliberate `additionalProperties` exception in the
+        decisioning contracts, and it is open-but-**typed**: the key set is the
+        channel vocabulary owned by contact-service, and adding a channel there
+        must not force a new version of every decisioning contract, so the keys
+        are open — while every value is constrained to a non-negative integer
+        count, so no free-form blob can hide here. OpenAPI 3.0.3 has no
+        `propertyNames`, so the key constraint is documented here rather than
+        enforced; `schemas/decisioning/context-document.v1.json` — the
+        normative artefact — enforces it with `propertyNames` and is what
+        validates every context document at runtime.
+      additionalProperties:
+        type: integer
+        format: int32
+        description: Contact attempts on the keyed channel in the last 7 days.
+        minimum: 0
       example:
-        sms: 1
-        email: 0
-        letter: 0
-        digital: 0
+        SMS: 1
+        EMAIL: 0
+        LETTER: 0
+        CALL: 0
+        DIGITAL: 0
 
     ContextContactHistory:
       type: object
@@ -1589,10 +1579,11 @@ components:
         contacts7d: 1
         contacts30d: 2
         byChannel7d:
-          sms: 1
-          email: 0
-          letter: 0
-          digital: 0
+          SMS: 1
+          EMAIL: 0
+          LETTER: 0
+          CALL: 0
+          DIGITAL: 0
         lastContactAt: '2026-08-19T09:14:00Z'
 
     ContextProvenance:
@@ -1613,8 +1604,14 @@ components:
           type: string
           description: >-
             Dotted path of the context section or field this entry describes,
-            e.g. `delinquency` or `contactHistory.byChannel7d`.
-          pattern: '^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){0,4}$'
+            e.g. `delinquency`, `contactHistory.byChannel7d`, or a single map
+            entry such as `contactHistory.byChannel7d.SMS`. Segments after the
+            first may start with a capital or contain underscores because
+            `byChannel7d` is keyed by SCREAMING_SNAKE channel codes; the pattern
+            matches the context field catalogue's, minus its requirement of at
+            least one dot, since a provenance entry normally covers a whole
+            section.
+          pattern: '^[a-z][A-Za-z0-9]*(\.[A-Za-z0-9][A-Za-z0-9_]*){0,4}$'
           example: delinquency
         source:
           type: string
@@ -1720,10 +1717,11 @@ components:
           contacts7d: 1
           contacts30d: 2
           byChannel7d:
-            sms: 1
-            email: 0
-            letter: 0
-            digital: 0
+            SMS: 1
+            EMAIL: 0
+            LETTER: 0
+            CALL: 0
+            DIGITAL: 0
           lastContactAt: '2026-08-19T09:14:00Z'
         provenance:
           - path: delinquency
