@@ -47,19 +47,27 @@ Format: `<PREFIX><ULID>`, e.g. `FIL_01J9Z8Q7K3M4N5P6R7S8T9V0W1`. Domain aggregat
 
 ## 3. Correlation-ID flow (A§97)
 
-One `COR_` id follows a business flow from the moment data enters the platform to the case it changes.
-Every component propagates the id it received and never mints a new one mid-flow:
+One correlation id follows a business flow from the moment data enters the platform to the case
+it changes. Every component propagates the id it received and never mints a new one mid-flow.
+
+FORMAT RULE (corrected 2026-08-23 — the frozen envelope schema wins): **on the wire and in the
+envelope the correlation id is a BARE ULID** (`01J...`) — `contracts/schemas/envelope` and the
+`X-Correlation-Id` header both require the unprefixed 26-char form, and `platform/httpkit`
+accepts an inbound header only if it is a bare ULID (else mints one). The `COR_` prefix is for
+OPERATIONAL RECORDS ONLY (file registry, job tables, human-facing run logs) via
+`ids.NewCorrelationID()`; `ids.Strip()` recovers the bare form when such a record's id enters
+the envelope world.
 
 ```text
-COR_01J...   minted when the flow starts (file discovered / webhook received / API request)
+01J...       minted when the flow starts (file discovered / webhook received / API request)
   |
-  +-- file registry           file_registry.correlation_id  (FIL_...)
+  +-- file registry           file_registry.correlation_id  (stored COR_01J..., bare on the wire)
   |     |
   +-- Kafka                   envelope.correlationId + message header (platform/kafka, otelkit)
   |     |
-  +-- Airflow                 dag_run.conf {"correlation_id": "COR_..."} -> task logs, XCom-free
+  +-- Airflow                 dag_run.conf {"correlation_id": "01J..."} -> task logs, XCom-free
   |     |
-  +-- Snowflake               ALTER SESSION SET QUERY_TAG = '{"correlation_id":"COR_..."}'
+  +-- Snowflake               ALTER SESSION SET QUERY_TAG = '{"correlation_id":"01J..."}'
   |                           (visible in QUERY_HISTORY / COPY_HISTORY; dbt sets it per run)
   +-- decision batch          decision_audit.correlation_id
         |
