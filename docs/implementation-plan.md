@@ -10,7 +10,7 @@ The repo (`/Users/toannguyen/workspace/learn/blog/collection-platform`, public G
 This plan turns those designs into **15 dependency-ordered phases of 113 work packages (WPs)**, each a self-contained brief executable by a cheaper-model LLM sub-agent (Opus-class), with runnable acceptance criteria and verifier-run gates between phases. Quality bar: enterprise banking — auditability, reconciliation, idempotency, and security are first-class.
 
 **Locked scope decisions (user):**
-1. **Real AWS infrastructure** via Terraform (EKS, MSK Kafka, S3, RDS Postgres, KMS/Secrets Manager, Cognito), GitHub Actions CI with OIDC federation (zero long-lived keys), Helm/Helmfile deploys.
+1. **Real AWS infrastructure** via Terraform (EKS, MSK Kafka, S3, RDS Postgres, KMS/Secrets Manager), GitHub Actions CI with OIDC federation (zero long-lived keys), Helm/Helmfile deploys. Identity: **Keycloak on EKS** (user directive 2026-08-23; superseded Cognito).
 2. **Real Snowflake account** — Terraform-managed objects, dbt transformations, native dynamic masking.
 3. **Full platform, MVP-gated** — MVP (D§88) is the release gate at end of Phase 10.
 4. **Minimal Collector UI included** — React+TS workbench (case queue, case detail/timeline, record contact + promise-to-pay, decision explanation).
@@ -38,8 +38,8 @@ Resource prefix `colx`, env `dev`, region `eu-west-1` (variable), tags `project=
 | SFTP | **Containerized `atmoz/sftp` on EKS** (ClusterIP, host key + user keys via Secrets Manager/ESO) — not Transfer Family ($216/mo AND it writes straight to S3, bypassing the A§31 connect/verify-host-key/download/checksum flow we must build) | The SFTP connector must be genuinely exercised |
 | Airflow | Self-hosted on EKS, official chart, Airflow 2.11, **KubernetesExecutor**, git-sync DAGs from `airflow/dags`, metadata on platform RDS, remote logs to S3 — not MWAA ($90–350/mo, unstoppable) | Cost + full control |
 | Postgres | 2× RDS Postgres 16: `colx-dev-platform` (db.t4g.small; DBs `ingestion`, `airflow`, + database-per-service with per-DB roles) and `colx-dev-corebank` (db.t4g.micro, `rds.logical_replication=1` — simulator/CDC source) | Aurora Sv2 ACU floor + permanent replication slot defeats scale-to-zero; RDS stop is a real teardown lever |
-| Identity | Cognito: user pool, resource-server scopes, groups (`strategy-author`, `business-approver`, `risk-approver`, `admin`, `collector`, `ops-admin`, `analyst`), M2M clients minimized (`platform-services`, `simulator`; ~$6/mo each), SPA client (PKCE) added in Phase 12; workloads→AWS via **IRSA** | Managed, boring, genuinely exercised |
-| Ingress | **None until Phase 12** — `kubectl port-forward` make targets; per-service JWT middleware built from day 1; flag-gated ALB+Cognito-OIDC ingress module ready (needs a domain) | Zero exposure is the best dev security posture; saves ~$25/mo |
+| Identity | **Keycloak on EKS** (official quay.io image via pinned community chart or plain manifests — NOT Bitnami, subscription-gated since 2025), backed by a `keycloak` DB on the platform RDS; realm `colx` as code (import JSON); **client scopes ARE the logical colon-form names** (`cases:read` → authn pass-through); groups (`strategy-author`, `business-approver`, `risk-approver`, `admin`, `collector`, `ops-admin`, `analyst`) via membership mapper → plain `groups` claim; M2M client-credentials clients `platform-services`, `simulator` (secrets via ESO, never in git/realm JSON); SPA PKCE client added in Phase 12; workloads→AWS via **IRSA** (unchanged). Supersedes Cognito (user directive 2026-08-23; portability per D§3.2) | Vendor-neutral OIDC, zero external identity dependency, ≈$0 incremental |
+| Ingress | **None until Phase 12** — `kubectl port-forward` make targets (incl. `make keycloak`); per-service JWT middleware built from day 1; flag-gated ALB ingress module ready (needs a domain; Phase 12 also exposes Keycloak for browser login redirects) | Zero exposure is the best dev security posture; saves ~$25/mo |
 | Observability | kube-prometheus-stack + Grafana, Loki + Tempo (single-binary, S3 backend), Grafana Alloy logs, OTel Collector traces, Alertmanager → SNS email; correlation/causation IDs propagate HTTP↔Kafka↔Airflow↔Snowflake `QUERY_TAG` (A§97) | Fully declarative → teardown/rebuild free |
 | Snowflake | **Enterprise** (30-day trial first; idle ≈ $0 with XS warehouses auto-suspend 60s); resource monitor 50 credits/mo suspend at 100%; native `MASKING POLICY` (A§69); RBAC `COLX_LOADER/TRANSFORMER/REPORTER/PII_READER`; key-pair auth for all service users; storage integration to S3 | Native masking is mechanically verifiable |
 | S3→Snowflake | **Airflow-triggered `COPY INTO`** (`FORCE=FALSE` dedup + `COPY_HISTORY` audit tied to file registry) — not Snowpipe | Loads must be explicit and reconciled (A§36–37) |
@@ -50,7 +50,7 @@ Resource prefix `colx`, env `dev`, region `eu-west-1` (variable), tags `project=
 | UI | React 18 + TS strict + Vite, TanStack Query, `oidc-client-ts` (PKCE), **API client types generated from OpenAPI** (drift = compile error), MSW tests, Playwright smoke; S3+CloudFront hosting | Everything generateable/checkable |
 | Scheduled work | `server tick <task> --as-of=<date>` subcommands run by k8s CronJobs; `--as-of` makes time logic deterministic in tests | One code path, no clock mocking in prod |
 
-**Cost model:** everything running ≈ **$540–575/mo** (EKS $273, MSK $80, RDS $50, NAT $40, Cognito $12, KMS/Secrets $12, misc $15, Snowflake $60–90 active). Teardown levers (make targets): `stop` ≈ $230/mo, `destroy-heavy` ≈ $60/mo (rebuild ~60 min, all declarative), full destroy <$5/mo. AWS Budget $450/mo with 50/80/100% + forecast alerts; Snowflake resource monitor hard-caps 50 credits/mo.
+**Cost model:** everything running ≈ **$530–565/mo** (EKS $273, MSK $80, RDS $50, NAT $40, KMS/Secrets $12, misc $15, Snowflake $60–90 active; Keycloak runs on existing nodes ≈ $0 — the Cognito ~$12/mo row is gone). Teardown levers (make targets): `stop` ≈ $230/mo, `destroy-heavy` ≈ $60/mo (rebuild ~60 min, all declarative), full destroy <$5/mo. AWS Budget $450/mo with 50/80/100% + forecast alerts; Snowflake resource monitor hard-caps 50 credits/mo.
 
 ---
 
@@ -243,9 +243,11 @@ Conventions (CON-1, enforced by CON-7): every schema `additionalProperties:false
 - MSK Provisioned per §2. `deployment/kafka/topics.yaml` (grows per phase; topic budget documented — no casual partition increases): `ingestion.file.lifecycle.v1` (3p), `ingestion.webhook.payment.v1` (3p), `ingestion.{customers,accounts,debts,payments}.v1` (3p), `cdc.corebank.public.cb_{customer,account,debt,payment,delq}` (3p), `cdc.corebank.schema-history` (1p compact), `connect.{offsets,configs,status}`, `collections.<context>` ×14 (3p), `collections.dlq.<service>`, `dlq.ingestion.v1`. Idempotent topic-apply Job using the connect toolbox image (Debezium base + aws-msk-iam-auth + Aiven S3 sink + JMX agent).
 - Accept: cluster ACTIVE; topics listed via IAM-auth `kafka-topics.sh` from an in-cluster pod.
 
-**FND-6 — Cognito — S** · deps: FND-1 · parallel: FND-2..5
-- User pool `colx-dev` + hosted domain; resource server `colx-api`. SCOPE-FORMAT RULING (freeze review): contracts and services use provider-neutral logical scopes in colon form (`cases:read`, `payments:admin`, `delinquency:admin`, …) — `platform/authn` maps provider claim formats to logical scopes (Cognito emits `colx-api/cases.read`; the middleware strips the resource-server prefix and maps `.`→`:`). Cognito scope names are therefore declared in dot form (`cases.read`, `ingestion.write`, `webhook.write`, `decisions.read`, `strategy.author`, …); groups `strategy-author, business-approver, risk-approver, admin, collector, ops-admin, analyst`; M2M clients `platform-services`, `simulator` (secrets → Secrets Manager). SPA client deferred to Phase 12 (callback URLs unknown).
-- Accept: client-credentials token minted via curl contains expected scope.
+**FND-6 — Keycloak identity (SUPERSEDES the original Cognito WP; user directive 2026-08-23) — M** · deps: FND-4 (RDS), FND-8 (helmfile/ESO) — realm import happens at deploy time
+- Keycloak on EKS: official `quay.io/keycloak/keycloak` image via a pinned community chart (codecentric `keycloakx`) or plain manifests in the helmfile (NOT Bitnami — subscription-gated since 2025; implementer verifies availability and documents the pick); `KC_DB=postgres` against a `keycloak` database on `colx-dev-platform` RDS (added to `scripts/db/provision_databases.sh`); admin credentials via ESO (`colx/dev/keycloak/admin`); ~750m/1Gi resources; ServiceMonitor metrics; NO ingress (dev access via `make keycloak` port-forward).
+- Realm-as-code: `deployment/values/keycloak/realm-colx.json` imported at startup (`--import-realm`): realm `colx`; **client scopes named exactly the logical colon-form scopes** (`cases:read`, `cases:write`, `cases:admin`, `delinquency:read`, `delinquency:admin`, `payments:read`, `payments:write`, `payments:admin`, `recovery:read`, `recovery:write`, `agency:read`, `agency:admin`, `decisions:read`, `decisions:write`, `strategy:author`, `treatments:read`, `treatments:write`, `ingestion:read`, `ingestion:write`, `webhook:write`, `customers:read`, `accounts:read`, `debts:read`) so `platform/authn`'s pass-through path applies with zero mapping; groups `strategy-author, business-approver, risk-approver, admin, collector, ops-admin, analyst` + group-membership protocol mapper emitting a plain `groups` claim; M2M client-credentials clients `platform-services` (all service scopes) + `simulator` (`webhook:write`) with service accounts. **Client secrets never in git/realm JSON** — set post-start via a kcadm.sh Job reading ESO-synced secrets (or a verified placeholder-substitution mechanism if the implementer proves Keycloak supports it), then mirrored to Secrets Manager for workload consumption. SPA PKCE client deferred to Phase 12.
+- The SCOPE-FORMAT RULING simplifies: logical colon-form scopes appear verbatim in Keycloak tokens' `scope` claim; `platform/authn` keeps the Cognito prefix/dot normalization as dormant compatibility code.
+- Accept (deploy-time): client-credentials token minted via curl against the port-forwarded Keycloak contains `cases:read`-style scopes and the `groups` claim; realm re-import is idempotent.
 
 **FND-7 — EKS + IRSA + addons — L (decompose: cluster / access+addons / IRSA map)** · deps: FND-2,3 · parallel: FND-4/5/6
 - Wrap `terraform-aws-modules/eks` (pinned): v1.32, `authentication_mode=API`, access entries (you = admin, `colx-gha-eks-deploy` = admin dev), endpoint public **restricted to `var.admin_cidrs`** + private; 1 managed node group 3× t3.large (min2/max4); addons vpc-cni, coredns, kube-proxy, EBS CSI (IRSA). Map-driven IRSA roles: external-secrets, ingestion-cp, sftp-worker, webhook-receiver, kafka-connect, airflow, simulator, loki, tempo, alertmanager, alb-controller (unattached, flag-gated); **extended later for decision-service (decision-audit + batch buckets) and treatment-service** (values-only change, noted in DEC-6/DEC-14).
@@ -292,7 +294,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 - Accept: in-memory exporter proves HTTP→ctx→Kafka-header→ctx round-trip preserves IDs.
 
 **LIB-4 — authn — S** · deps: LIB-2
-- go-oidc/v3 vs Cognito issuer (JWKS cached); `Principal{sub,scopes,groups}`; `RequireScope(...)` deny-by-default; `authtest.NewIssuer(t)` (RSA + JWKS httptest + `Token(scopes…)`).
+- go-oidc/v3 vs the OIDC issuer — Keycloak in dev (JWKS cached); `Principal{sub,scopes,groups}`; `RequireScope(...)` deny-by-default; `authtest.NewIssuer(t)` (RSA + JWKS httptest + `Token(scopes…)`).
 - Accept: table tests — valid→200, missing scope→403 (contract body), expired/bad-issuer→401.
 
 **LIB-5 — postgres — S** · deps: FND-0
@@ -341,7 +343,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 - Accept: `scripts/verify/SIM-4.sh <date>` awk-verifies count+control totals per file; each `--inject` mode produces the expected violation (expected-fail branches).
 
 **SIM-5 — Payment webhook simulator — S** · deps: SIM-2, FND-6 · parallel: SIM-4/6
-- `cmd/webhooksim`: intraday trickle of the day's `cb_payment` rows (same payments that later appear in files — enables cross-recon) → `POST /v1/webhooks/payments` with HMAC `X-Signature` + deterministic `X-Event-Id` (pay_id-derived ULID → replays are true duplicates) + Cognito `simulator` JWT; `--replay <event-id>`; retries/backoff. CronJob 15-min business hours.
+- `cmd/webhooksim`: intraday trickle of the day's `cb_payment` rows (same payments that later appear in files — enables cross-recon) → `POST /v1/webhooks/payments` with HMAC `X-Signature` + deterministic `X-Event-Id` (pay_id-derived ULID → replays are true duplicates) + an OIDC `simulator` client-credentials JWT (Keycloak); `--replay <event-id>`; retries/backoff. CronJob 15-min business hours.
 - Accept: against an echo pod: 5 requests, one signature verified with openssl in the script.
 
 **SIM-6 — Legacy report extractor (parity truth) — M** · deps: SIM-2 · parallel: SIM-4/5
@@ -357,7 +359,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 - Accept: migrate idempotent; transition-map unit tests incl. illegal transitions; `sqlc diff` clean.
 
 **ING-2 — Control-plane API service — L (decompose: API+auth / events+metrics / bootstrap-seeding)** · deps: ING-1, FND-5, FND-6
-- `contracts/openapi/ingestion-control-plane.v1.yaml` implementing D§79 + reconciliation A§19: sources/feeds CRUD, `GET /v1/ingestion/files?…`, `POST /v1/ingestion/files/{id}/reprocess|quarantine`, checkpoints GET/PUT, jobs, `POST /v1/reconciliation/runs`, `GET …/runs/{id}(/checks)`, exceptions resolve. A§20 errors; Cognito JWT scopes read/write; publishes `FileStatusChanged` to `ingestion.file.lifecycle.v1`; Prometheus metrics contract (`colx_ingestion_files_total{feed,status}`, `colx_ingestion_file_lateness_seconds`, `colx_ingestion_quarantine_rows_total`, `colx_recon_checks_total{status}`); `bootstrap` subcommand seeds sources/feeds idempotently from `contracts/files/*.yaml`.
+- `contracts/openapi/ingestion-control-plane.v1.yaml` implementing D§79 + reconciliation A§19: sources/feeds CRUD, `GET /v1/ingestion/files?…`, `POST /v1/ingestion/files/{id}/reprocess|quarantine`, checkpoints GET/PUT, jobs, `POST /v1/reconciliation/runs`, `GET …/runs/{id}(/checks)`, exceptions resolve. A§20 errors; OIDC JWT (Keycloak) scopes read/write; publishes `FileStatusChanged` to `ingestion.file.lifecycle.v1`; Prometheus metrics contract (`colx_ingestion_files_total{feed,status}`, `colx_ingestion_file_lateness_seconds`, `colx_ingestion_quarantine_rows_total`, `colx_recon_checks_total{status}`); `bootstrap` subcommand seeds sources/feeds idempotently from `contracts/files/*.yaml`.
 - Accept: `scripts/verify/ING-2.sh` — M2M token flow; bootstrap idempotent; feeds ≥3; 401/403 paths; metrics endpoint non-empty; vacuum lint green.
 
 **ING-4 — SFTP/CSV pipeline worker — L (decompose: connect/download/register / validate/quarantine / canonicalize/archive) · ADVERSARIAL-adjacent (recon depends on it)** · deps: ING-1,2,3, SIM-3,4
@@ -376,7 +378,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 - Accept: `scripts/verify/ING-5.sh` — connector RUNNING; snapshot count ≥ table count; live UPDATE appears on topic <60s; sink objects exist; checkpoint <5 min old; **kill connect pod mid-tick → no gap after restart** (recon closes in ANA-2).
 
 **ING-6 — Webhook/API ingestion — M** · deps: ING-2, SIM-5, FND-5
-- `POST /v1/webhooks/payments`: Cognito JWT (`webhook/write`) **and** HMAC verification (A§34 defense in depth); JSON Schema validation; idempotency via `webhook_event(event_id)` insert — conflict → 200 `{status:"duplicate"}` (D§3.5); publish raw to `ingestion.webhook.payment.v1` keyed `acct_no` (A§26); Kafka down → 503 (simulator retries). Separate Deployment for independent scaling.
+- `POST /v1/webhooks/payments`: OIDC JWT (`webhook:write`, Keycloak) **and** HMAC verification (A§34 defense in depth); JSON Schema validation; idempotency via `webhook_event(event_id)` insert — conflict → 200 `{status:"duplicate"}` (D§3.5); publish raw to `ingestion.webhook.payment.v1` keyed `acct_no` (A§26); Kafka down → 503 (simulator retries). Separate Deployment for independent scaling.
 - Accept: `scripts/verify/ING-6.sh` — 20 events → 20 PUBLISHED; `--replay` → duplicate, no new row; tampered HMAC → 401 + `rejected` metric; invalid body → 422 A§20 shape.
 
 **ING-7 — DLQ + replay — M** · deps: ING-2, FND-5 · parallel: ING-8
@@ -479,7 +481,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 ### Phase 8 — Decisioning core (Wave 5) — services follow the exemplar; context via domain-stub until wave A deployed
 
 **DEC-2 — strategy-service skeleton + versioned CRUD — M** · deps: EXE-2, DEC-1
-- `services/strategy`: DDL `strategy(id PK,…)`, `strategy_version(strategy_id, version, status, definition JSONB, content_hash, effective_from/to, PK(strategy_id,version))` + **partial unique `(strategy_id) WHERE status='ACTIVE'`**; endpoints: create (v1 DRAFT), clone version, `PUT …/definition` (DRAFT/TEST only, schema-validated vs `strategy-document.v1.json`, unknown fields refused), reads, `GET /v1/strategies/active?onDate=`; Cognito role middleware (groups per FND-6); outbox to `collections.strategy`.
+- `services/strategy`: DDL `strategy(id PK,…)`, `strategy_version(strategy_id, version, status, definition JSONB, content_hash, effective_from/to, PK(strategy_id,version))` + **partial unique `(strategy_id) WHERE status='ACTIVE'`**; endpoints: create (v1 DRAFT), clone version, `PUT …/definition` (DRAFT/TEST only, schema-validated vs `strategy-document.v1.json`, unknown fields refused), reads, `GET /v1/strategies/active?onDate=`; OIDC role middleware (Keycloak groups per FND-6); outbox to `collections.strategy`.
 - Accept: create→edit→read round-trip; invalid doc → 400 A§20 body; edit non-DRAFT → 409; arms bps ≠10000 → 400.
 
 **DEC-3 — governance lifecycle + approvals + activation — L (decompose: state machine+approvals / scheduler+auto-retire / events+audit)** · deps: DEC-2
@@ -603,11 +605,11 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 ### Phase 12 — Collector UI (UI-1..5 may run in parallel from Phase 8 against domain-stub)
 
 **INF-14 — public exposure for UI + API — M** · deps: FND-7/8; **needs a domain (~$12/yr) — user decision**
-- Enable flag-gated ALB ingress (aws-load-balancer-controller) + ACM cert + Route53 zone for the API gateway host (JWT validation stays in services; gateway adds rate limiting + correlation injection per A§64); CloudFront + S3 bucket for the SPA (OAI, SPA-rewrite function); Cognito SPA app client (PKCE) with callback URLs; WAF basic rules on ALB.
+- Enable flag-gated ALB ingress (aws-load-balancer-controller) + ACM cert + Route53 zone for the API gateway host (JWT validation stays in services; gateway adds rate limiting + correlation injection per A§64); CloudFront + S3 bucket for the SPA (OAI, SPA-rewrite function); Keycloak SPA client (PKCE) with callback URLs + public Keycloak exposure for browser login redirects; WAF basic rules on ALB.
 - Accept: `curl https://api.<domain>/healthz` 200; unauthenticated API call → 401; CloudFront serves `index.html` on deep links.
 
 **UI-1 — scaffold + auth + generated client (UI exemplar) — M** · deps: DEC-1, OPS-1 CI
-- Vite + TS strict + react-router + TanStack Query; `oidc-client-ts` PKCE vs Cognito (env-driven); fetch wrapper injects Bearer + `Idempotency-Key` (ULID) on POSTs, parses A§20 errors into typed `ApiError`; client types generated from OpenAPI (committed, drift-checked); MSW handlers from contract examples.
+- Vite + TS strict + react-router + TanStack Query; `oidc-client-ts` PKCE vs Keycloak (env-driven issuer); fetch wrapper injects Bearer + `Idempotency-Key` (ULID) on POSTs, parses A§20 errors into typed `ApiError`; client types generated from OpenAPI (committed, drift-checked); MSW handlers from contract examples.
 - Accept: `pnpm lint && typecheck && test && build` green; tests: unauth → redirect; 401 → refresh retry once; error body → typed ApiError.
 
 **UI-2 — case queue — M** · deps: UI-1 · parallel: UI-3
@@ -627,7 +629,7 @@ Common acceptance for every LIB WP: `make -C platform lint test coverage` (modul
 - Accept: snapshot vs DEC-9 golden explanation; unknown reason code renders verbatim + "unregistered" tooltip, no crash.
 
 **UI-6 — Playwright smoke vs deployed env — M** · deps: UI-2..5, INF-14
-- `@smoke`: Cognito login (test collector) → queue shows seeded case → open detail → record contact → timeline updates → create PTP → explanation renders; headless vs `UI_BASE_URL`, trace artifacts on failure.
+- `@smoke`: Keycloak login (test collector) → queue shows seeded case → open detail → record contact → timeline updates → create PTP → explanation renders; headless vs `UI_BASE_URL`, trace artifacts on failure.
 - Accept: green in post-deploy CI job.
 
 **UI-7 — UI CI + S3/CloudFront deploy — S** · deps: UI-1, INF-14
