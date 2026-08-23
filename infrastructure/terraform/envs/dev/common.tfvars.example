@@ -122,3 +122,9 @@ github_environment = "dev"
 #     out of band.
 #
 # A tfvars value is a value in Terraform state and in every plan comment on every pull request.
+
+# --- 30-eks (INF-B) -----------------------------------------------------------
+# IAM principal that gets cluster-admin via an EKS access entry — your user or
+# SSO role ARN. Required by stack 30-eks (also set as the ADMIN_PRINCIPAL_ARN
+# repository variable for CI plans).
+admin_principal_arn = "arn:aws:iam::000000000000:user/REPLACE_ME"

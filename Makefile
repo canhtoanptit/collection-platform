@@ -103,7 +103,7 @@ endif
 # common case for these targets is "run by a human, later".                     #
 #                                                                              #
 # Cost levers (docs/cost-model.md):                                            #
-#   everything running  ~$540-575/mo                                            #
+#   everything running  ~$530-565/mo                                            #
 #   make stop           ~$230/mo   back in minutes                              #
 #   make destroy-heavy   ~$60/mo   back in ~60 min                              #
 #   full destroy          <$5/mo   back in ~60 min                              #
@@ -154,7 +154,7 @@ destroy-heavy: ## Cost lever: destroy 30-eks + MSK in 20-data (~$60/mo). Rebuild
 	$(require_aws)
 	@echo "This destroys the EKS cluster and the MSK brokers."
 	@echo "Everything is declarative: 'make up-all' rebuilds it in ~60 minutes."
-	@echo "SURVIVES: S3 (raw/archive versioned), RDS, KMS, ECR, Cognito/Keycloak DB, tfstate."
+	@echo "SURVIVES: S3 (raw/archive versioned), RDS (incl. the keycloak DB), KMS, ECR, tfstate."
 	@echo "LOST:     every pod, every Helm release, MSK topic data (topics are re-applied)."
 	@echo
 	@printf 'Type the cluster name (%s) to continue: ' "$(CLUSTER_NAME)"
