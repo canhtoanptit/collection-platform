@@ -1,0 +1,1 @@
+{"code":"ARRANGEMENT_INVALID","message":"Arrangement schedule is invalid","correlationId":"01M0MEKBHXV37E3S3E28JT97KB","details":[{"field":"firstPaymentDate","reason":"DATE_IN_PAST"}]}
