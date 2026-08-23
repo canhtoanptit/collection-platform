@@ -1,0 +1,443 @@
+{
+  "realm": "colx",
+  "displayName": "colx collections platform (dev)",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "failureFactor": 10,
+  "accessTokenLifespan": 900,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "revokeRefreshToken": false,
+  "defaultSignatureAlgorithm": "RS256",
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "clientScopes": [
+    {
+      "name": "groups",
+      "description": "Emits the caller's group memberships as a plain `groups` claim",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "introspection.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "claim.name": "groups"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cases:read",
+      "description": "Read collection cases and their timelines",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "cases:write",
+      "description": "Create and update cases, record activities",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "cases:admin",
+      "description": "Reassign, force-resolve and administer cases",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "delinquency:read",
+      "description": "Read delinquency state and DPD buckets",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "delinquency:admin",
+      "description": "Manage delinquency bucket configuration",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "payments:read",
+      "description": "Read payments and allocations",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "payments:write",
+      "description": "Record payments",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "payments:admin",
+      "description": "Override payment allocations",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "recovery:read",
+      "description": "Read recoveries and recovery metrics",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "recovery:write",
+      "description": "Record recoveries",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "agency:read",
+      "description": "Read agency placements and fees",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "agency:admin",
+      "description": "Place, recall and administer agency assignments",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "decisions:read",
+      "description": "Read decisions and decision explanations",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "decisions:write",
+      "description": "Request decisions and run batch decisioning",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "strategy:author",
+      "description": "Author strategies, rule sets and guardrail configs",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "treatments:read",
+      "description": "Read selected and executed treatments",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "treatments:write",
+      "description": "Dispatch treatments and accept provider callbacks",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "ingestion:read",
+      "description": "Read the ingestion control plane: files, jobs, reconciliation",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "ingestion:write",
+      "description": "Mutate ingestion state: reprocess, quarantine, checkpoints",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "webhook:write",
+      "description": "Post inbound webhooks (payment notifications)",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "customers:read",
+      "description": "Read customer master data",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "accounts:read",
+      "description": "Read account master data",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    },
+    {
+      "name": "debts:read",
+      "description": "Read debt components",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      }
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "groups"
+  ],
+  "defaultOptionalClientScopes": [],
+  "groups": [
+    {
+      "name": "strategy-author",
+      "path": "/strategy-author",
+      "attributes": {
+        "description": [
+          "May author and submit strategies for approval (A\u00a759)"
+        ]
+      }
+    },
+    {
+      "name": "business-approver",
+      "path": "/business-approver",
+      "attributes": {
+        "description": [
+          "Business half of the two-person strategy approval"
+        ]
+      }
+    },
+    {
+      "name": "risk-approver",
+      "path": "/risk-approver",
+      "attributes": {
+        "description": [
+          "Risk half of the two-person strategy approval"
+        ]
+      }
+    },
+    {
+      "name": "admin",
+      "path": "/admin",
+      "attributes": {
+        "description": [
+          "Platform administration"
+        ]
+      }
+    },
+    {
+      "name": "collector",
+      "path": "/collector",
+      "attributes": {
+        "description": [
+          "Collections agent using the collector workbench"
+        ]
+      }
+    },
+    {
+      "name": "ops-admin",
+      "path": "/ops-admin",
+      "attributes": {
+        "description": [
+          "Ingestion and pipeline operations"
+        ]
+      }
+    },
+    {
+      "name": "analyst",
+      "path": "/analyst",
+      "attributes": {
+        "description": [
+          "Analytics and MI consumer"
+        ]
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "platform-services",
+      "name": "platform-services",
+      "description": "Machine-to-machine client for the Go services and Airflow. Holds every service scope.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false,
+      "attributes": {
+        "use.refresh.tokens": "false",
+        "client_credentials.use_refresh_token": "false",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false"
+      },
+      "defaultClientScopes": [
+        "groups",
+        "cases:read",
+        "cases:write",
+        "cases:admin",
+        "delinquency:read",
+        "delinquency:admin",
+        "payments:read",
+        "payments:write",
+        "payments:admin",
+        "recovery:read",
+        "recovery:write",
+        "agency:read",
+        "agency:admin",
+        "decisions:read",
+        "decisions:write",
+        "strategy:author",
+        "treatments:read",
+        "treatments:write",
+        "ingestion:read",
+        "ingestion:write",
+        "webhook:write",
+        "customers:read",
+        "accounts:read",
+        "debts:read"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "simulator",
+      "name": "simulator",
+      "description": "Source-system simulator. Posts payment webhooks and nothing else (CLAUDE.md hard rule 1).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false,
+      "attributes": {
+        "use.refresh.tokens": "false",
+        "client_credentials.use_refresh_token": "false",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false"
+      },
+      "defaultClientScopes": [
+        "groups",
+        "webhook:write"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "requiredActions": [],
+  "smtpServer": {},
+  "browserSecurityHeaders": {
+    "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';",
+    "xContentTypeOptions": "nosniff",
+    "xFrameOptions": "SAMEORIGIN",
+    "strictTransportSecurity": "max-age=31536000; includeSubDomains"
+  }
+}

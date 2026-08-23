@@ -1,0 +1,63 @@
+# tempo 1.24.4 (Tempo 2.9.x), single binary, S3-backed (plan FND-9, ADR-0015).
+#
+# Traces land under `s3://colx-dev-ops/tempo/*`. As with Loki, the prefix matches
+# the IRSA policy in stack 30-eks exactly — `prefix: tempo` here and
+# `ops/tempo/*` there. Change one without the other and traces disappear with an
+# AccessDenied buried in the Tempo log.
+#
+# Only OTLP receivers are enabled. The chart's defaults also open Jaeger, Zipkin
+# and OpenCensus ports; nothing in this platform emits those, and an open
+# receiver is an unauthenticated write path into the trace store.
+#
+# The IRSA annotation is injected from deployment/helmfile.yaml.
+
+tempo:
+  repository: grafana/tempo
+
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: colx-dev-ops
+        prefix: tempo
+        region: eu-west-1
+        endpoint: s3.eu-west-1.amazonaws.com
+      wal:
+        path: /var/tempo/wal
+
+  # OTLP only — the OTel Collector is the single ingest path (ADR-0015).
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  retention: 168h
+
+  # Span metrics and service graphs would need a remote-write target and roughly
+  # double Tempo's memory; Prometheus already has RED metrics from the services.
+  metricsGenerator:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 1Gi
+
+serviceAccount:
+  create: true
+  name: tempo
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+service:
+  type: ClusterIP
+
+serviceMonitor:
+  enabled: true

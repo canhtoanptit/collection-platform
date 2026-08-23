@@ -1,0 +1,46 @@
+# jmx_exporter config for the Kafka Connect / Debezium worker.
+#
+# `lowercaseOutputName` + a catch-all pattern on purpose: Connect and Debezium
+# MBeans are already dimensioned by connector, task and (for Debezium) server, so
+# a curated rule set buys nothing and silently drops the metric you need after a
+# connector upgrade renames an MBean.
+#
+# The one metric this exists for is `MilliSecondsBehindSource` — the CDC lag the
+# Phase 5 gate asserts (p95 < 60s) and the D§51 dashboard shows.
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+# Only Kafka/Debezium domains. Without this the agent also exports several
+# hundred JVM/OS beans that Prometheus already gets from the JVM rules below.
+whitelistObjectNames:
+  - "kafka.connect:*"
+  - "debezium.*:*"
+  - "kafka.consumer:*"
+  - "kafka.producer:*"
+  - "java.lang:type=Memory"
+  - "java.lang:type=GarbageCollector,*"
+  - "java.lang:type=Threading"
+
+rules:
+  # Debezium connector metrics: debezium.postgres:type=connector-metrics,
+  # context=streaming, server=corebank -> debezium_postgres_...
+  - pattern: 'debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^,>]+)><>([^:]+)'
+    name: debezium_$1_$4
+    labels:
+      context: "$2"
+      server: "$3"
+
+  # Connect worker + task metrics.
+  - pattern: 'kafka.connect<type=connector-task-metrics, connector=([^,]+), task=([0-9]+)><>([^:]+)'
+    name: kafka_connect_task_$3
+    labels:
+      connector: "$1"
+      task: "$2"
+
+  - pattern: 'kafka.connect<type=([^,]+)-metrics, ([^=]+)=([^,>]+)><>([^:]+)'
+    name: kafka_connect_$1_$4
+    labels:
+      "$2": "$3"
+
+  # Everything else in the whitelisted domains, unmodified.
+  - pattern: ".*"

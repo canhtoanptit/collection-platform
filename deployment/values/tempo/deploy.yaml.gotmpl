@@ -1,0 +1,5 @@
+# Deploy-time values (see values/external-secrets/deploy.yaml.gotmpl for why this
+# is a separate `.gotmpl` file).
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.accountId }}:role/{{ .Values.prefix }}-{{ .Values.env }}-tempo

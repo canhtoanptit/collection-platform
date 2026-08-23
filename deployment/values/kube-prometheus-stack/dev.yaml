@@ -1,0 +1,262 @@
+# kube-prometheus-stack 88.5.3 — Prometheus + Grafana + Alertmanager (plan FND-9, ADR-0015).
+#
+# Dev shape, stated plainly: one replica of everything, 7 days / 10 GB of metrics,
+# no HA, no long-term storage. This is monitoring, not an SRE platform — losing it
+# loses history, which is an accepted cost of an environment that is rebuilt more
+# often than its retention window (ADR-0015).
+#
+# IRSA annotations (Alertmanager -> SNS) are injected from deployment/helmfile.yaml.
+
+crds:
+  enabled: true
+
+# ---------------------------------------------------------------- exporters ----
+# EKS runs the control plane, so etcd, the scheduler, the controller manager and
+# kube-proxy have no scrapeable endpoints. Left enabled they produce four
+# permanently-down targets and a `Watchdog`-adjacent alert storm that trains
+# everyone to ignore alerts.
+kubeApiServer:
+  enabled: true
+kubelet:
+  enabled: true
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+coreDns:
+  enabled: true
+kubeDns:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: true
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+
+nodeExporter:
+  enabled: true
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+
+# --------------------------------------------------------------- prometheus ----
+prometheus:
+  enabled: true
+
+  service:
+    type: ClusterIP
+
+  prometheusSpec:
+    # plan FND-9: 7 days / 10 GB. retentionSize is the one that actually protects
+    # the node — time-based retention alone will happily fill a 20 GiB volume.
+    retention: 7d
+    retentionSize: 10GB
+
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    replicas: 1
+
+    # Pick up ServiceMonitors/PodMonitors/PrometheusRules from every namespace,
+    # not just those with this release's helm labels. Service charts in
+    # `services/` and the Airflow statsd exporter live elsewhere, and the
+    # nil-uses-helm-values defaults would silently exclude them.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              # 20 GiB against a 10 GB retentionSize: WAL, compaction headroom
+              # and the head block all need room the retention figure ignores.
+              storage: 20Gi
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        memory: 3Gi
+
+    # MSK open monitoring (plan FND-9). MSK exposes node_exporter on 11001 and the
+    # JMX exporter on 11002 per broker; the brokers are not in Kubernetes, so they
+    # arrive as a static scrape config.
+    #
+    # PLACEHOLDER TARGETS: the broker DNS names are only known after stack 20-data
+    # applies. `make up-all` prints a reminder; the acceptance check is
+    # `up{job=~".*msk.*"} >= 2 series`, which fails loudly while these are unset.
+    additionalScrapeConfigs:
+      - job_name: msk-jmx
+        static_configs:
+          - targets: []
+            labels:
+              cluster: colx-dev
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: instance
+      - job_name: msk-node
+        static_configs:
+          - targets: []
+            labels:
+              cluster: colx-dev
+
+# -------------------------------------------------------------- alertmanager ----
+alertmanager:
+  enabled: true
+
+  service:
+    type: ClusterIP
+
+  serviceAccount:
+    create: true
+    # Stable name so the IRSA trust policy in stack 30-eks can pin the exact
+    # subject rather than a chart-generated one.
+    name: alertmanager
+
+  alertmanagerSpec:
+    replicas: 1
+    retention: 120h
+    resources:
+      requests:
+        cpu: 20m
+        memory: 96Mi
+      limits:
+        memory: 256Mi
+
+  # NOTE: `alertmanager.config` is NOT here. It lives in
+  # `deploy.yaml.gotmpl`, because the SNS topic ARN contains the AWS account id
+  # and helmfile only templates `.gotmpl` values files. Splitting the config
+  # (structure here, ARN patched in) does not work either: helmfile deep-merges
+  # values files but **replaces lists**, so any override of `receivers` restates
+  # the whole receiver. One copy, in the templated file.
+
+# ------------------------------------------------------------------- grafana ----
+grafana:
+  enabled: true
+
+  service:
+    type: ClusterIP
+
+  # Admin credentials come from ESO (`colx/dev/grafana/admin`). The chart's
+  # `adminPassword` default would put a password in git.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  # Anonymous access off even though there is no ingress: port-forward is not a
+  # trust boundary.
+  grafana.ini:
+    users:
+      allow_sign_up: false
+    auth.anonymous:
+      enabled: false
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+    # Exemplars and the trace-to-log jump both need this.
+    feature_toggles:
+      enable: traceqlEditor
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      # Dashboards live in ConfigMaps in any namespace so a service WP can ship
+      # its own dashboard without touching this file.
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      searchNamespace: ALL
+
+  # Metrics, logs and traces in one place, wired so a trace id in a log line is a
+  # click away from the trace, and a span is a click away from its logs. That
+  # round trip is the A§97 correlation chain made usable; without the
+  # derivedFields/tracesToLogs wiring it degrades to copy-paste.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki-gateway.platform.svc.cluster.local
+      jsonData:
+        derivedFields:
+          - name: TraceID
+            matcherRegex: '"trace_id":"([a-f0-9]+)"'
+            url: "$${__value.raw}"
+            datasourceUid: tempo
+          - name: CorrelationID
+            matcherRegex: '"correlation_id":"(COR_[0-9A-Z]+)"'
+            url: '$${__value.raw}'
+
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.platform.svc.cluster.local:3200
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: -1h
+          spanEndTimeShift: 1h
+          filterByTraceID: true
+          filterBySpanID: false
+        tracesToMetrics:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+  persistence:
+    enabled: false
+    # Dashboards are files in git and datasources are values here, so a Grafana
+    # restart loses nothing worth keeping.
+
+# ------------------------------------------------------------- default rules ----
+defaultRules:
+  create: true
+  rules:
+    # The control-plane components EKS manages and we do not scrape.
+    etcd: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeControllerManager: false
+    kubeProxy: false
+    # Everything else stays on; the platform-specific rules live in
+    # deployment/observability/alerts/platform-rules.yaml.
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi

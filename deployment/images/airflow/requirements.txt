@@ -1,0 +1,31 @@
+# colx/airflow provider pins.
+#
+# Every version here is taken verbatim from Airflow's own constraints file for
+# 2.11.2 / Python 3.12:
+#
+#   https://raw.githubusercontent.com/apache/airflow/constraints-2.11.2/constraints-3.12.txt
+#
+# That matters. The *latest* release of each provider targets Airflow 3 —
+# apache-airflow-providers-amazon 9.34.0, cncf-kubernetes 10.21.0,
+# snowflake 6.16.0 as of this writing — and installing any of them on 2.11 either
+# fails the resolver or (worse) installs and breaks at DAG-parse time. The
+# constraints file is the only authority on "what works with this Airflow".
+#
+# The Dockerfile also passes the same file to pip as --constraint, so transitive
+# dependencies are pinned too. Bumping a line here without bumping AIRFLOW_VERSION
+# is how you get a green build and a broken scheduler.
+
+# --- providers (plan FND-10, ADR-0007) ----------------------------------------
+apache-airflow-providers-cncf-kubernetes==10.13.0
+apache-airflow-providers-snowflake==6.10.0
+apache-airflow-providers-amazon==9.22.0
+
+# Pulled in by the above, pinned explicitly so a resolver change cannot move them.
+apache-airflow-providers-common-sql==1.32.0
+apache-airflow-providers-postgres==6.6.0
+apache-airflow-providers-http==6.0.0
+
+# --- metrics ------------------------------------------------------------------
+# There is no `apache-airflow-providers-statsd`: StatsD support is the `statsd`
+# library plus `[metrics] statsd_on = True` (set in values/airflow/dev.yaml).
+statsd==4.0.1

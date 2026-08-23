@@ -1,0 +1,435 @@
+# Terraform gate (plan FND-12, ADR-0010).
+#
+# The operating rule this file enforces: **applies happen only here, and only
+# after a human approves the `dev` environment.** Agents run `plan` at most, and
+# `00-bootstrap` is applied by hand (its state migration is a documented manual
+# flow). There are no long-lived AWS credentials anywhere — every job federates
+# via GitHub OIDC.
+#
+# PR:   fmt -check, validate, tflint, trivy config, then `plan` as a PR comment,
+#       for the changed stacks only.
+# main: `apply`, environment-gated, for the changed stacks only, in dependency
+#       order.
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - 'infrastructure/terraform/**'
+      - '.github/workflows/terraform.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/terraform/**'
+      - '.github/workflows/terraform.yml'
+  # 40-snowflake is deliberately excluded from the automatic apply path (plan
+  # §6.10 — applying it starts the 30-day Enterprise trial). This is how it gets
+  # applied, at Phase 6 kickoff, on purpose.
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Stack to apply (e.g. 40-snowflake)'
+        required: true
+        type: string
+
+concurrency:
+  # Never two applies against the same state. Cancel-in-progress is off on
+  # purpose: killing a running `terraform apply` is how state gets corrupted.
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: '1.12.2'
+  AWS_REGION: eu-west-1
+  # Plan/apply are non-interactive; a prompt in CI is a 6-hour hang.
+  TF_IN_AUTOMATION: '1'
+  TF_INPUT: '0'
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- changes ----
+  # One filter per stack. A PR touching only 30-eks must not plan the other four:
+  # a plan needs the upstream state to exist, and planning an unrelated stack is
+  # noise that trains reviewers to skim.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      stacks: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            00-bootstrap:
+              - 'infrastructure/terraform/stacks/00-bootstrap/**'
+              - 'infrastructure/terraform/modules/github-oidc/**'
+              - 'infrastructure/terraform/modules/budgets/**'
+            10-network:
+              - 'infrastructure/terraform/stacks/10-network/**'
+              - 'infrastructure/terraform/modules/network/**'
+            20-data:
+              - 'infrastructure/terraform/stacks/20-data/**'
+              - 'infrastructure/terraform/modules/kms/**'
+              - 'infrastructure/terraform/modules/s3-data/**'
+              - 'infrastructure/terraform/modules/ecr/**'
+              - 'infrastructure/terraform/modules/rds-postgres/**'
+              - 'infrastructure/terraform/modules/msk/**'
+            30-eks:
+              - 'infrastructure/terraform/stacks/30-eks/**'
+              - 'infrastructure/terraform/modules/eks/**'
+              - 'infrastructure/terraform/modules/irsa-role/**'
+            40-snowflake:
+              - 'infrastructure/terraform/stacks/40-snowflake/**'
+              - 'infrastructure/terraform/modules/snowflake-account/**'
+
+  # ------------------------------------------------------------------- static --
+  # Runs on every stack that changed, needs no credentials at all: `init
+  # -backend=false` skips the S3 backend, so this job is the fast feedback loop
+  # and the one an agent can reproduce locally byte for byte
+  # (scripts/verify/INF-B.sh runs the same commands).
+  static:
+    needs: changes
+    if: needs.changes.outputs.stacks != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.changes.outputs.stacks) }}
+    defaults:
+      run:
+        working-directory: infrastructure/terraform/stacks/${{ matrix.stack }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # The wrapper rewrites stdout, which breaks `terraform show -json`
+          # piping later. Off everywhere in this file.
+          terraform_wrapper: false
+
+      - name: fmt -check
+        run: terraform fmt -check -recursive -diff
+
+      - name: init (no backend)
+        run: terraform init -backend=false
+
+      - name: validate
+        run: terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --minimum-failure-severity=warning
+
+      # Scans the HCL, not a plan: no credentials, and it catches the classes we
+      # care about (public S3, unencrypted volumes, over-broad IAM) before a plan
+      # exists.
+      - name: trivy config
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: infrastructure/terraform/stacks/${{ matrix.stack }}
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          trivy-config: ''
+
+  # --------------------------------------------------------------------- plan --
+  plan:
+    needs: [changes, static]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.stacks != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # OIDC token for the plan role.
+      id-token: write
+      # Posting the plan as a comment.
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.changes.outputs.stacks) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # `colx-gha-plan` is READ-ONLY (ADR-0010). The worst a bad PR can do here
+      # is produce a diff.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/colx-gha-plan
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-plan-${{ matrix.stack }}
+
+      # envs/dev/common.tfvars is deliberately NOT committed — it carries the
+      # account-specific state bucket, the operator's CIDR and the admin principal
+      # ARN (see envs/dev/common.tfvars.example). CI rebuilds it from repository
+      # *variables*, never secrets: every value here is non-sensitive, and a
+      # tfvars value ends up in state and in every plan comment anyway.
+      - name: materialize envs/dev/common.tfvars
+        run: |
+          f=infrastructure/terraform/envs/dev/common.tfvars
+          if [ -f "$f" ]; then
+            echo "using the committed $f"
+            exit 0
+          fi
+          # `: "$x" || ...` would never fire — the colon builtin always succeeds.
+          [ -n "${{ vars.AWS_ACCOUNT_ID }}" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is not set"; exit 1; }
+          [ -n "${{ vars.ADMIN_CIDRS }}" ] || { echo "::error::repository variable ADMIN_CIDRS is not set (e.g. [\"203.0.113.10/32\"])"; exit 1; }
+          cat > "$f" <<TFVARS
+          state_bucket        = "colx-tfstate-${{ vars.AWS_ACCOUNT_ID }}"
+          alert_email         = "${{ vars.ALERT_EMAIL }}"
+          admin_cidrs         = ${{ vars.ADMIN_CIDRS }}
+          admin_principal_arn = "${{ vars.ADMIN_PRINCIPAL_ARN }}"
+          github_repository   = "${{ github.repository }}"
+          github_environment  = "dev"
+          TFVARS
+          # Snowflake identifiers and public keys are not secrets; the private key
+          # arrives separately as TF_VAR_snowflake_private_key.
+          if [ -n "${{ vars.SNOWFLAKE_ORGANIZATION_NAME }}" ]; then
+            cat >> "$f" <<TFVARS
+          snowflake_organization_name = "${{ vars.SNOWFLAKE_ORGANIZATION_NAME }}"
+          snowflake_account_name      = "${{ vars.SNOWFLAKE_ACCOUNT_NAME }}"
+          service_user_public_keys    = ${{ vars.SNOWFLAKE_SERVICE_USER_PUBLIC_KEYS }}
+          TFVARS
+          fi
+          echo "wrote $f ($(grep -c . "$f") settings)"
+
+      - name: init
+        working-directory: infrastructure/terraform/stacks/${{ matrix.stack }}
+        run: |
+          # `key` comes from the stack's own `backend "s3"` block; backend.hcl
+          # supplies bucket/region/encrypt/kms_key_id/use_lockfile.
+          terraform init -backend-config=../../envs/dev/backend.hcl
+
+      - name: plan
+        id: plan
+        working-directory: infrastructure/terraform/stacks/${{ matrix.stack }}
+        env:
+          # Snowflake stack only; unset (and unused) for the AWS stacks.
+          TF_VAR_snowflake_private_key: ${{ secrets.SNOWFLAKE_TF_PRIVATE_KEY }}
+        run: |
+          set -o pipefail
+          terraform plan -no-color -lock-timeout=120s \
+            -var-file=../../envs/dev/common.tfvars \
+            -out=tfplan | tee plan.txt
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+
+      # The plan is the reviewable artefact (ADR-0010), so it goes where the
+      # review happens. Truncated to 60k chars: GitHub rejects longer comments,
+      # and a 200k-line plan is a signal in itself.
+      - name: comment plan
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'infrastructure/terraform/stacks/${{ matrix.stack }}/plan.txt';
+            let body;
+            try {
+              const raw = fs.readFileSync(path, 'utf8');
+              const clipped = raw.length > 60000
+                ? raw.slice(0, 60000) + '\n\n... TRUNCATED — see the job log for the full plan.'
+                : raw;
+              body = `### terraform plan — \`${{ matrix.stack }}\`\n\n<details><summary>show</summary>\n\n\`\`\`terraform\n${clipped}\n\`\`\`\n\n</details>`;
+            } catch (e) {
+              body = `### terraform plan — \`${{ matrix.stack }}\`\n\n:x: plan did not produce output; see the job log.`;
+            }
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+  # -------------------------------------------------------------------- apply --
+  apply:
+    needs: [changes, static]
+    if: github.event_name == 'push' && needs.changes.outputs.stacks != '[]'
+    runs-on: ubuntu-latest
+    # Required reviewer on the `dev` environment. This is the human approval gate
+    # ADR-0010 depends on; removing it makes every other control cosmetic.
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      # Sequential and ordered: 10-network before 20-data before 30-eks, because
+      # each reads the previous stack's remote state. `max-parallel: 1` plus a
+      # sorted matrix is the whole ordering mechanism.
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        stack: ${{ fromJSON(needs.changes.outputs.stacks) }}
+    steps:
+      # 00-bootstrap is human-applied (ADR-0010) and 40-snowflake is applied at
+      # Phase 6 kickoff via workflow_dispatch (plan §6.10). Skipping them here
+      # rather than filtering the matrix keeps the skip visible in the run log.
+      - name: skip stacks that are not auto-applied
+        id: gate
+        run: |
+          case "${{ matrix.stack }}" in
+            00-bootstrap)
+              echo "00-bootstrap is human-applied — see its README" ; echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            40-snowflake)
+              echo "40-snowflake is applied at Phase 6 kickoff via workflow_dispatch (plan 6.10)" ; echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.skip == 'false'
+
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.gate.outputs.skip == 'false'
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.gate.outputs.skip == 'false'
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/colx-gha-apply
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-apply-${{ matrix.stack }}
+
+      # envs/dev/common.tfvars is deliberately NOT committed — it carries the
+      # account-specific state bucket, the operator's CIDR and the admin principal
+      # ARN (see envs/dev/common.tfvars.example). CI rebuilds it from repository
+      # *variables*, never secrets: every value here is non-sensitive, and a
+      # tfvars value ends up in state and in every plan comment anyway.
+      - name: materialize envs/dev/common.tfvars
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          f=infrastructure/terraform/envs/dev/common.tfvars
+          if [ -f "$f" ]; then
+            echo "using the committed $f"
+            exit 0
+          fi
+          # `: "$x" || ...` would never fire — the colon builtin always succeeds.
+          [ -n "${{ vars.AWS_ACCOUNT_ID }}" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is not set"; exit 1; }
+          [ -n "${{ vars.ADMIN_CIDRS }}" ] || { echo "::error::repository variable ADMIN_CIDRS is not set (e.g. [\"203.0.113.10/32\"])"; exit 1; }
+          cat > "$f" <<TFVARS
+          state_bucket        = "colx-tfstate-${{ vars.AWS_ACCOUNT_ID }}"
+          alert_email         = "${{ vars.ALERT_EMAIL }}"
+          admin_cidrs         = ${{ vars.ADMIN_CIDRS }}
+          admin_principal_arn = "${{ vars.ADMIN_PRINCIPAL_ARN }}"
+          github_repository   = "${{ github.repository }}"
+          github_environment  = "dev"
+          TFVARS
+          # Snowflake identifiers and public keys are not secrets; the private key
+          # arrives separately as TF_VAR_snowflake_private_key.
+          if [ -n "${{ vars.SNOWFLAKE_ORGANIZATION_NAME }}" ]; then
+            cat >> "$f" <<TFVARS
+          snowflake_organization_name = "${{ vars.SNOWFLAKE_ORGANIZATION_NAME }}"
+          snowflake_account_name      = "${{ vars.SNOWFLAKE_ACCOUNT_NAME }}"
+          service_user_public_keys    = ${{ vars.SNOWFLAKE_SERVICE_USER_PUBLIC_KEYS }}
+          TFVARS
+          fi
+          echo "wrote $f ($(grep -c . "$f") settings)"
+
+      - name: init
+        if: steps.gate.outputs.skip == 'false'
+        working-directory: infrastructure/terraform/stacks/${{ matrix.stack }}
+        run: |
+          # `key` comes from the stack's own `backend "s3"` block; backend.hcl
+          # supplies bucket/region/encrypt/kms_key_id/use_lockfile.
+          terraform init -backend-config=../../envs/dev/backend.hcl
+
+      - name: apply
+        if: steps.gate.outputs.skip == 'false'
+        working-directory: infrastructure/terraform/stacks/${{ matrix.stack }}
+        env:
+          TF_VAR_snowflake_private_key: ${{ secrets.SNOWFLAKE_TF_PRIVATE_KEY }}
+        run: |
+          terraform apply -auto-approve -lock-timeout=300s \
+            -var-file=../../envs/dev/common.tfvars
+
+  # ------------------------------------------------- manual apply (dispatch) ---
+  # The 40-snowflake path, and the escape hatch for re-applying a stack whose
+  # files did not change.
+  apply-dispatch:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: reject unknown stacks
+        run: |
+          case "${{ inputs.stack }}" in
+            10-network|20-data|30-eks|40-snowflake) ;;
+            00-bootstrap)
+              echo "::error::00-bootstrap is human-applied (ADR-0010); see its README" ; exit 1 ;;
+            *)
+              echo "::error::unknown stack '${{ inputs.stack }}'" ; exit 1 ;;
+          esac
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/colx-gha-apply
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-apply-${{ inputs.stack }}
+
+      # envs/dev/common.tfvars is deliberately NOT committed — it carries the
+      # account-specific state bucket, the operator's CIDR and the admin principal
+      # ARN (see envs/dev/common.tfvars.example). CI rebuilds it from repository
+      # *variables*, never secrets: every value here is non-sensitive, and a
+      # tfvars value ends up in state and in every plan comment anyway.
+      - name: materialize envs/dev/common.tfvars
+        run: |
+          f=infrastructure/terraform/envs/dev/common.tfvars
+          if [ -f "$f" ]; then
+            echo "using the committed $f"
+            exit 0
+          fi
+          # `: "$x" || ...` would never fire — the colon builtin always succeeds.
+          [ -n "${{ vars.AWS_ACCOUNT_ID }}" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is not set"; exit 1; }
+          [ -n "${{ vars.ADMIN_CIDRS }}" ] || { echo "::error::repository variable ADMIN_CIDRS is not set (e.g. [\"203.0.113.10/32\"])"; exit 1; }
+          cat > "$f" <<TFVARS
+          state_bucket        = "colx-tfstate-${{ vars.AWS_ACCOUNT_ID }}"
+          alert_email         = "${{ vars.ALERT_EMAIL }}"
+          admin_cidrs         = ${{ vars.ADMIN_CIDRS }}
+          admin_principal_arn = "${{ vars.ADMIN_PRINCIPAL_ARN }}"
+          github_repository   = "${{ github.repository }}"
+          github_environment  = "dev"
+          TFVARS
+          # Snowflake identifiers and public keys are not secrets; the private key
+          # arrives separately as TF_VAR_snowflake_private_key.
+          if [ -n "${{ vars.SNOWFLAKE_ORGANIZATION_NAME }}" ]; then
+            cat >> "$f" <<TFVARS
+          snowflake_organization_name = "${{ vars.SNOWFLAKE_ORGANIZATION_NAME }}"
+          snowflake_account_name      = "${{ vars.SNOWFLAKE_ACCOUNT_NAME }}"
+          service_user_public_keys    = ${{ vars.SNOWFLAKE_SERVICE_USER_PUBLIC_KEYS }}
+          TFVARS
+          fi
+          echo "wrote $f ($(grep -c . "$f") settings)"
+
+      - name: init and apply
+        working-directory: infrastructure/terraform/stacks/${{ inputs.stack }}
+        env:
+          TF_VAR_snowflake_private_key: ${{ secrets.SNOWFLAKE_TF_PRIVATE_KEY }}
+        run: |
+          terraform init -backend-config=../../envs/dev/backend.hcl
+          terraform apply -auto-approve -lock-timeout=300s \
+            -var-file=../../envs/dev/common.tfvars

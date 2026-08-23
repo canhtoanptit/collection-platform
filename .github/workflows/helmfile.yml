@@ -1,0 +1,208 @@
+# Kubernetes deploy gate (plan FND-12, ADR-0010).
+#
+# `helmfile diff` on PR, `helmfile apply` on main behind the `dev` environment's
+# required reviewer. Runs as `colx-gha-eks-deploy` via OIDC — no kubeconfig, no
+# service-account token, no long-lived credential of any kind.
+#
+# The PR job is the reviewable artefact: a Helm diff shows exactly which objects
+# a values change moves, which is the only honest answer to "is this safe?".
+name: helmfile
+
+on:
+  pull_request:
+    paths:
+      - 'deployment/helmfile.yaml'
+      - 'deployment/namespaces.yaml'
+      - 'deployment/values/**'
+      - 'deployment/observability/**'
+      - '.github/workflows/helmfile.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deployment/helmfile.yaml'
+      - 'deployment/namespaces.yaml'
+      - 'deployment/values/**'
+      - 'deployment/observability/**'
+      - '.github/workflows/helmfile.yml'
+  workflow_dispatch:
+
+concurrency:
+  # One deploy at a time against one cluster. Not cancel-in-progress: killing a
+  # `helm upgrade` mid-flight leaves a release in `pending-upgrade`, which then
+  # needs a manual rollback.
+  group: helmfile-dev
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  CLUSTER_NAME: colx-dev
+  HELM_VERSION: v3.19.0
+  HELMFILE_VERSION: v1.7.4
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------ render ----
+  # No credentials, no cluster: proves the helmfile and every values file still
+  # produce valid manifests. This is the check that catches values-schema drift
+  # after a chart bump, and it is the same command scripts/verify/INF-B.sh runs.
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: install helmfile
+        run: |
+          curl -sSfL "https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz" \
+            -o /tmp/helmfile.tar.gz
+          tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile
+          sudo install -m 0755 /tmp/helmfile /usr/local/bin/helmfile
+          helmfile --version
+
+      - name: helmfile template
+        run: |
+          helmfile -f deployment/helmfile.yaml -e dev template > /tmp/rendered.yaml
+          objects=$(grep -c '^kind:' /tmp/rendered.yaml)
+          echo "rendered $objects objects"
+          # A render that silently produces nothing would pass `test -s` on
+          # whitespace. 100 is a floor, not a target: the baseline is ~220.
+          test "$objects" -ge 100
+
+      - name: no secret values in git
+        run: |
+          # Every Kubernetes Secret is an ExternalSecret (D§66). The only Secret
+          # objects in a render should be chart-internal ones with no literal
+          # values from this repo — so assert that nothing in deployment/values/**
+          # looks like a password or key.
+          if grep -rniE '^[[:space:]]*(password|adminPassword|secretKey|clientSecret|apiKey|token)[[:space:]]*:[[:space:]]*["'"'"']?[A-Za-z0-9+/=_-]{12,}' \
+               deployment/values/ ; then
+            echo "::error::a literal secret-looking value is present in deployment/values/**"
+            exit 1
+          fi
+          echo "ok: no literal secrets in deployment/values/**"
+
+  # -------------------------------------------------------------------- diff ----
+  diff:
+    needs: render
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: install helmfile
+        run: |
+          curl -sSfL "https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz" \
+            -o /tmp/helmfile.tar.gz
+          tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile
+          sudo install -m 0755 /tmp/helmfile /usr/local/bin/helmfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/colx-gha-eks-deploy
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-helmfile-diff
+
+      - name: kubeconfig
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: deploy-time values
+        id: vals
+        run: |
+          {
+            echo "account=$(aws sts get-caller-identity --query Account --output text)"
+            echo "registry=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "tag=sha-${GITHUB_SHA::12}"
+            # The RDS writer endpoint Keycloak points at. Read from the cluster's
+            # own view of stack 20-data rather than terraform, so this job needs
+            # no state access.
+            echo "dbhost=$(aws rds describe-db-instances \
+              --db-instance-identifier colx-dev-platform \
+              --query 'DBInstances[0].Endpoint.Address' --output text)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: helmfile diff
+        run: |
+          helmfile -f deployment/helmfile.yaml -e dev \
+            --state-values-set accountId=${{ steps.vals.outputs.account }} \
+            --state-values-set registry=${{ steps.vals.outputs.registry }} \
+            --state-values-set imageTag=${{ steps.vals.outputs.tag }} \
+            --state-values-set platformDbHost=${{ steps.vals.outputs.dbhost }} \
+            diff --detailed-exitcode=false --context 3
+
+  # ------------------------------------------------------------------- apply ----
+  apply:
+    needs: render
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Required reviewer. Same gate as terraform apply, for the same reason.
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: install helmfile
+        run: |
+          curl -sSfL "https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz" \
+            -o /tmp/helmfile.tar.gz
+          tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile
+          sudo install -m 0755 /tmp/helmfile /usr/local/bin/helmfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/colx-gha-eks-deploy
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-helmfile-apply
+
+      - name: kubeconfig
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: deploy-time values
+        id: vals
+        run: |
+          {
+            echo "account=$(aws sts get-caller-identity --query Account --output text)"
+            echo "registry=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "tag=sha-${GITHUB_SHA::12}"
+            echo "dbhost=$(aws rds describe-db-instances \
+              --db-instance-identifier colx-dev-platform \
+              --query 'DBInstances[0].Endpoint.Address' --output text)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: helmfile apply
+        run: |
+          helmfile -f deployment/helmfile.yaml -e dev \
+            --state-values-set accountId=${{ steps.vals.outputs.account }} \
+            --state-values-set registry=${{ steps.vals.outputs.registry }} \
+            --state-values-set imageTag=${{ steps.vals.outputs.tag }} \
+            --state-values-set platformDbHost=${{ steps.vals.outputs.dbhost }} \
+            apply --suppress-secrets
+
+      # `helmfile diff` clean immediately after an apply is the FND-8 acceptance
+      # criterion: it proves the declared state and the cluster agree, i.e. that
+      # nothing was applied by hand and no chart mutates itself post-install.
+      - name: post-apply diff must be empty
+        run: |
+          helmfile -f deployment/helmfile.yaml -e dev \
+            --state-values-set accountId=${{ steps.vals.outputs.account }} \
+            --state-values-set registry=${{ steps.vals.outputs.registry }} \
+            --state-values-set imageTag=${{ steps.vals.outputs.tag }} \
+            --state-values-set platformDbHost=${{ steps.vals.outputs.dbhost }} \
+            diff --detailed-exitcode

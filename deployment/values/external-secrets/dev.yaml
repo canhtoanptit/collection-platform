@@ -1,0 +1,76 @@
+# external-secrets 2.9.0 (ESO v2.9.0) — the only component allowed to mint Secrets.
+#
+# Every Kubernetes Secret in this cluster is produced by ESO from AWS Secrets
+# Manager under `colx/dev/*` (D§66, ADR-0011). There are no Secret manifests in
+# this repo and no secret values in any values file.
+#
+# The IRSA annotation is set in deployment/helmfile.yaml from the account id, so
+# no ARN is hard-coded here.
+
+# CRDs come from the chart. Installing them separately would mean a two-step
+# bootstrap and an ordering problem on every rebuild.
+installCRDs: true
+
+crds:
+  createClusterExternalSecret: true
+  createClusterSecretStore: true
+  createSecretStore: true
+  # v1beta1 stays unserved: everything in this repo uses external-secrets.io/v1.
+  unsafeServeV1Beta1: false
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: external-secrets
+
+# Single replica, so leader election is pure overhead.
+leaderElect: false
+
+log:
+  level: info
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+# ServiceMonitor comes with the Prometheus operator CRDs, which this release
+# installs *before* kube-prometheus-stack. Enabling it here would fail on a fresh
+# cluster, so ESO's own metrics are scraped via the annotation-based job instead.
+serviceMonitor:
+  enabled: false
+
+metrics:
+  service:
+    enabled: true
+
+webhook:
+  replicaCount: 1
+  serviceAccount:
+    create: true
+    name: external-secrets-webhook
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  serviceMonitor:
+    enabled: false
+
+certController:
+  replicaCount: 1
+  serviceAccount:
+    create: true
+    name: external-secrets-cert-controller
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  serviceMonitor:
+    enabled: false

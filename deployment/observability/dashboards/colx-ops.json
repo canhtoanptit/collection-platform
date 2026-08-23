@@ -1,0 +1,308 @@
+{
+  "uid": "colx-ops",
+  "title": "colx / ops",
+  "description": "The single operational view from D\u00a751. Rows follow the design's row set (INGESTION, PIPELINES, COLLECTIONS, DECISIONING). Panels arrive as the metrics that back them are built; each placeholder names the owning WP and the exact query.",
+  "tags": [
+    "colx",
+    "ops"
+  ],
+  "timezone": "utc",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "label": "Prometheus"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "INGESTION",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "text",
+      "title": "SFTP feeds on time",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum(rate(colx_ingestion_files_total{status=\"RECONCILED\"}[1d]))\n  / sum(rate(colx_ingestion_files_total[1d]))\n```\nOwner: **ING-2** (control-plane metrics contract)."
+      }
+    },
+    {
+      "id": 3,
+      "type": "text",
+      "title": "CDC lag p95",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nhistogram_quantile(0.95,\n  sum by (le) (rate(debezium_metrics_MilliSecondsBehindSource_bucket[5m])))\n```\nOwner: **ING-5** (Debezium + JMX exporter, deployment/images/connect)."
+      }
+    },
+    {
+      "id": 4,
+      "type": "text",
+      "title": "Quarantined rows",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum by (feed) (increase(colx_ingestion_quarantine_rows_total[1d]))\n```\nOwner: **ING-4** / **ING-2**."
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "PIPELINES",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Airflow scheduler heartbeat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(airflow_scheduler_heartbeat_total[5m])",
+          "legendFormat": "heartbeat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Airflow task instance failures (1d)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(airflow_ti_failures_total[1d]))",
+          "legendFormat": "failures",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 13,
+      "type": "text",
+      "title": "Reconciliation checks by status",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 7
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum by (status) (increase(colx_recon_checks_total[1d]))\n```\nOwner: **ING-8** (reconciliation engine)."
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "COLLECTIONS",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "text",
+      "title": "Cases created / resolved",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 13
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum(increase(colx_cases_created_total[1d]))\nsum(increase(colx_cases_resolved_total[1d]))\n```\nOwner: **SVC-4** (case-service)."
+      }
+    },
+    {
+      "id": 22,
+      "type": "text",
+      "title": "Treatments executed by channel",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 13
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum by (channel) (increase(colx_treatments_executed_total[1d]))\n```\nOwner: **DEC-14** / **DEC-16**."
+      }
+    },
+    {
+      "id": 23,
+      "type": "text",
+      "title": "Arrangements active",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 13
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum(colx_arrangements_active)\n```\nOwner: **SVC-5** (arrangement-service)."
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "DECISIONING",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "text",
+      "title": "Decisions made",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 19
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum(increase(colx_decisions_total[1d]))\n```\nOwner: **DEC-6** (decision-service)."
+      }
+    },
+    {
+      "id": 32,
+      "type": "text",
+      "title": "Decision failure rate",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 19
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\nsum(rate(colx_decisions_total{outcome=\"ERROR\"}[1h]))\n  / sum(rate(colx_decisions_total[1h]))\n```\nOwner: **DEC-6**."
+      }
+    },
+    {
+      "id": 33,
+      "type": "text",
+      "title": "Snowflake credits used this month",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 19
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "_Placeholder._ The metric this panel needs does not exist yet \u2014 it arrives with the WP named below. A panel wired to a metric nobody emits reads as a broken dashboard, so the query is written here as text until then.\n\n```\ncolx_snowflake_credits_used\n```\nOwner: **ANA-9** (pushgateway task; the resource monitor hard-caps at 50)."
+      }
+    }
+  ]
+}

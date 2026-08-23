@@ -1,0 +1,8 @@
+# Deploy-time values (see values/external-secrets/deploy.yaml.gotmpl for why this
+# is a separate `.gotmpl` file).
+#
+# The role exists with NO policy attached until Phase 12 (stack 30-eks); the
+# annotation is here so enabling ingress is a flag plus a policy attachment.
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.accountId }}:role/{{ .Values.prefix }}-{{ .Values.env }}-alb-controller

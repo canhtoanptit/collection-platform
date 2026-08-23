@@ -1,0 +1,117 @@
+# opentelemetry-collector 0.170.0 — OTLP in, Tempo out (plan FND-9, ADR-0015).
+#
+# Deployment (not DaemonSet): this is the trace pipeline, and every service pushes
+# OTLP to one address. Logs go through Alloy, metrics are scraped by Prometheus —
+# so this collector does exactly one thing, which keeps its failure modes legible.
+#
+# Services point `OTEL_EXPORTER_OTLP_ENDPOINT` at
+# `http://opentelemetry-collector.platform.svc.cluster.local:4317`.
+
+mode: deployment
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: opentelemetry-collector
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 192Mi
+  limits:
+    memory: 512Mi
+
+# The chart's default config opens jaeger/zipkin receivers and a prometheus
+# scrape job. `presets` and an explicit `config` below replace all of it.
+presets:
+  logsCollection:
+    enabled: false
+  hostMetrics:
+    enabled: false
+  kubernetesAttributes:
+    enabled: true
+  kubeletMetrics:
+    enabled: false
+  kubernetesEvents:
+    enabled: false
+  clusterMetrics:
+    enabled: false
+
+config:
+  receivers:
+    # Explicit `null` on jaeger/zipkin removes the chart defaults. An open
+    # receiver is an unauthenticated write path into the trace store.
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    # memory_limiter first in the chain, so back-pressure reaches the client
+    # instead of the collector OOMing and losing the batch.
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 75
+      spike_limit_percentage: 25
+    batch:
+      timeout: 5s
+      send_batch_size: 512
+    # The `kubernetesAttributes` preset above adds the `k8s_attributes`
+    # processor and inserts it into every pipeline. Note the underscore: the
+    # contrib processor was renamed, and writing `k8sattributes` here produces a
+    # second, unused processor block rather than an error.
+    k8s_attributes:
+      extract:
+        metadata:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.deployment.name
+          - k8s.node.name
+
+  exporters:
+    otlp/tempo:
+      endpoint: tempo.platform.svc.cluster.local:4317
+      tls:
+        insecure: true
+
+  service:
+    pipelines:
+      # Traces only. Declaring empty metrics/logs pipelines would create two
+      # more things that can silently stop working.
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp/tempo]
+      metrics: null
+      logs: null
+
+ports:
+  otlp:
+    enabled: true
+  otlp-http:
+    enabled: true
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  metrics:
+    enabled: true
+
+service:
+  type: ClusterIP
+
+serviceMonitor:
+  enabled: true

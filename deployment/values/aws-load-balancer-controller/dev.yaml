@@ -1,0 +1,47 @@
+# aws-load-balancer-controller 3.5.0 — INSTALLED: false.
+#
+# There is no public ingress in this environment until Phase 12 (ADR-0011). This
+# release exists so that turning ingress on is a flag plus a domain rather than a
+# design exercise, and so the values are reviewed now while the reasoning is
+# fresh instead of at 5pm on the day someone needs a URL.
+#
+# Flipping `albController: true` in deployment/helmfile.yaml is NOT sufficient.
+# Before it will work:
+#
+#   1. Attach the official AWS Load Balancer Controller IAM policy to
+#      `colx-dev-alb-controller` (created without permissions by stack 30-eks).
+#      Source: https://github.com/kubernetes-sigs/aws-load-balancer-controller
+#      (docs/install/iam_policy.json for the matching controller version).
+#   2. Register a domain and issue an ACM certificate (~$12/yr — the unresolved
+#      prerequisite named in ADR-0011).
+#   3. Set `clusterName` below if the cluster is not `colx-dev`.
+#
+# INF-14 (Phase 12) owns all three.
+
+clusterName: colx-dev
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller
+
+region: eu-west-1
+
+# Discovered from the cluster's subnet tags (set by stack 10-network), so no
+# subnet ids are pinned here.
+enableShield: false
+enableWaf: false
+# WAFv2 is the one worth having when this goes public; left off until there is a
+# listener to attach it to.
+enableWafv2: false
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+serviceMonitor:
+  enabled: false

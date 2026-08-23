@@ -1,0 +1,33 @@
+# Airflow statsd -> Prometheus (plan FND-10).
+#
+# The official apache-airflow chart has no ServiceMonitor template — and its
+# values schema accepts a top-level `serviceMonitor:` key that no template reads,
+# so "I set serviceMonitor.enabled: true" is not evidence of anything. This
+# manifest is the actual scrape, applied by the airflow release's postsync hook.
+#
+# The statsd exporter's Prometheus endpoint is the `statsd-scrape` port (9102);
+# 9125/UDP is the ingest side and is not scrapeable.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: airflow-statsd
+  namespace: airflow
+  labels:
+    app.kubernetes.io/part-of: colx
+    # kube-prometheus-stack is configured with
+    # serviceMonitorSelectorNilUsesHelmValues: false, so no release label is
+    # required for this to be picked up.
+spec:
+  selector:
+    matchLabels:
+      tier: airflow
+      component: statsd
+      release: airflow
+  namespaceSelector:
+    matchNames:
+      - airflow
+  endpoints:
+    - port: statsd-scrape
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

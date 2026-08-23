@@ -1,0 +1,254 @@
+# deployment/helmfile.yaml — the whole cluster baseline, one file (plan FND-8/9/10, FND-6).
+#
+#   helmfile -f deployment/helmfile.yaml -e dev diff
+#   helmfile -f deployment/helmfile.yaml -e dev apply     # CI only, gated (ADR-0010)
+#
+# Rules this file follows, all of them checked by scripts/verify/INF-B.sh:
+#
+#  1. **Every chart version is an exact pin.** No ranges, no "latest". A rebuild in
+#     three weeks must install the same bytes, or `destroy-heavy` stops being a
+#     safe lever (ADR-0010).
+#  2. **No secret values anywhere.** Every Kubernetes Secret is an ExternalSecret
+#     referencing `colx/dev/*` (D§66). Grep this file and `values/**` for a
+#     password and you will find only `existingSecret:` pointers.
+#  3. **No ingress.** Every service is ClusterIP; access is `make grafana`,
+#     `make airflow`, `make keycloak` (ADR-0011). The ALB controller release is
+#     flag-gated and off.
+#  4. **Ordering is explicit** via `needs:`, not luck. CRDs (external-secrets,
+#     Prometheus operator) must exist before anything references them.
+
+environments:
+  dev:
+    values:
+      - region: eu-west-1
+        prefix: colx
+        env: dev
+        namespacePlatform: platform
+        namespaceAirflow: airflow
+
+        # Buckets (plan §6.7) and the secret prefix ESO reads.
+        opsBucket: colx-dev-ops
+        secretPrefix: colx/dev
+
+        # ---------------------------------------------------- deploy-time values
+        # These four are the only things a values file cannot know. Every one has
+        # a deliberately INVALID default so a missed override fails loudly
+        # (AccessDenied, NXDOMAIN, ImagePullBackOff) instead of silently
+        # deploying against the wrong thing.
+        #
+        # .github/workflows/helmfile.yml supplies them:
+        #   --state-values-set accountId=$(aws sts get-caller-identity --query Account --output text)
+        #   --state-values-set registry=$ECR_REGISTRY
+        #   --state-values-set imageTag=sha-$GITHUB_SHA_SHORT
+        #   --state-values-set platformDbHost=$(terraform output -raw platform_endpoint)
+        accountId: "000000000000"
+        registry: colx-dev-registry.invalid
+        imageTag: latest
+        platformDbHost: colx-dev-platform.invalid
+
+        # NOTE: there is no `albController` toggle here. The ALB controller
+        # release sets `installed: false` literally — see that release for why a
+        # templated boolean cannot work in a `.yaml` helmfile.
+
+---
+
+repositories:
+  - name: external-secrets
+    url: https://charts.external-secrets.io
+  - name: metrics-server
+    url: https://kubernetes-sigs.github.io/metrics-server/
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+  - name: open-telemetry
+    url: https://open-telemetry.github.io/opentelemetry-helm-charts
+  - name: apache-airflow
+    url: https://airflow.apache.org
+  - name: codecentric
+    url: https://codecentric.github.io/helm-charts
+  - name: eks
+    url: https://aws.github.io/eks-charts
+
+helmDefaults:
+  createNamespace: false
+  wait: true
+  waitForJobs: true
+  timeout: 900
+  atomic: false
+  historyMax: 5
+
+releases:
+  # ------------------------------------------------------------------ secrets --
+  # First release, and the one everything else depends on: no other chart can be
+  # configured without a Secret, and every Secret in this cluster is produced by
+  # ESO from Secrets Manager.
+  - name: external-secrets
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: external-secrets/external-secrets
+    version: 2.9.0
+    values:
+      - values/external-secrets/dev.yaml
+      - values/external-secrets/deploy.yaml.gotmpl
+    hooks:
+      # Namespaces first, with their labels. `--create-namespace` would make them
+      # unlabelled, and Alloy/Prometheus/NetworkPolicies select on the labels.
+      - events: [presync]
+        showlogs: true
+        command: kubectl
+        args: ["apply", "-f", "namespaces.yaml"]
+      # The ClusterSecretStore needs the CRD (installed by this release) and the
+      # IRSA-annotated service account, so it lands after, not before.
+      - events: [postsync]
+        showlogs: true
+        command: kubectl
+        args: ["apply", "-f", "values/external-secrets/clustersecretstore.yaml"]
+      # Every ExternalSecret in the cluster, in one reviewable file. Applied here
+      # so the Secrets exist before the releases that mount them.
+      - events: [postsync]
+        showlogs: true
+        command: kubectl
+        args: ["apply", "-f", "values/external-secrets/externalsecrets.yaml"]
+
+  # ------------------------------------------------------------------- metrics --
+  - name: metrics-server
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: metrics-server/metrics-server
+    version: 3.14.0
+    values:
+      - values/metrics-server/dev.yaml
+
+  # ------------------------------------------------------- prometheus/grafana --
+  # Installs the Prometheus operator CRDs that every ServiceMonitor and
+  # PrometheusRule below depends on.
+  - name: kube-prometheus-stack
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: prometheus-community/kube-prometheus-stack
+    version: 88.5.3
+    needs:
+      - "{{ .Values.namespacePlatform }}/external-secrets"
+    values:
+      - values/kube-prometheus-stack/dev.yaml
+      # Alertmanager's SNS receiver (and its IRSA annotation) need the account
+      # id, so the whole Alertmanager config lives in the templated file.
+      - values/kube-prometheus-stack/deploy.yaml.gotmpl
+    hooks:
+      # Dashboards as labelled ConfigMaps for the Grafana sidecar, plus the base
+      # alert rules. Files in git, so `destroy-heavy` costs time and not
+      # dashboards (ADR-0015).
+      - events: [postsync]
+        showlogs: true
+        command: bash
+        args:
+          - "observability/apply.sh"
+          - "{{ .Values.namespacePlatform }}"
+
+  # -------------------------------------------------------------- logs/traces --
+  - name: loki
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: grafana/loki
+    version: 7.3.0
+    needs:
+      - "{{ .Values.namespacePlatform }}/kube-prometheus-stack"
+    values:
+      - values/loki/dev.yaml
+      - values/loki/deploy.yaml.gotmpl
+
+  - name: tempo
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: grafana/tempo
+    version: 1.24.4
+    needs:
+      - "{{ .Values.namespacePlatform }}/kube-prometheus-stack"
+    values:
+      - values/tempo/dev.yaml
+      - values/tempo/deploy.yaml.gotmpl
+
+  - name: alloy
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: grafana/alloy
+    version: 1.11.1
+    needs:
+      - "{{ .Values.namespacePlatform }}/loki"
+    values:
+      - values/alloy/dev.yaml
+
+  - name: opentelemetry-collector
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: open-telemetry/opentelemetry-collector
+    version: 0.170.0
+    needs:
+      - "{{ .Values.namespacePlatform }}/tempo"
+    values:
+      - values/opentelemetry-collector/dev.yaml
+
+  # ------------------------------------------------------------------ identity --
+  # Keycloak replaces Cognito (plan FND-6, user directive 2026-08-23). Realm as
+  # code, ClusterIP only, no ingress until Phase 12.
+  - name: keycloak
+    namespace: "{{ .Values.namespacePlatform }}"
+    chart: codecentric/keycloakx
+    version: 7.2.3
+    needs:
+      - "{{ .Values.namespacePlatform }}/external-secrets"
+    values:
+      - values/keycloak/dev.yaml
+      - values/keycloak/deploy.yaml.gotmpl
+    hooks:
+      # The realm JSON becomes a ConfigMap mounted at
+      # /opt/keycloak/data/import/. Created before the StatefulSet rolls.
+      - events: [presync]
+        showlogs: true
+        command: bash
+        args:
+          - "values/keycloak/bootstrap.sh"
+          - "pre"
+          - "{{ .Values.namespacePlatform }}"
+      # Client secrets are set by a kcadm Job after Keycloak is up — never in the
+      # realm JSON, never in git. This hook is also the realm *update* path:
+      # `--import-realm` skips a realm that already exists.
+      - events: [postsync]
+        showlogs: true
+        command: bash
+        args:
+          - "values/keycloak/bootstrap.sh"
+          - "post"
+          - "{{ .Values.namespacePlatform }}"
+
+  # ------------------------------------------------------------------- airflow --
+  # Chart 1.16.0 is the last Airflow-2 line of the official chart; the image is
+  # pinned to Airflow 2.11 (see values/airflow/dev.yaml for why).
+  - name: airflow
+    namespace: "{{ .Values.namespaceAirflow }}"
+    chart: apache-airflow/airflow
+    version: 1.16.0
+    needs:
+      - "{{ .Values.namespacePlatform }}/external-secrets"
+      - "{{ .Values.namespacePlatform }}/kube-prometheus-stack"
+    values:
+      - values/airflow/dev.yaml
+      - values/airflow/deploy.yaml.gotmpl
+    hooks:
+      # The chart ships no ServiceMonitor template, so the statsd scrape is our
+      # manifest. See values/airflow/dev.yaml for the trap this avoids.
+      - events: [postsync]
+        showlogs: true
+        command: kubectl
+        args: ["apply", "-f", "values/airflow/servicemonitor.yaml"]
+
+  # -------------------------------------------------------- ingress (flag-off) --
+  # Written now, installed in Phase 12 with a domain and an ACM certificate
+  # (ADR-0011). The IRSA role already exists and has no policy attached.
+  - name: aws-load-balancer-controller
+    namespace: kube-system
+    chart: eks/aws-load-balancer-controller
+    version: 3.5.0
+    # Literal `false`, not `{{ .Values.albController }}`: helmfile 1.x type-checks
+    # the release schema BEFORE templating, so a Go action in a boolean field is a
+    # parse error (it only works in a `.gotmpl` file). Phase 12 flips this to true.
+    installed: false
+    needs:
+      - "{{ .Values.namespacePlatform }}/external-secrets"
+    values:
+      - values/aws-load-balancer-controller/dev.yaml
+      - values/aws-load-balancer-controller/deploy.yaml.gotmpl

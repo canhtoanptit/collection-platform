@@ -1,0 +1,8 @@
+# Deploy-time values (see values/external-secrets/deploy.yaml.gotmpl for why this
+# is a separate `.gotmpl` file).
+#
+# RDS writer endpoint of colx-dev-platform (stack 20-data output
+# `platform_endpoint`). INF-A's scripts/db/provision_databases.sh creates the
+# `keycloak` database and role on that instance.
+database:
+  hostname: {{ .Values.platformDbHost }}

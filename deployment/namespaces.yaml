@@ -1,0 +1,81 @@
+# Namespaces for the colx-dev cluster (plan FND-8).
+#
+# Applied before helmfile — every release targets one of these and none of them is
+# created implicitly by `--create-namespace`, because a namespace created as a side
+# effect has no labels, and the labels are what Alloy, Prometheus and the network
+# policies (Phase 14) select on.
+#
+#   kubectl apply -f deployment/namespaces.yaml
+#
+# `make up-all` does this as step 1; `deployment/helmfile.yaml` also applies it in
+# the external-secrets presync hook so a bare `helmfile apply` is self-sufficient.
+#
+# `colx.io/tier` groups namespaces by what they are for; `colx.io/data-class`
+# records whether workloads there can touch customer data, which is the label a
+# reviewer looks for before granting anything.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: platform
+    colx.io/data-class: none
+    # Cluster-wide capabilities: ESO, observability, identity.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: airflow
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: orchestration
+    colx.io/data-class: customer
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingestion
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: ingestion
+    colx.io/data-class: customer
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: eventing
+    colx.io/data-class: customer
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: simulator
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: simulator
+    # Synthetic only. The simulator must never see real customer data, and must
+    # never import ingestion/ or platform/ code (CLAUDE.md hard rule 1).
+    colx.io/data-class: synthetic
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sftp
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: ingestion
+    colx.io/data-class: customer
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: services
+  labels:
+    app.kubernetes.io/part-of: colx
+    colx.io/tier: domain
+    colx.io/data-class: customer

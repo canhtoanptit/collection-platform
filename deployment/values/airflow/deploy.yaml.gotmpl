@@ -1,0 +1,46 @@
+# Deploy-time values (see values/external-secrets/deploy.yaml.gotmpl for why this
+# is a separate `.gotmpl` file).
+#
+# Two things belong here: the image (built and tagged by
+# .github/workflows/images.yml) and the IRSA annotation. The official chart
+# creates one service account per component and the role in stack 30-eks trusts
+# all of them (`extra_service_accounts`), so every component carries the same
+# annotation. Missing it on one component means that component alone fails with
+# an opaque AWS error — the migrate Job succeeding while the scheduler cannot
+# write logs is the classic version of this.
+images:
+  airflow:
+    repository: {{ .Values.registry }}/colx/airflow
+    tag: {{ .Values.imageTag }}
+    pullPolicy: IfNotPresent
+
+{{- $role := printf "arn:aws:iam::%s:role/%s-%s-airflow" .Values.accountId .Values.prefix .Values.env }}
+
+scheduler:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}
+webserver:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}
+workers:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}
+triggerer:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}
+migrateDatabaseJob:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}
+createUserJob:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}
+cleanup:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: {{ $role }}

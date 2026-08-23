@@ -1,0 +1,30 @@
+# metrics-server 3.14.0 — `kubectl top` and HPA input.
+#
+# Not optional despite looking like it: every service chart in this repo ships an
+# HPA (deployment/charts/collections-service), and an HPA with no metrics API sits
+# in `unknown` forever without erroring.
+
+replicas: 1
+
+args:
+  # 15s is the shortest interval metrics-server supports; the default 60s makes
+  # `kubectl top` during an incident feel broken.
+  - --metric-resolution=15s
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
+
+# Needs the Prometheus operator CRDs, which arrive with kube-prometheus-stack.
+# metrics-server installs before that release, so its own metrics are not scraped.
+metrics:
+  enabled: false
+
+serviceMonitor:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false

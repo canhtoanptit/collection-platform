@@ -1,0 +1,178 @@
+# codecentric/keycloakx 7.2.3 → Keycloak 26.6.4 (plan FND-6, user directive 2026-08-23).
+#
+# ── Why this chart ─────────────────────────────────────────────────────────────
+# * `codecentric/keycloakx` 7.2.3 tracks Keycloak 26.6.4 and uses the official
+#   `quay.io/keycloak/keycloak` image. Current and maintained.
+# * NOT Bitnami: its images moved behind a subscription in 2025, so a pinned tag
+#   can stop being pullable — unacceptable for a stack whose whole teardown story
+#   is "rebuild from scratch in 60 minutes" (ADR-0010).
+# * NOT `codecentric/keycloak` (the older chart): last app version 17.0.1-legacy,
+#   i.e. the Wildfly distribution, dead since Keycloak 18.
+#
+# ── Shape ──────────────────────────────────────────────────────────────────────
+# One replica, ClusterIP, no ingress (ADR-0011) — reach it with `make keycloak`.
+# Postgres on colx-dev-platform, database `keycloak`. Realm as code, imported at
+# startup from a ConfigMap. Client secrets are NOT in the realm JSON; a kcadm Job
+# sets them after startup from ESO-synced values (see bootstrap.sh).
+
+fullnameOverride: keycloak
+
+replicas: 1
+
+image:
+  repository: quay.io/keycloak/keycloak
+  tag: "26.6.4"
+  pullPolicy: IfNotPresent
+
+# `start` (production mode), not `start-dev`: dev mode enables an in-memory H2
+# database and relaxes hostname/HTTPS checks, so a dev-mode Keycloak proves
+# nothing about the real one. `--import-realm` reads /opt/keycloak/data/import/.
+command:
+  - "/opt/keycloak/bin/kc.sh"
+args:
+  - "start"
+  - "--import-realm"
+
+# Root path rather than the chart's legacy `/auth`, so the issuer is
+# `http://keycloak-http.platform.svc.cluster.local/realms/colx` — the value
+# `platform/authn` uses for OIDC discovery.
+http:
+  relativePath: "/"
+  managementRelativePath: "/"
+
+database:
+  vendor: postgres
+  # USER-SUPPLIED / cross-WP: the RDS writer endpoint of `colx-dev-platform`
+  # (stack 20-data output `platform_endpoint`). Overridden at deploy time:
+  #   helmfile -e dev --state-values-set platformDbHost=<endpoint>
+  # Left as an obviously-invalid placeholder so a missed override fails at DNS
+  # resolution with a legible error instead of connecting to something wrong.
+  hostname: colx-dev-platform.invalid
+  port: 5432
+  database: keycloak
+  username: keycloak
+  # Password from ESO (`colx/dev/keycloak/db`). The chart's `database.password`
+  # would put it in git.
+  existingSecret: keycloak-db
+  existingSecretKey: password
+
+# Wait for Postgres before starting, so a slow RDS does not produce a
+# CrashLoopBackOff that looks like a Keycloak problem.
+dbchecker:
+  enabled: true
+
+# Single replica: Infinispan's jdbc-ping discovery would add DB churn for no
+# availability gain.
+cache:
+  stack: custom
+
+extraEnv: |
+  # Keycloak 26 renamed KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD to these. They
+  # only create the bootstrap admin on an empty database; on later starts they
+  # are ignored, which is why rotating this secret needs a kcadm change too.
+  - name: KC_BOOTSTRAP_ADMIN_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin
+        key: username
+  - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin
+        key: password
+  # No ingress and no external hostname, so strict hostname checks would reject
+  # every port-forwarded request.
+  - name: KC_HOSTNAME_STRICT
+    value: "false"
+  - name: KC_HTTP_ENABLED
+    value: "true"
+  - name: KC_HEALTH_ENABLED
+    value: "true"
+  - name: KC_METRICS_ENABLED
+    value: "true"
+  - name: KC_LOG_CONSOLE_OUTPUT
+    value: "json"
+  # One replica, so a local cache. Keycloak's default `ispn` stack would start
+  # JGroups discovery and either multicast pointlessly or add jdbc-ping writes to
+  # a database that is already shared with Airflow and the services (ADR-0003).
+  - name: KC_CACHE
+    value: "local"
+  - name: JAVA_OPTS_APPEND
+    value: "-XX:MaxRAMPercentage=70"
+
+# The realm JSON, created from deployment/values/keycloak/realm-colx.json by the
+# presync hook. Mounted read-only where --import-realm looks.
+extraVolumes: |
+  - name: realm-import
+    configMap:
+      name: keycloak-realm
+      defaultMode: 0444
+
+extraVolumeMounts: |
+  - name: realm-import
+    mountPath: /opt/keycloak/data/import
+    readOnly: true
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 768Mi
+  limits:
+    cpu: 750m
+    memory: 1Gi
+
+# Keycloak's JVM startup is slow enough that the default probe timings flap.
+# The startup probe absorbs it so liveness never restarts a booting pod.
+startupProbe: |
+  httpGet:
+    path: '/health/started'
+    port: '{{ .Values.http.internalPort }}'
+    scheme: '{{ .Values.http.internalScheme }}'
+  initialDelaySeconds: 20
+  periodSeconds: 5
+  failureThreshold: 60
+
+readinessProbe: |
+  httpGet:
+    path: '/health/ready'
+    port: '{{ .Values.http.internalPort }}'
+    scheme: '{{ .Values.http.internalScheme }}'
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+livenessProbe: |
+  httpGet:
+    path: '/health/live'
+    port: '{{ .Values.http.internalPort }}'
+    scheme: '{{ .Values.http.internalScheme }}'
+  initialDelaySeconds: 0
+  periodSeconds: 15
+  timeoutSeconds: 5
+
+service:
+  type: ClusterIP
+  httpPort: 80
+
+# No ingress until Phase 12 (ADR-0011).
+ingress:
+  enabled: false
+
+httpRoute:
+  enabled: false
+
+metrics:
+  enabled: true
+
+health:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  port: http-internal
+  path: /metrics
+  interval: 30s
+
+serviceAccount:
+  create: true
+  name: keycloak

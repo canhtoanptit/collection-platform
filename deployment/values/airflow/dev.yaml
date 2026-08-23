@@ -1,0 +1,281 @@
+# apache-airflow chart 1.16.0, running Airflow 2.11 (plan FND-10, ADR-0007).
+#
+# ── Why chart 1.16.0 and not the newest ─────────────────────────────────────────
+# ADR-0007 pins **Airflow 2.11**. Chart 1.17.0 is the Airflow-3 cutover: it drops
+# the `webserver` component for `apiServer`, makes `dagProcessor` mandatory, and
+# its templates assume Airflow 3 config keys. 1.16.0 is the last chart of the
+# Airflow-2 line (its own default app version is 2.10.5), so it is the newest
+# chart that can run 2.11 at all.
+#
+# `airflowVersion` below is the value the chart's `semverCompare` guards read, so
+# it must say 2.11 even though the chart shipped with 2.10.5 as its default.
+# The image itself is `colx/airflow` (deployment/images/airflow/Dockerfile),
+# injected from deployment/helmfile.yaml.
+#
+# ── No secrets here ────────────────────────────────────────────────────────────
+# Metadata connection, Fernet key, webserver secret key, the local admin password
+# and every `AIRFLOW_CONN_*` come from ExternalSecrets
+# (deployment/values/external-secrets/externalsecrets.yaml). The chart's default
+# path for the admin password puts it in values.yaml *and* in the create-user
+# Job's argv, which is why `createUserJob.args` is overridden below.
+
+airflowVersion: "2.11.0"
+defaultAirflowTag: "2.11.0"
+
+executor: KubernetesExecutor
+
+# Task pods are launched by the scheduler; it needs pod-launch RBAC.
+allowPodLaunching: true
+
+# --------------------------------------------------------------- metadata DB ----
+# Postgres 16 on colx-dev-platform, database `airflow` (stack 20-data +
+# scripts/db/provision_databases.sh). Key must be `connection`.
+data:
+  metadataSecretName: airflow-metadata
+
+fernetKeySecretName: airflow-fernet-key
+webserverSecretKeySecretName: airflow-webserver-secret-key
+
+# The chart's bundled Postgres would be a second database to back up and a
+# different failure mode from the one we operate.
+postgresql:
+  enabled: false
+
+# CeleryExecutor leftovers.
+redis:
+  enabled: false
+
+# ---------------------------------------------------------------- pgbouncer ----
+# Airflow opens a connection per task pod; without pooling a busy DAG exhausts
+# `max_connections` on a db.t4g.small and takes the *services* sharing that
+# instance down with it (ADR-0003).
+pgbouncer:
+  enabled: true
+  maxClientConn: 100
+  metadataPoolSize: 10
+  resultBackendPoolSize: 5
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+
+# ------------------------------------------------------------------- DAGs -------
+# git-sync from this public repo, so no deploy key and no credentialsSecret. DAGs
+# are the one artefact that must be trivially updatable — a DAG fix should not
+# need an image build (ADR-0007).
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: true
+    repo: https://github.com/canhtoanptit/collection-platform.git
+    branch: main
+    rev: HEAD
+    ref: main
+    depth: 1
+    subPath: airflow/dags
+    # plan FND-10: 60s. Lower means more traffic and more chance of components
+    # disagreeing about what a DAG is mid-parse.
+    period: 60s
+    maxFailures: 3
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# ------------------------------------------------------------- remote logging ---
+# Task pods are ephemeral, so local logs die with them. IRSA supplies the
+# credentials; `aws_default` is an empty connection so boto3 falls through to the
+# projected service-account token — there is no key to store.
+logs:
+  persistence:
+    enabled: false
+
+config:
+  logging:
+    remote_logging: "True"
+    remote_base_log_folder: "s3://colx-dev-ops/airflow-logs"
+    remote_log_conn_id: "aws_default"
+    logging_level: "INFO"
+    # JSON so Alloy's `stage.json` can promote trace_id/correlation_id the same
+    # way it does for services (ADR-0015).
+    json_format: "True"
+  metrics:
+    statsd_on: "True"
+    statsd_host: "airflow-statsd"
+    statsd_port: "9125"
+    statsd_prefix: "airflow"
+  core:
+    # No business logic in DAGs (CLAUDE.md hard rule 3) means DAGs are cheap to
+    # parse; a short interval keeps git-sync latency honest.
+    dagbag_import_timeout: "60"
+    default_timezone: "utc"
+    parallelism: "16"
+    max_active_tasks_per_dag: "8"
+  scheduler:
+    dag_dir_list_interval: "60"
+    catchup_by_default: "False"
+  webserver:
+    expose_config: "False"
+    warn_deployment_exposure: "False"
+  api:
+    auth_backends: "airflow.api.auth.backend.session,airflow.api.auth.backend.basic_auth"
+
+# Non-secret env for every container. `AIRFLOW_CONN_AWS_DEFAULT` is deliberately
+# credential-free — that is what makes IRSA the credential path.
+env:
+  - name: AIRFLOW_CONN_AWS_DEFAULT
+    value: "aws://?region_name=eu-west-1"
+  - name: AWS_DEFAULT_REGION
+    value: eu-west-1
+  - name: AIRFLOW__CORE__DAGS_FOLDER
+    value: /opt/airflow/dags/repo/airflow/dags
+
+# Secret env for every container, sourced from the ESO-managed Secrets.
+secret:
+  - envName: AIRFLOW_ADMIN_USERNAME
+    secretName: airflow-admin
+    secretKey: username
+  - envName: AIRFLOW_ADMIN_PASSWORD
+    secretName: airflow-admin
+    secretKey: password
+
+# Connections and Variables as a bulk envFrom, so adding one is a Secrets Manager
+# edit plus a restart — never a DAG change (A§42).
+extraEnvFrom: |
+  - secretRef:
+      name: airflow-connections
+
+# ------------------------------------------------------------------ components ---
+scheduler:
+  replicas: 1
+  serviceAccount:
+    create: true
+    name: airflow-scheduler
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1536Mi
+
+webserver:
+  replicas: 1
+  serviceAccount:
+    create: true
+    name: airflow-webserver
+  service:
+    type: ClusterIP
+  # There is no ingress (ADR-0011); access is `make airflow`.
+  defaultUser:
+    enabled: true
+    role: Admin
+    username: admin
+    email: ops@colx.invalid
+    firstName: colx
+    lastName: admin
+    # Never read. `createUserJob.args` below takes the password from the
+    # ESO-managed Secret instead. Kept short and obviously inert so the
+    # "no literal secrets in values" grep in scripts/verify/INF-B.sh does not
+    # have to special-case it.
+    password: unused
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1536Mi
+
+workers:
+  # KubernetesExecutor: this block only supplies the pod template for task pods,
+  # there is no long-lived worker Deployment.
+  serviceAccount:
+    create: true
+    name: airflow-worker
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+triggerer:
+  enabled: true
+  replicas: 1
+  serviceAccount:
+    create: true
+    name: airflow-triggerer
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+# Airflow 3 component; must stay off on the 2.x line.
+dagProcessor:
+  enabled: false
+
+flower:
+  enabled: false
+
+statsd:
+  enabled: true
+  serviceAccount:
+    create: true
+    name: airflow-statsd
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+migrateDatabaseJob:
+  enabled: true
+  useHelmHooks: false
+  applyCustomEnv: true
+  serviceAccount:
+    create: true
+    name: airflow-migrate-database-job
+
+createUserJob:
+  useHelmHooks: false
+  applyCustomEnv: true
+  serviceAccount:
+    create: true
+    name: airflow-create-user-job
+  # Overridden purely to keep the password out of git and out of the Job's argv
+  # (it would otherwise be visible in `kubectl describe job`). `--use-random-password`
+  # is not an option: the account has to be usable.
+  args:
+    - "bash"
+    - "-c"
+    - |-
+      exec airflow users create \
+        --role "{{ .Values.webserver.defaultUser.role }}" \
+        --username "$AIRFLOW_ADMIN_USERNAME" \
+        --email "{{ .Values.webserver.defaultUser.email }}" \
+        --firstname "{{ .Values.webserver.defaultUser.firstName }}" \
+        --lastname "{{ .Values.webserver.defaultUser.lastName }}" \
+        --password "$AIRFLOW_ADMIN_PASSWORD"
+
+cleanup:
+  enabled: true
+  serviceAccount:
+    create: true
+    name: airflow-cleanup
+
+# ---------------------------------------------------------------- monitoring ----
+# statsd -> Prometheus. The official chart ships NO ServiceMonitor template (and
+# its values schema silently accepts a `serviceMonitor:` key that nothing reads —
+# a trap worth naming), so the ServiceMonitor is a manifest of ours:
+# deployment/values/airflow/servicemonitor.yaml, applied by the airflow release's
+# postsync hook.
+#
+# The two series that tell you Airflow is alive are
+# `airflow_scheduler_heartbeat` and `airflow_ti_failures`.

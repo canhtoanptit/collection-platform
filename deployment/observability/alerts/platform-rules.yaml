@@ -1,0 +1,123 @@
+# Base platform alerts (plan FND-9, ADR-0015).
+#
+# Four rules, deliberately. kube-prometheus-stack's `defaultRules` already ship
+# ~90 alerts; these are the ones the plan names explicitly plus the deadman, and
+# adding more before anything has ever fired trains everyone to ignore the lot.
+#
+# Every rule carries a `runbook_url` pointing at a runbook that contains the D§82
+# control set — that is a CI rule, not a convention (ADR-0015). The URL here
+# resolves to a file in this repo, so a rebuild does not invalidate it.
+#
+# Applied by deployment/observability/apply.sh. Picked up because
+# kube-prometheus-stack sets `ruleSelectorNilUsesHelmValues: false`.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: colx-platform-rules
+  namespace: platform
+  labels:
+    app.kubernetes.io/part-of: colx
+    app.kubernetes.io/component: alerting
+spec:
+  groups:
+    - name: colx-platform-nodes
+      interval: 1m
+      rules:
+        - alert: ColxNodeNotReady
+          # kube_node_status_condition comes from kube-state-metrics. `== 1` on
+          # the "true" status of Ready==false: a node reporting NotReady, rather
+          # than a node that has stopped reporting (that is the next alert).
+          expr: |
+            kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'Node {{ $labels.node }} has been NotReady for 10 minutes'
+            description: >-
+              The node is registered but not Ready. With min_size=2 on a single
+              node group, one NotReady node is a third of the cluster; two is an
+              outage. Check the managed node group's health in the EKS console
+              before recycling anything.
+            runbook_url: https://github.com/canhtoanptit/collection-platform/blob/main/docs/runbooks/cost-and-teardown.md
+
+        - alert: ColxNodeUnreachable
+          # A node that stopped reporting entirely never trips the condition
+          # above, because the metric disappears with it.
+          expr: |
+            up{job="kubelet",metrics_path="/metrics"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'Kubelet on {{ $labels.node }} has been unreachable for 10 minutes'
+            description: >-
+              Prometheus cannot scrape the kubelet. Distinct from NotReady: the
+              node may be gone rather than unhealthy. If `make stop` was run, this
+              is expected and the alert should be silenced for the duration.
+            runbook_url: https://github.com/canhtoanptit/collection-platform/blob/main/docs/runbooks/cost-and-teardown.md
+
+    - name: colx-platform-storage
+      interval: 1m
+      rules:
+        - alert: ColxPersistentVolumeFillingUp
+          # 80% of a Prometheus/Loki/Tempo volume is the point at which there is
+          # still time to act. Waiting for 95% means acting during an outage.
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes
+              / kubelet_volume_stats_capacity_bytes
+            ) > 0.80
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full'
+            description: >-
+              Most likely Prometheus (retentionSize is 10GB against a 20Gi volume)
+              or Loki's WAL. Prometheus will not free space on its own if
+              retention is time-bound and the head block is large; check
+              `prometheus_tsdb_storage_blocks_bytes` before resizing.
+            runbook_url: https://github.com/canhtoanptit/collection-platform/blob/main/docs/runbooks/cost-and-teardown.md
+
+    - name: colx-platform-workloads
+      interval: 1m
+      rules:
+        - alert: ColxPodCrashLooping
+          # rate() over 15m rather than kube_pod_container_status_restarts_total
+          # absolute: a pod that crashed twice last week is not an incident.
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace=~"platform|airflow|ingestion|kafka|services|sftp|simulator"}[15m]) >= 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: '{{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) restarted {{ $value }} times in 15m'
+            description: >-
+              Three restarts in fifteen minutes is a crash loop, not bad luck.
+              Common causes here: a missing ExternalSecret (the Secret has not
+              synced yet), a missing IRSA annotation, or an OOMKill against the
+              memory limits in deployment/values/**.
+            runbook_url: https://github.com/canhtoanptit/collection-platform/blob/main/docs/runbooks/cost-and-teardown.md
+
+    - name: colx-platform-deadman
+      interval: 1m
+      rules:
+        - alert: ColxAlertingPipelineDeadman
+          # Always firing, on purpose. If this stops arriving by email, the
+          # alerting path is broken — and a silent alerting path is worse than no
+          # alerting path, because it looks like good news (ADR-0015).
+          #
+          # kube-prometheus-stack ships `Watchdog` for the same purpose; this one
+          # exists so the colx-owned rule file is itself proven to be loaded.
+          expr: vector(1)
+          labels:
+            severity: none
+          annotations:
+            summary: 'colx alerting pipeline deadman — this alert is always firing by design'
+            description: >-
+              Delivery of this alert proves rules from
+              deployment/observability/alerts/platform-rules.yaml are loaded and
+              Alertmanager can reach SNS. Its ABSENCE is the signal. Do not
+              silence it; do not "fix" it.
+            runbook_url: https://github.com/canhtoanptit/collection-platform/blob/main/docs/runbooks/cost-and-teardown.md

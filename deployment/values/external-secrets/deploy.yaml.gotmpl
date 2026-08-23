@@ -1,0 +1,20 @@
+# Deploy-time values: the IRSA role ARN, which needs the AWS account id.
+#
+# WHY A SEPARATE `.gotmpl` FILE
+#
+# helmfile only templates a release's *structural* fields (name, namespace,
+# chart, version, needs). Inline `values:` maps and `set:` entries in a
+# `helmfile.yaml` are handed to helm verbatim, so a Go action written there
+# reaches the chart unrendered and fails with "invalid map key". Values files
+# whose name ends `.gotmpl` ARE rendered with the environment context, so every
+# deploy-time value in this repo lives in one of these.
+#
+# (`helmfile.yaml` cannot simply be renamed `helmfile.yaml.gotmpl` — the path is
+# fixed by docs/ownership.yaml — and a templated boolean like `installed:` fails
+# even earlier, during helmfile's pre-template schema check.)
+#
+# Static configuration stays in `dev.yaml`, which keeps
+# `helm template -f dev.yaml` usable in scripts/verify/INF-B.sh without helmfile.
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.accountId }}:role/{{ .Values.prefix }}-{{ .Values.env }}-external-secrets

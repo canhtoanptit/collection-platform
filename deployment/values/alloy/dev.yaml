@@ -1,0 +1,135 @@
+# alloy 1.11.1 — the log shipper (plan FND-9, ADR-0015).
+#
+# DaemonSet, reads container stdout, relabels to `namespace/pod/container` and
+# pushes to Loki. Nothing else: no metrics scraping (Prometheus does that), no
+# traces (the OTel Collector does that). One job, one config.
+#
+# The load-bearing part is `stage.json`: services log JSON via
+# platform/otelkit, so `trace_id` and `correlation_id` are promoted to structured
+# metadata. Without that promotion, Grafana's Loki -> Tempo jump has nothing to
+# match on and the A§97 correlation chain stops being clickable — which is the
+# whole reason logs are in Loki rather than CloudWatch.
+
+controller:
+  type: daemonset
+
+alloy:
+  # Alloy needs no clustering for a log DaemonSet.
+  clustering:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
+  # Mounts /var/log and the container runtime log dir.
+  mounts:
+    varlog: true
+    dockercontainers: true
+
+  configMap:
+    create: true
+    content: |-
+      logging {
+        level  = "info"
+        format = "logfmt"
+      }
+
+      // Discover every pod on this node.
+      discovery.kubernetes "pods" {
+        role = "pod"
+
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+        }
+      }
+
+      // Label set kept deliberately small: every label is a Loki stream
+      // dimension, and high-cardinality labels (pod uid, container id) are what
+      // make a single-binary Loki fall over.
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.colx.receiver]
+      }
+
+      loki.process "colx" {
+        forward_to = [loki.write.default.receiver]
+
+        // Pull the ids out of the JSON body. `drop_malformed = false` matters:
+        // not every container in this cluster logs JSON (nginx, git-sync,
+        // Keycloak's startup banner), and dropping their lines would hide
+        // exactly the startup failures we need to see.
+        stage.json {
+          expressions = {
+            level          = "level",
+            trace_id       = "trace_id",
+            correlation_id = "correlation_id",
+            service        = "service",
+          }
+          drop_malformed = false
+        }
+
+        // Structured metadata rather than labels: queryable and clickable,
+        // without multiplying the number of streams.
+        stage.structured_metadata {
+          values = {
+            trace_id       = "",
+            correlation_id = "",
+          }
+        }
+
+        stage.labels {
+          values = {
+            level   = "",
+            service = "",
+          }
+        }
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki-gateway.platform.svc.cluster.local/loki/api/v1/push"
+        }
+      }
+
+serviceAccount:
+  create: true
+  name: alloy
+
+serviceMonitor:
+  enabled: true
+
+# No UI: there is no ingress, and the config is a file in git — the place to read
+# it is here, not through a port-forward.
+service:
+  enabled: true
+  type: ClusterIP

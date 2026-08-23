@@ -1,0 +1,39 @@
+# CODEOWNERS — review routing (plan FND-12).
+#
+# One human owns this repository, so the global rule is the substance and the
+# specific rules below exist to make the *reason* for review explicit rather than
+# to route to different people. When a second reviewer joins, these lines are
+# where they get added.
+#
+# Note what CODEOWNERS cannot do: it requests review, it does not enforce it.
+# The controls that actually block a bad change are the `dev` GitHub environment's
+# required reviewer (terraform apply, helmfile apply) and the CI gates
+# (contracts-check, ownership-check, trivy). See ADR-0010 and docs/review-policy.md.
+
+# Everything, by default.
+*                                   @canhtoanptit
+
+# --- things that cost money or can destroy state -----------------------------
+# Terraform is CI-apply-only and env-gated (ADR-0010); a review here is the last
+# point at which a destroy-and-recreate is cheap to notice.
+/infrastructure/terraform/          @canhtoanptit
+/scripts/cost/                      @canhtoanptit
+/scripts/dr/                        @canhtoanptit
+/docs/cost-model.md                 @canhtoanptit
+/docs/runbooks/                     @canhtoanptit
+
+# --- things that change what runs in the cluster ------------------------------
+/deployment/                        @canhtoanptit
+/.github/workflows/                 @canhtoanptit
+/.github/CODEOWNERS                 @canhtoanptit
+
+# --- frozen or governance-critical -------------------------------------------
+# Released files under contracts/** are immutable after `contracts-v1.0`
+# (CLAUDE.md §7); CI fails a PR that edits one, and this line makes the intent
+# visible in the review UI as well.
+/contracts/                         @canhtoanptit
+
+# Ownership map and delegation conventions are lead-agent-only.
+/docs/ownership.yaml                @canhtoanptit
+/docs/implementation-plan.md         @canhtoanptit
+/CLAUDE.md                          @canhtoanptit

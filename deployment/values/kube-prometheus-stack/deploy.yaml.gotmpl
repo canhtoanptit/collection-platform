@@ -1,0 +1,55 @@
+# Deploy-time values (see values/external-secrets/deploy.yaml.gotmpl for why this
+# is a separate `.gotmpl` file).
+#
+# The ENTIRE Alertmanager config lives here rather than in dev.yaml, because the
+# one thing it needs — the SNS topic ARN — contains the account id. Splitting it
+# (config in dev.yaml, ARN patched in) is not an option: helmfile values files are
+# deep-merged but **lists are replaced**, so overriding `receivers` means
+# restating the whole receiver anyway. One copy, here.
+#
+# Alertmanager -> SNS -> email is a notification channel, not on-call: no
+# deduplication across rebuilds, no acknowledgement, no escalation (ADR-0015).
+# What it proves is that the alert path works end to end.
+#
+# `sigv4` with no credentials block = the default AWS credential chain, which
+# under IRSA is the projected service-account token. No access key exists.
+alertmanager:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ .Values.accountId }}:role/{{ .Values.prefix }}-{{ .Values.env }}-alertmanager
+
+  config:
+    global:
+      resolve_timeout: 5m
+
+    route:
+      group_by: ["alertname", "namespace"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: sns-alerts
+      routes:
+        # The deadman switches must always get through, so they bypass the
+        # 12-hour repeat interval: silence here means Alertmanager itself is down.
+        - matchers:
+            - alertname =~ "Watchdog|ColxAlertingPipelineDeadman"
+          receiver: sns-alerts
+          group_wait: 0s
+          repeat_interval: 1h
+
+    receivers:
+      - name: sns-alerts
+        sns_configs:
+          - sigv4:
+              region: {{ .Values.region }}
+            topic_arn: arn:aws:sns:{{ .Values.region }}:{{ .Values.accountId }}:{{ .Values.prefix }}-{{ .Values.env }}-alerts
+            subject: '[{{ .Values.prefix }}-{{ .Values.env }}] {{ `{{ .CommonLabels.alertname }}` }} ({{ `{{ .Status }}` }})'
+            message: |-
+              {{ `{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}` }}
+              severity: {{ `{{ .CommonLabels.severity }}` }}
+              namespace: {{ `{{ .CommonLabels.namespace }}` }}
+              {{ `{{ range .Alerts -}}` }}
+              - {{ `{{ .Annotations.summary }}` }}
+                runbook: {{ `{{ .Annotations.runbook_url }}` }}
+              {{ `{{ end }}` }}
+            send_resolved: true

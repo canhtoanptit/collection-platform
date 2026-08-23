@@ -1,0 +1,130 @@
+# loki 7.3.0 (Loki 3.6.x), single binary, S3-backed (plan FND-9, ADR-0015).
+#
+# Single binary and no HA is the honest dev shape: the observability stack is the
+# least reliable thing in the cluster and competes with services for node
+# capacity. Losing it loses history, not data (ADR-0015).
+#
+# Storage is `s3://colx-dev-ops` under the **`loki/` prefix**, which is not
+# cosmetic: the IRSA policy in stack 30-eks scopes this workload to
+# `ops/loki/*` and gates `ListBucket` on `s3:prefix`, so Loki cannot enumerate
+# Tempo's blocks or Airflow's task logs in the same bucket. That prefix is only
+# reachable through the thanos objstore client (`use_thanos_objstore: true`) —
+# the legacy chunk client writes at the bucket root and would fail with
+# AccessDenied against that policy.
+#
+# The IRSA annotation is injected from deployment/helmfile.yaml.
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  storage:
+    type: s3
+    bucketNames:
+      chunks: colx-dev-ops
+      ruler: colx-dev-ops
+      admin: colx-dev-ops
+    use_thanos_objstore: true
+    object_store:
+      type: s3
+      storage_prefix: loki
+      s3:
+        region: eu-west-1
+
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  limits_config:
+    retention_period: 168h
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    # A chatty pod must not be able to push out everyone else's logs.
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+    max_query_series: 5000
+    volume_enabled: true
+    allow_structured_metadata: true
+
+  compactor:
+    retention_enabled: true
+    delete_request_store: s3
+
+  # Correlation ids and trace ids arrive as JSON fields from
+  # platform/otelkit; no ruler rules in dev.
+  rulerConfig:
+    storage:
+      type: local
+
+  server:
+    grpc_server_max_recv_msg_size: 8388608
+    grpc_server_max_send_msg_size: 8388608
+
+serviceAccount:
+  create: true
+  name: loki
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 1Gi
+
+# SimpleScalable/distributed components off — `deploymentMode: SingleBinary`
+# sets replicas to 0 for these, stated here so a reader does not have to know that.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# The gateway is the address Grafana's datasource uses; keeping it means the
+# datasource URL does not change if this ever grows into SimpleScalable.
+gateway:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# Bundled MinIO would defeat the point of an S3 backend.
+minio:
+  enabled: false
+
+# Extras that cost node capacity for little value in a dev cluster.
+lokiCanary:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+test:
+  enabled: false
+
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+  serviceMonitor:
+    enabled: true
