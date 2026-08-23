@@ -1,0 +1,304 @@
+# =================================================================================================
+# Idempotent Kafka topic apply Job (FND-5).
+#
+# Reads deployment/kafka/topics.yaml from a ConfigMap and converges the MSK cluster onto it:
+#
+#   1. `kafka-topics.sh --create --if-not-exists` for every declared topic
+#   2. `kafka-configs.sh --alter` to converge cleanup.policy / retention.ms / min.insync.replicas
+#      on topics that already exist
+#   3. `--describe` and WARN (never change) when a live partition count differs from the declared
+#      one -- growing partitions rehashes keys and destroys per-key ordering
+#
+# Running it twice is a no-op. That matters because every `make destroy-heavy` cycle destroys the
+# MSK cluster (MSK Provisioned cannot be stopped) and every rebuild has to re-apply topics.
+#
+# -------------------------------------------------------------------------------------------------
+# WHO APPLIES THIS
+# -------------------------------------------------------------------------------------------------
+# FND-8's helmfile (`deployment/helmfile.yaml`, INF-B) applies this manifest as part of the cluster
+# baseline, after external-secrets and the namespaces exist. By hand:
+#
+#   kubectl -n kafka create configmap colx-kafka-topics \
+#     --from-file=topics.yaml=deployment/kafka/topics.yaml \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+#   kubectl -n kafka delete job colx-kafka-topics-apply --ignore-not-found
+#   kubectl -n kafka apply -f deployment/kafka/topic-apply-job.yaml
+#   kubectl -n kafka wait --for=condition=complete job/colx-kafka-topics-apply --timeout=300s
+#   kubectl -n kafka logs job/colx-kafka-topics-apply
+#
+# The `delete` is not optional: a Job's pod template is immutable, so re-applying a changed Job with
+# the same name is rejected. Helmfile/kustomize should either delete-then-apply or suffix the name
+# with a hash of topics.yaml so each version is a distinct Job.
+#
+# -------------------------------------------------------------------------------------------------
+# PREREQUISITES (all owned by INF-B / FND-7 / FND-8)
+# -------------------------------------------------------------------------------------------------
+#   namespace              kafka
+#   ServiceAccount         kafka-topic-applier, IRSA-annotated with a role holding
+#                          kafka-cluster:Connect / DescribeCluster / *Topic* / AlterCluster on
+#                          arn:aws:kafka:<region>:<acct>:cluster/colx-dev/<uuid>
+#                          (cluster ARN + uuid are stack 20-data outputs)
+#   ConfigMap              colx-kafka-topics        -- generated from topics.yaml, see above
+#   ConfigMap              colx-kafka-bootstrap     -- key `bootstrap_servers`, from
+#                          `terraform output -raw msk_bootstrap_brokers_sasl_iam`. Not a secret,
+#                          so a ConfigMap rather than an ExternalSecret.
+#   Image                  colx/connect -- the toolbox image (Debezium base + aws-msk-iam-auth +
+#                          Aiven S3 sink + JMX agent). The bare repository name below is rewritten
+#                          to the ECR registry at deploy time.
+#
+# Set DRY_RUN=true in the Job env to print every command without executing it.
+# =================================================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: colx-kafka-client-config
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: colx-kafka-topics
+    app.kubernetes.io/component: client-config
+    app.kubernetes.io/managed-by: helmfile
+data:
+  # MSK IAM authentication over TLS. This is the only listener the cluster exposes (port 9098):
+  # there is no plaintext port and no SCRAM, so a client missing this file does not get an auth
+  # error, it gets a TLS handshake failure.
+  #
+  # Kept identical to the `msk_client_properties` output of stack 20-data so the two cannot drift.
+  client.properties: |
+    security.protocol=SASL_SSL
+    sasl.mechanism=AWS_MSK_IAM
+    sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;
+    sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: colx-kafka-topic-apply-script
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: colx-kafka-topics
+    app.kubernetes.io/component: apply-script
+    app.kubernetes.io/managed-by: helmfile
+data:
+  apply-topics.sh: |
+    #!/usr/bin/env bash
+    #
+    # Converge the MSK cluster onto deployment/kafka/topics.yaml. Idempotent: safe to run on every
+    # deploy and after every cluster rebuild.
+    set -euo pipefail
+
+    TOPICS_FILE="${TOPICS_FILE:-/config/topics/topics.yaml}"
+    CLIENT_PROPS="${CLIENT_PROPS:-/config/client/client.properties}"
+    DRY_RUN="${DRY_RUN:-false}"
+
+    : "${BOOTSTRAP_SERVERS:?BOOTSTRAP_SERVERS is required (MSK SASL/IAM bootstrap servers)}"
+
+    KAFKA_TOPICS="${KAFKA_BIN:-/kafka/bin}/kafka-topics.sh"
+    KAFKA_CONFIGS="${KAFKA_BIN:-/kafka/bin}/kafka-configs.sh"
+
+    test -r "$TOPICS_FILE"   || { echo "FATAL: cannot read $TOPICS_FILE"; exit 1; }
+    test -r "$CLIENT_PROPS"  || { echo "FATAL: cannot read $CLIENT_PROPS"; exit 1; }
+    test -x "$KAFKA_TOPICS"  || { echo "FATAL: $KAFKA_TOPICS not executable"; exit 1; }
+    test -x "$KAFKA_CONFIGS" || { echo "FATAL: $KAFKA_CONFIGS not executable"; exit 1; }
+
+    run() {
+      if [ "$DRY_RUN" = "true" ]; then
+        printf 'DRY-RUN: %s\n' "$*"
+        return 0
+      fi
+      "$@"
+    }
+
+    # Extract name/partitions/replication_factor/min_insync_replicas/cleanup_policy/retention_ms as
+    # TSV. Deliberately awk and not a YAML library: the toolbox image is a JVM image with no
+    # guaranteed python or yq, and topics.yaml is written in a fixed two-level subset (the same
+    # subset scripts/verify/INF-A.sh validates) precisely so this parse is total.
+    parse_topics() {
+      awk '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+        function value(line) { return trim(substr(line, index(line, ":") + 1)) }
+        function flush() {
+          if (name != "") {
+            printf "%s\t%s\t%s\t%s\t%s\t%s\n", name, parts, rf, misr, cleanup, retms
+          }
+          name = ""; parts = ""; rf = ""; misr = ""; cleanup = ""; retms = ""
+        }
+        /^[ \t]*#/                      { next }
+        /^topics:[ \t]*$/               { intopics = 1; next }
+        /^[^ \t]/                       { if (intopics) { flush(); intopics = 0 } next }
+        intopics != 1                   { next }
+        /^  - name:/                    { flush(); name = value($0); next }
+        /^    partitions:/              { parts = value($0); next }
+        /^    replication_factor:/      { rf = value($0); next }
+        /^    min_insync_replicas:/     { misr = value($0); next }
+        /^    cleanup_policy:/          { cleanup = value($0); next }
+        /^    retention_ms:/            { retms = value($0); next }
+        END                             { flush() }
+      ' "$1"
+    }
+
+    declared=0
+    created=0
+    converged=0
+    warned=0
+
+    echo "== applying $TOPICS_FILE to $BOOTSTRAP_SERVERS (dry_run=$DRY_RUN)"
+
+    while IFS=$'\t' read -r name parts rf misr cleanup retms; do
+      [ -n "$name" ] || continue
+      declared=$((declared + 1))
+
+      if [ -z "$parts" ] || [ -z "$rf" ] || [ -z "$cleanup" ] || [ -z "$retms" ]; then
+        echo "FATAL: incomplete declaration for topic '$name' (partitions=$parts rf=$rf cleanup=$cleanup retention_ms=$retms)"
+        exit 1
+      fi
+
+      # --if-not-exists makes creation idempotent; the configs below then converge a topic that
+      # already existed with different settings.
+      run "$KAFKA_TOPICS" \
+        --bootstrap-server "$BOOTSTRAP_SERVERS" \
+        --command-config "$CLIENT_PROPS" \
+        --create --if-not-exists \
+        --topic "$name" \
+        --partitions "$parts" \
+        --replication-factor "$rf" \
+        --config "cleanup.policy=$cleanup" \
+        --config "retention.ms=$retms" \
+        --config "min.insync.replicas=$misr"
+      created=$((created + 1))
+
+      run "$KAFKA_CONFIGS" \
+        --bootstrap-server "$BOOTSTRAP_SERVERS" \
+        --command-config "$CLIENT_PROPS" \
+        --entity-type topics --entity-name "$name" \
+        --alter --add-config "cleanup.policy=$cleanup,retention.ms=$retms,min.insync.replicas=$misr"
+      converged=$((converged + 1))
+
+      # Partition counts are reported, never changed. Growing partitions rehashes keys to different
+      # partitions, so per-key ordering is lost across the change (A§26) -- the fix is a new
+      # versioned topic, not an --alter.
+      if [ "$DRY_RUN" != "true" ]; then
+        actual="$(
+          "$KAFKA_TOPICS" --bootstrap-server "$BOOTSTRAP_SERVERS" \
+            --command-config "$CLIENT_PROPS" --describe --topic "$name" 2>/dev/null |
+            sed -n 's/.*PartitionCount:[[:space:]]*\([0-9]*\).*/\1/p' | head -1
+        )"
+        if [ -n "$actual" ] && [ "$actual" != "$parts" ]; then
+          echo "WARN: $name has $actual partitions, topics.yaml declares $parts."
+          echo "WARN:   not altering it -- a partition change breaks key-to-partition affinity."
+          warned=$((warned + 1))
+        fi
+      fi
+    done < <(parse_topics "$TOPICS_FILE")
+
+    if [ "$declared" -eq 0 ]; then
+      echo "FATAL: no topics parsed from $TOPICS_FILE -- refusing to report success"
+      exit 1
+    fi
+
+    echo "== done: $declared declared, $created create-if-not-exists, $converged config converges, $warned warning(s)"
+    [ "$warned" -eq 0 ] || echo "== review the warnings above; they are not failures"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: colx-kafka-topics-apply
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: colx-kafka-topics
+    app.kubernetes.io/component: topic-apply
+    app.kubernetes.io/managed-by: helmfile
+spec:
+  # Four attempts: the common failure is running before the cluster finishes an update, which
+  # resolves on its own.
+  backoffLimit: 4
+  # Keep the pod for an hour so its logs are readable, then clean up without leaving completed Jobs
+  # accumulating in the namespace.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: colx-kafka-topics
+        app.kubernetes.io/component: topic-apply
+    spec:
+      restartPolicy: OnFailure
+      # IRSA. The role behind this ServiceAccount is the only authorization the Job has: MSK
+      # accepts no password, so a missing or misannotated ServiceAccount fails as a TLS handshake
+      # error rather than an auth error.
+      serviceAccountName: kafka-topic-applier
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: topic-apply
+          # Rewritten to <account>.dkr.ecr.<region>.amazonaws.com/colx/connect:<sha> at deploy time
+          # by FND-8 (helmfile values or a kustomize `images:` transformer). The bare repository
+          # name is the canonical reference; the registry prefix is environment-specific.
+          image: colx/connect:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/scripts/apply-topics.sh"]
+          env:
+            - name: BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: colx-kafka-bootstrap
+                  key: bootstrap_servers
+            - name: TOPICS_FILE
+              value: /config/topics/topics.yaml
+            - name: CLIENT_PROPS
+              value: /config/client/client.properties
+            - name: KAFKA_BIN
+              value: /kafka/bin
+            # The Kafka CLI tools need the MSK IAM auth provider on the classpath. The toolbox
+            # image ships the uber-jar at this path; if the image layout changes, this is the one
+            # line to update.
+            - name: CLASSPATH
+              value: /kafka/libs/aws-msk-iam-auth-all.jar
+            - name: DRY_RUN
+              value: "false"
+            - name: AWS_STS_REGIONAL_ENDPOINTS
+              value: regional
+          volumeMounts:
+            - name: topics
+              mountPath: /config/topics
+              readOnly: true
+            - name: client-config
+              mountPath: /config/client
+              readOnly: true
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+      volumes:
+        # Generated from deployment/kafka/topics.yaml -- never hand-written, so the registry and the
+        # applied state cannot diverge.
+        - name: topics
+          configMap:
+            name: colx-kafka-topics
+        - name: client-config
+          configMap:
+            name: colx-kafka-client-config
+        - name: script
+          configMap:
+            name: colx-kafka-topic-apply-script
+            defaultMode: 0555
+        # The JVM and the Kafka scripts write to /tmp; the root filesystem is read-only.
+        - name: tmp
+          emptyDir: {}

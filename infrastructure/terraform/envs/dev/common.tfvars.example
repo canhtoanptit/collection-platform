@@ -1,0 +1,124 @@
+# Copy to common.tfvars and fill in. NEVER commit common.tfvars.
+#
+#     cp common.tfvars.example common.tfvars
+#     $EDITOR common.tfvars
+#
+# Used as:
+#     terraform -chdir=infrastructure/terraform/stacks/<nn-name> \
+#       plan -var-file=../../envs/dev/common.tfvars
+# or via `make tf-plan STACK=<nn-name> ENV=dev`.
+#
+# ---------------------------------------------------------------------------------------------
+# One file, several stacks. Terraform emits a *warning* (not an error) for a value in a -var-file
+# that the current stack does not declare -- "Value for undeclared variable" -- so a single shared
+# file is safe. Expect a few of those warnings on every plan; they are the price of not maintaining
+# five near-identical tfvars files that drift.
+# ---------------------------------------------------------------------------------------------
+
+
+# =============================================================================================
+# 1. REQUIRED -- no default exists, every stack that uses these fails without them
+# =============================================================================================
+
+# Stack: 00-bootstrap.
+# The address subscribed to the colx-dev-alerts SNS topic: budget notifications, cost anomalies,
+# and from FND-9 every Alertmanager alert. AWS emails a confirmation link that MUST be clicked --
+# until then nothing is delivered and terraform plan stays clean.
+# No default on purpose: an alerting channel pointing at someone else's inbox is worse than none.
+alert_email = "you@example.com"
+
+# Stack: 20-data (and 30-eks, 40-snowflake).
+# Terraform state bucket, created by 00-bootstrap as colx-tfstate-<account_id>. Read by the
+# terraform_remote_state data sources that let one stack see another's outputs.
+# MUST equal `bucket` in backend.hcl -- they are separate mechanisms and nothing reconciles them.
+# scripts/verify/INF-A.sh asserts the two files agree.
+state_bucket = "colx-tfstate-000000000000"
+
+
+# =============================================================================================
+# 2. ACCOUNT- AND OPERATOR-SPECIFIC -- defaults exist but are probably wrong for you
+# =============================================================================================
+
+# Stack: 30-eks (INF-B). Not consumed by any INF-A stack; set it now so the later stack is not
+# blocked on a value you have to go and look up.
+# CIDRs allowed to reach the public EKS API endpoint. Your address only:
+#     echo "$(curl -s https://checkip.amazonaws.com)/32"
+# A home IP is dynamic, so expect to update this. NEVER 0.0.0.0/0 -- that is the whole control.
+admin_cidrs = ["203.0.113.10/32"]
+
+# Stack: 00-bootstrap. Pinned in all four CI role trust policies; a token from any other
+# repository cannot assume them. Change if the repo is forked or renamed.
+github_repository = "canhtoanptit/collection-platform"
+
+# Stack: 00-bootstrap. The GitHub Actions environment whose required-reviewer setting is the human
+# approval gate for every apply. Must exist in GitHub with you as a reviewer.
+github_environment = "dev"
+
+
+# =============================================================================================
+# 3. SAFE DEFAULTS -- uncomment only to change them
+# =============================================================================================
+
+# All stacks. Changing the region after the first apply rebuilds everything.
+# region = "eu-west-1"
+
+# All stacks. Tag values and the resource name prefix (colx-dev-*).
+# project = "colx"
+# env     = "dev"
+
+# --- 00-bootstrap ---
+# monthly_budget_usd    = 450   # plan §2: below the ~$530-565 all-on estimate, so it fires on a
+#                               # month where nothing was ever stopped
+# anomaly_threshold_usd = 25    # absolute dollar impact for a cost-anomaly notification
+
+# --- 10-network ---
+# vpc_cidr           = "10.40.0.0/16"  # changing this replaces every subnet, the RDS subnet group
+#                                      # and the MSK cluster
+# az_count           = 2               # MSK needs >= 2; 3 is the prod value
+# single_nat_gateway = true            # one NAT (~$33/mo) instead of one per AZ
+# enable_flow_log    = false           # off in dev: CloudWatch ingestion cost for logs nobody reads
+# eks_cluster_name   = "colx-dev"      # MUST match stacks/30-eks or the load balancer controller
+#                                      # cannot discover the subnets
+
+# --- 20-data ---
+# Security group of the EKS node group, allowed to reach Postgres 5432 and MSK 9098/11001/11002.
+# Leave unset on the first apply -- stacks/30-eks does not exist yet, and unset means the databases
+# and brokers are created unreachable. Set it and re-apply afterwards; the plan then adds ingress
+# rules and nothing else. `terraform output second_pass_required` says whether this is still pending.
+# eks_node_security_group_id = "sg-0123456789abcdef0"
+
+# rds_platform_instance_class = "db.t4g.small"   # ingestion + airflow + keycloak + per-service DBs
+# rds_corebank_instance_class = "db.t4g.micro"   # CDC source
+# rds_allocated_storage       = 20               # gp3 minimum
+# rds_backup_retention_days   = 7                # also the point-in-time-recovery window
+
+# msk_kafka_version   = "3.7.x"           # verify with `aws kafka list-kafka-versions`; a wrong
+#                                         # value fails at apply, not at plan
+# msk_instance_type   = "kafka.t3.small"
+# msk_broker_count    = 2                 # must be a multiple of the private subnet count
+# msk_ebs_volume_size = 20                # growable in place, never shrinkable
+
+# archive_expiration_days     = 90        # dev cost choice; prod is the regulatory retention
+# secret_recovery_window_days = 0         # 0 so a name can be reused after teardown
+
+# DANGER. Both allow `terraform destroy` to delete non-empty buckets and repositories. Only
+# `make destroy-all` (FND-13) should ever set them, and only deliberately.
+# s3_force_destroy = false
+# ecr_force_delete = false
+
+
+# =============================================================================================
+# 4. NEVER PUT THESE HERE
+# =============================================================================================
+#
+# No passwords, private keys, HMAC secrets, client secrets or tokens. Not in this file, not in
+# common.tfvars, not in a plan output.
+#
+#   - RDS master passwords: generated and owned by RDS (`manage_master_user_password`).
+#   - Per-database owner passwords: generated by scripts/db/provision_databases.sh, written
+#     straight to Secrets Manager.
+#   - Keycloak admin and M2M client secrets: written to colx/dev/keycloak/* out of band (FND-6).
+#   - Everything else: a Secrets Manager placeholder created by 20-data with no value, populated
+#     out of band.
+#
+# A tfvars value is a value in Terraform state and in every plan comment on every pull request.

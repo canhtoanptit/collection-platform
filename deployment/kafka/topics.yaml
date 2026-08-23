@@ -1,0 +1,487 @@
+# =================================================================================================
+# Kafka topic registry -- the operational declaration of every topic on the platform.
+#
+# Auto-create is OFF on the MSK cluster (`auto.create.topics.enable=false`, ADR-0004). A topic that
+# is not in this file does not exist, and a producer that names a topic not in this file fails
+# instead of silently creating a new one that nobody consumes.
+#
+# Applied by the idempotent Job in topic-apply-job.yaml, which runs
+# `kafka-topics.sh --create --if-not-exists` per entry and then converges retention and cleanup
+# policy on topics that already exist. FND-8's helmfile applies it; see README.md in this directory.
+#
+# Contract split (deliberate, so the two can never disagree):
+#   contracts/asyncapi/collections.v1.yaml   topic -> partition key -> payload schema (normative)
+#   deployment/kafka/topics.yaml (this file) partitions, replication, retention, cleanup policy
+#
+# -------------------------------------------------------------------------------------------------
+# SCHEMA -- every entry under `topics:` has exactly these fields
+# -------------------------------------------------------------------------------------------------
+#   name                 string   Topic name. Must match the address in the AsyncAPI index where
+#                                 the topic appears there.
+#   partitions           int      Partition count. Ordering is per key within a partition, so this
+#                                 is also the maximum consumer parallelism for the topic.
+#   replication_factor   int      Copies of each partition. 2 in dev (2 brokers); 3 in prod.
+#   min_insync_replicas  int      Replicas that must acknowledge an acks=all write. 1 in dev so a
+#                                 single broker restart does not stop producers; 2 in prod.
+#   cleanup_policy       enum     `delete` (age out by retention_ms) or `compact` (keep the latest
+#                                 value per key forever).
+#   retention            string   Human-readable retention: "7d", "3d", "14d", or "compact" for
+#                                 compacted topics. Documentation for retention_ms, which is what
+#                                 is actually applied.
+#   retention_ms         int      Retention in milliseconds, or -1 for unlimited (compacted topics).
+#   key                  string   The message key -- the payload field whose value is used, matching
+#                                 x-partition-key in the AsyncAPI index. `null` where messages are
+#                                 unkeyed.
+#   producer             string   The single component allowed to produce to this topic (A§7.2).
+#   purpose              string   One line: what rides this topic and why it exists.
+#
+# -------------------------------------------------------------------------------------------------
+# PARTITION BUDGET -- read before adding a topic or raising a partition count
+# -------------------------------------------------------------------------------------------------
+# MSK on kafka.t3.small supports roughly 300 partitions per broker. The cluster is 2 brokers, so
+# the ceiling is ~600 partition replicas, and every partition costs replication_factor of them.
+#
+#   declared here          108 partitions  ->  216 replicas  ->  ~108 per broker   (36% of budget)
+#   + 14 per-service DLQs   42 partitions  ->   84 replicas  ->  ~150 per broker   (50% of budget)
+#
+# The second line is the projection once every domain service has its own
+# `collections.dlq.<service>` (see the convention entry at the end of this file). That is the real
+# steady state, and it still leaves half the budget free.
+#
+# Rules:
+#   - 3 partitions is the default for a domain or canonical topic. It is not a performance
+#     tuning knob at this volume; it exists so a consumer group can run 3 replicas.
+#   - 1 partition where global ordering matters more than parallelism (compacted history topics,
+#     the ingestion DLQ).
+#   - Raising a partition count on a live topic **breaks key-to-partition affinity**: existing keys
+#     rehash to different partitions, so per-key ordering is lost across the change. Never do it
+#     casually; create a new versioned topic instead.
+#   - connect.offsets at 25 partitions is Kafka Connect's own default and is not ours to shrink.
+#
+# -------------------------------------------------------------------------------------------------
+# RETENTION RATIONALE
+# -------------------------------------------------------------------------------------------------
+#   7d   canonical and domain topics. Long enough to replay a full business week after a consumer
+#        bug, short enough to stay inside 20 GiB per broker.
+#   3d   raw CDC topics. They are internal to ingestion, high volume, and everything downstream is
+#        already in S3 and Snowflake -- a longer window buys nothing and fills the brokers.
+#  14d   the ingestion DLQ. A dead letter has to survive a weekend plus an investigation.
+# compact / -1
+#        state topics where only the latest value per key matters: Debezium's schema history and
+#        Kafka Connect's internal topics. Deleting these by age corrupts the connector.
+#
+# Kafka is transport, not a system of record (D§47). Durability comes from the transactional outbox
+# in Postgres and from S3/Snowflake downstream, which is what makes these retentions safe -- and why
+# destroying and rebuilding the cluster is an accepted teardown lever.
+# =================================================================================================
+
+version: 1
+
+cluster:
+  name: colx-dev
+  bootstrap_servers_source: terraform output msk_bootstrap_brokers_sasl_iam (stack 20-data)
+  auth: SASL/IAM over TLS, port 9098
+
+defaults:
+  replication_factor: 2
+  min_insync_replicas: 1
+  cleanup_policy: delete
+
+topics:
+
+  # ===============================================================================================
+  # ingestion -- control plane and raw intake (ING-2, ING-6)
+  # ===============================================================================================
+
+  - name: ingestion.file.lifecycle.v1
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: fileId
+    producer: ingestion-control-plane
+    purpose: FileStatusChanged events -- the published projection of the append-only file registry (A§36).
+
+  - name: ingestion.webhook.payment.v1
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: acct_no
+    producer: webhook-receiver
+    purpose: Raw provider payment webhooks, exactly as received. Internal to ingestion -- no domain service consumes it.
+
+  # -----------------------------------------------------------------------------------------------
+  # canonical ingestion topics (ING-11). The ONLY ingestion topics domain services may consume
+  # (plan §6.2): raw CDC and raw webhooks stay inside the ingestion plane.
+  # -----------------------------------------------------------------------------------------------
+
+  - name: ingestion.customers.v1
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: customerId
+    producer: ingestion-canonicalizer
+    purpose: CustomerSnapshot in the A§24 envelope -- the canonical customer feed for domain services.
+
+  - name: ingestion.accounts.v1
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: accountId
+    producer: ingestion-canonicalizer
+    purpose: AccountSnapshot -- canonical account state, including oldest_unpaid_dt for DPD.
+
+  - name: ingestion.debts.v1
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: debtId
+    producer: ingestion-canonicalizer
+    purpose: DebtSnapshot -- canonical exposure and its components.
+
+  - name: ingestion.payments.v1
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: accountId
+    producer: ingestion-canonicalizer
+    purpose: PaymentNotification. Arrives twice by design (webhook intraday, CDC/file in batch); payment-service dedupes on the natural key (D§47).
+
+  # ===============================================================================================
+  # CDC -- Debezium change events from the corebank Postgres (ING-5). Internal to ingestion; the
+  # shape is Debezium's, not ours. 3 days is enough to reprocess a weekend.
+  # ===============================================================================================
+
+  - name: cdc.corebank.public.cb_customer
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 3d
+    retention_ms: 259200000
+    key: cust_no
+    producer: debezium-connector-corebank
+    purpose: Row-level changes to cb_customer.
+
+  - name: cdc.corebank.public.cb_account
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 3d
+    retention_ms: 259200000
+    key: acct_no
+    producer: debezium-connector-corebank
+    purpose: Row-level changes to cb_account.
+
+  - name: cdc.corebank.public.cb_debt
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 3d
+    retention_ms: 259200000
+    key: debt_id
+    producer: debezium-connector-corebank
+    purpose: Row-level changes to cb_debt (plan §6.3 simulator schema delta).
+
+  - name: cdc.corebank.public.cb_payment
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 3d
+    retention_ms: 259200000
+    key: pay_id
+    producer: debezium-connector-corebank
+    purpose: Row-level changes to cb_payment.
+
+  - name: cdc.corebank.public.cb_delq
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 3d
+    retention_ms: 259200000
+    key: acct_no
+    producer: debezium-connector-corebank
+    purpose: Row-level changes to cb_delq, the delinquency snapshot table.
+
+  - name: cdc.corebank.schema-history
+    partitions: 1
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: compact
+    retention: compact
+    retention_ms: -1
+    key: null
+    producer: debezium-connector-corebank
+    purpose: Debezium's own DDL history. Single partition and compacted with unlimited retention -- ageing it out corrupts the connector, which replays it on every restart.
+
+  # ===============================================================================================
+  # Kafka Connect internal topics (ING-5). Counts and settings are Connect's defaults; compaction
+  # is mandatory, not a preference -- deleting by age loses connector offsets and configuration.
+  # ===============================================================================================
+
+  - name: connect.offsets
+    partitions: 25
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: compact
+    retention: compact
+    retention_ms: -1
+    key: connector-partition
+    producer: kafka-connect
+    purpose: Source connector offsets. 25 partitions is Connect's default (offset.storage.partitions).
+
+  - name: connect.configs
+    partitions: 1
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: compact
+    retention: compact
+    retention_ms: -1
+    key: connector-name
+    producer: kafka-connect
+    purpose: Connector and task configuration. MUST be single-partition -- Connect requires total ordering here.
+
+  - name: connect.status
+    partitions: 5
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: compact
+    retention: compact
+    retention_ms: -1
+    key: connector-task
+    producer: kafka-connect
+    purpose: Connector and task status. 5 partitions is Connect's default (status.storage.partitions).
+
+  # ===============================================================================================
+  # domain events -- collections.<context>, one per bounded context (A§25, 14 contexts).
+  # Keys are the aggregate ids from the CON-2 topic/key map (A§26); ordering is per key only.
+  # ===============================================================================================
+
+  - name: collections.customer
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: customerId
+    producer: customer-service
+    purpose: Customer context events.
+
+  - name: collections.account
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: accountId
+    producer: account-service
+    purpose: Account context events.
+
+  - name: collections.debt
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: debtId
+    producer: debt-service
+    purpose: Debt context events.
+
+  - name: collections.delinquency
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: accountId
+    producer: delinquency-service
+    purpose: DelinquencyChanged and related events. Keyed by accountId, not by a delinquency id, so all state changes for one account stay ordered.
+
+  - name: collections.case
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: caseId
+    producer: case-service
+    purpose: Case lifecycle events.
+
+  - name: collections.strategy
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: strategyId
+    producer: strategy-service
+    purpose: Strategy events. Carries three aggregates -- strategyId, ruleSetId (RuleSetPublished) and configId (GuardrailConfigPublished); the key is per message, not per topic.
+
+  - name: collections.decision
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: decisionId
+    producer: decision-service
+    purpose: Decision events, emitted in the same transaction as the decision audit row.
+
+  - name: collections.treatment
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: caseId
+    producer: decision-service,treatment-service
+    purpose: TreatmentSelected (decision-service) plus TreatmentExecuted and TreatmentSuppressed (treatment-service) -- two producers on one topic, by design (plan §6.4).
+
+  - name: collections.contact
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: contactId
+    producer: contact-service
+    purpose: ContactAttempted and ContactCompleted. contact-service is the ONLY producer, so frequency caps have one source of truth (plan §6.4).
+
+  - name: collections.arrangement
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: promiseId
+    producer: arrangement-service
+    purpose: Promise and arrangement events. Two aggregates share this topic: promiseId for promise events, arrangementId for arrangement events.
+
+  - name: collections.payment
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: paymentId
+    producer: payment-service
+    purpose: Payment and allocation events.
+
+  - name: collections.recovery
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: recoveryId
+    producer: recovery-service
+    purpose: Recovery context events.
+
+  - name: collections.agency
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: placementId
+    producer: agency-service
+    purpose: Agency placement events.
+
+  - name: collections.legal
+    partitions: 3
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 7d
+    retention_ms: 604800000
+    key: legalCaseId
+    producer: legal-service
+    purpose: Legal case events.
+
+  # ===============================================================================================
+  # dead letter queues (A§27). Policy: retry with backoff, then DLQ, then alert, investigate,
+  # replay -- never block a partition forever, never drop a message.
+  #
+  # A dead-lettered message keeps its original envelope byte for byte and adds error headers
+  # (x-original-topic, x-original-partition, x-original-offset, x-error-code, x-error-message,
+  # x-retry-count, correlationId).
+  # ===============================================================================================
+
+  - name: dlq.ingestion.v1
+    partitions: 1
+    replication_factor: 2
+    min_insync_replicas: 1
+    cleanup_policy: delete
+    retention: 14d
+    retention_ms: 1209600000
+    key: original-key
+    producer: ingestion-control-plane,sftp-worker,webhook-receiver,ingestion-canonicalizer
+    purpose: One DLQ for the whole ingestion plane. Single partition because volume is low and replay order matters more than throughput; 14 days so a dead letter survives a weekend plus an investigation.
+
+# =================================================================================================
+# CONVENTION -- per-service DLQs, created with the service that consumes them
+# =================================================================================================
+#
+# `collections.dlq.<service>` is one topic per domain-service consumer group, named after the
+# deployable (e.g. collections.dlq.case-service). They are NOT listed individually above because
+# they arrive with their services across Phases 7-11, and a topic declared before its consumer
+# exists is an empty topic nobody notices is misconfigured.
+#
+# When a service WP adds its consumer, it adds its DLQ to `topics:` above with:
+#
+#   partitions: 3            match the source topic, so a replay preserves per-key ordering
+#   replication_factor: 2    dev / 3 in prod
+#   min_insync_replicas: 1   dev / 2 in prod
+#   cleanup_policy: delete
+#   retention: 14d           retention_ms: 1209600000
+#   key: original-key        the failed message's key, preserved
+#   producer: <service>      the consumer that dead-letters, not the original producer
+#
+# Budget impact once all 14 exist: +42 partitions, +84 replicas, ~150 partitions per broker --
+# half the ~300 per-broker ceiling on kafka.t3.small. See PARTITION BUDGET at the top.
+#
+# =================================================================================================
+# PROD DELTAS
+# =================================================================================================
+#   replication_factor   2 -> 3 on every topic (needs a 3-broker, 3-AZ cluster)
+#   min_insync_replicas  1 -> 2 on every topic, so a single broker loss cannot lose an acked write
+#   retention            7d -> 30d for domain topics, and a documented replay window per topic
+#   retention.bytes      set per topic, so a producer bug fills one topic instead of a broker volume
+#   quotas               per client id, so one runaway consumer cannot starve the cluster
+#   unclean.leader.election.enable=false explicitly at the topic level as well as the cluster level
+#   tiered storage       for the topics whose retention grows past a few days
+# =================================================================================================
