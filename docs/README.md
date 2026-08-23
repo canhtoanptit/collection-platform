@@ -2,9 +2,11 @@
 
 Design documentation for an **enterprise Collections & Debt Management Platform**: a bank-owned, vendor-neutral platform that ingests from legacy banking systems (CDC, SFTP/CSV with control totals, webhooks, events), maintains the collections domain (customer, account, debt, delinquency, case, arrangement, payment, contact, recovery, agency, legal) as Go services with their own transactional state, decides treatments through a governed and fully audited decisioning pipeline, executes them through guardrailed channels, and returns every outcome to Snowflake/dbt so the next strategy is measurably better — the closed loop *Sense → Understand → Decide → Act → Measure → Learn → Improve*. It runs on real AWS and real Snowflake, is built by a single developer directing parallel LLM agent sessions, and is designed so every claim about it is a command someone else can run.
 
-## Status: Accepted — implementation in progress; Phase 0 (foundations & delegation machinery) complete, Phase 1 (contracts freeze) underway, 2026-08-22
+## Status: Accepted — implementation in progress; Phase 0 (foundations & delegation machinery) complete, Phase 1 (contracts freeze) underway, 2026-08-23
 
-The 16 ADRs below are accepted and the [technical design](./tech-design.md) is the current picture of the system. Execution proceeds phase by phase through the **[implementation plan](./implementation-plan.md)** (15 phases, 113 work packages); no phase starts on a red [gate](./gates/README.md).
+Amended 2026-08-23: the identity provider changed from Cognito to **Keycloak on EKS** ([ADR-0017](./adr/0017-identity-keycloak-on-eks.md)) before anything was applied; [ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md) is partially superseded (its IRSA and no-public-ingress decisions stand).
+
+The 17 ADRs below are accepted and the [technical design](./tech-design.md) is the current picture of the system. Execution proceeds phase by phase through the **[implementation plan](./implementation-plan.md)** (15 phases, 113 work packages); no phase starts on a red [gate](./gates/README.md).
 
 ## How to read these
 
@@ -30,12 +32,13 @@ The two root design documents are the normative deep source and are never edited
 | [adr/0008](./adr/0008-snowflake-dbt-analytics.md) | Snowflake Enterprise + dbt; Airflow-triggered `COPY INTO` |
 | [adr/0009](./adr/0009-decisioning-layered-pipeline.md) | Decisioning: layered pipeline, versioned strategies, non-Turing-complete rule DSL, immutable audit |
 | [adr/0010](./adr/0010-terraform-stacks-ci-only-applies.md) | Terraform ≥1.11, 5 stacks, S3-native locking, GitHub OIDC, CI-only applies, cost model |
-| [adr/0011](./adr/0011-identity-cognito-irsa-no-ingress.md) | Cognito + IRSA; no public ingress until the UI phase |
+| [adr/0011](./adr/0011-identity-cognito-irsa-no-ingress.md) | IRSA workload identity; no public ingress until the UI phase — **identity provider partially superseded by [0017](./adr/0017-identity-keycloak-on-eks.md)** |
 | [adr/0012](./adr/0012-source-system-simulator.md) | Source-system simulator as the legacy-bank stand-in, hard-isolated |
 | [adr/0013](./adr/0013-llm-agent-delegation-model.md) | Contracts-first, exemplar-first LLM-agent delegation model |
 | [adr/0014](./adr/0014-collector-ui-react-vite.md) | Collector UI: React 18 + TS strict + Vite, generated clients, S3 + CloudFront |
 | [adr/0015](./adr/0015-observability-otel-grafana-stack.md) | OpenTelemetry + kube-prometheus-stack + Loki + Tempo + Alloy |
 | [adr/0016](./adr/0016-data-conventions-money-ids-time.md) | Money as int64 minor units, prefixed ULIDs, UTC + RFC3339 |
+| [adr/0017](./adr/0017-identity-keycloak-on-eks.md) | Identity provider: Keycloak on EKS, realm as code (supersedes Cognito, 2026-08-23) |
 
 Contributor machinery (owned elsewhere, linked here): [conventions.md](./conventions.md) (ids, time, correlation, verify scripts, model assignment) · [review-policy.md](./review-policy.md) (code review + adversarial verification) · [wp-template.md](./wp-template.md) (work-package brief format) · [gates/](./gates/README.md) (phase-gate procedure and evidence) · [ownership.yaml](./ownership.yaml) (WP → path globs) · [CLAUDE.md](../CLAUDE.md) (code conventions, hard rules).
 
@@ -53,7 +56,7 @@ Contributor machinery (owned elsewhere, linked here): [conventions.md](./convent
 | 8 | Analytics | Snowflake Enterprise + dbt; Airflow-triggered `COPY INTO FORCE=FALSE` + `COPY_HISTORY` audit | Snowpipe; Databricks/BigQuery/Redshift; Postgres-as-warehouse; Standard edition (no native masking); dbt Cloud |
 | 9 | Decisioning | Layered pipeline, declarative versioned strategies, non-Turing-complete JSON rule DSL, immutable audit, simulation gate, hash-based C/C | CEL/Lua/scripted rules; vendor rules engines; rules in Go code; ML end-to-end selection; stored random arms |
 | 10 | Infrastructure | Terraform ≥1.11, 5 stacks, S3-native locking, GitHub OIDC, budgets + teardown levers, CI-only applies | One stack; DynamoDB locks; local applies / long-lived keys; CDK/Pulumi; Terraform Cloud |
-| 11 | Identity & exposure | Cognito (scopes, groups, minimal M2M) + IRSA; no public ingress until Phase 12 | Keycloak; public ALB from day 1; EKS Pod Identity; service mesh mTLS; static simulator API keys |
+| 11 | Identity & exposure ([0011](./adr/0011-identity-cognito-irsa-no-ingress.md) + [0017](./adr/0017-identity-keycloak-on-eks.md)) | **Keycloak on EKS** (realm as code, colon-form scopes, `groups` claim, minimal M2M clients) + IRSA; no public ingress until Phase 12 | **Cognito** (chosen 2026-08-22, superseded 2026-08-23); Okta/Auth0; Dex; Bitnami chart; public ALB from day 1; EKS Pod Identity; service mesh mTLS; static simulator API keys |
 | 12 | Source system | Deterministic corebank simulator (drift, file drops, webhooks, legacy reports), hard-isolated | Static fixtures (no CDC, no faults, no truth); sharing validation code (recon tautology); real bank extract |
 | 13 | Delivery model | Contracts-first freeze (`contracts-v1.0`), exemplar-first, path-ownership CI, per-WP verify, adversarial review, local-only commits | Ad-hoc agent development; single-agent sequential; review instead of gates; agents pushing PRs; mutable contracts |
 | 14 | Collector UI | React 18 + TS strict + Vite, TanStack Query, PKCE, OpenAPI-generated clients, MSW + Playwright, S3 + CloudFront | Next.js/SSR; no UI; hand-written clients; server-side timeline merge; Amplify |
@@ -65,7 +68,7 @@ Contributor machinery (owned elsewhere, linked here): [conventions.md](./convent
 - An **AWS account** — one manual `00-bootstrap` apply (state bucket, GitHub OIDC provider + roles, SNS, budgets), then nothing manual again.
 - A **Snowflake account** — Enterprise trial first, converted before Phase 6; `ACCOUNTADMIN` creates the Terraform service key-pair.
 - A **public GitHub repo** with a `dev` environment requiring a human reviewer (OIDC-federated CI, zero long-lived AWS keys).
-- A **domain name** (~$12/yr) before Phase 12 — HTTPS, the Cognito SPA client and the Playwright smoke suite need it.
+- A **domain name** (~$12/yr) before Phase 12 — HTTPS, the Keycloak SPA client (and Keycloak's public exposure for login redirects) and the Playwright smoke suite need it.
 - Local toolchain via `mise` (Terraform ≥1.11, Go, Python 3.12, helmfile, kubectl, snowflake-cli) plus Docker for testcontainers.
 - Secret values (SFTP host/user keys, webhook HMAC, Snowflake key-pairs) loaded into Secrets Manager out of band — never into Terraform.
 
@@ -73,7 +76,7 @@ Contributor machinery (owned elsewhere, linked here): [conventions.md](./convent
 
 - **Phase 0 — Foundations & delegation machinery.** Monorepo skeleton, toolchain, CI skeleton, conventions and delegation pack. ✅ complete
 - **Phase 1 — Contracts v1 (freeze).** Every OpenAPI spec, event schema, file/CDC contract and registry; tag `contracts-v1.0`. ← underway
-- **Phase 2 — Cloud foundation.** Terraform bootstrap, network, data, EKS, Cognito, observability, Airflow, Snowflake (written), infra CI/CD, cost controls.
+- **Phase 2 — Cloud foundation.** Terraform bootstrap, network, data, EKS, Keycloak identity, observability, Airflow, Snowflake (written), infra CI/CD, cost controls.
 - **Phase 3 — Platform libraries + local dev stack.** `platform/` (events, outbox, inbox, idempotency, kafka, authn, ruledsl, allocation, testkit) + compose stack.
 - **Phase 4 — Source-system simulator.** Corebank schema, deterministic seeder, drift tick, SFTP, file drops with fault injection, webhooks, legacy reports.
 - **Phase 5 — Ingestion platform.** Control plane, SFTP/CSV worker, CDC, webhooks, DLQ, reconciliation engine, DAGs, dashboards, canonicalizer.

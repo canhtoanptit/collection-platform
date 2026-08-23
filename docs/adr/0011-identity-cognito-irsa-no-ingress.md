@@ -1,8 +1,8 @@
 # ADR-0011: Identity & exposure — Cognito + IRSA, and no public ingress until the UI phase
 
-- **Status:** Accepted
+- **Status:** **Partially superseded by [ADR-0017](./0017-identity-keycloak-on-eks.md) (identity provider — Keycloak replaces Cognito, 2026-08-23, pre-apply); the IRSA workload-identity and no-public-ingress decisions stand.** Otherwise Accepted.
 - **Date:** 2026-08-22
-- **Related:** [ADR-0002](./0002-go-hexagonal-monorepo.md), [ADR-0010](./0010-terraform-stacks-ci-only-applies.md), [ADR-0014](./0014-collector-ui-react-vite.md), [ADR-0012](./0012-source-system-simulator.md)
+- **Related:** [ADR-0017](./0017-identity-keycloak-on-eks.md) (supersedes the identity provider), [ADR-0002](./0002-go-hexagonal-monorepo.md), [ADR-0010](./0010-terraform-stacks-ci-only-applies.md), [ADR-0014](./0014-collector-ui-react-vite.md), [ADR-0012](./0012-source-system-simulator.md)
 
 ## Context
 
@@ -13,6 +13,8 @@ There is also a timing question: for most of the build there is no user interfac
 ## Decision
 
 **Cognito for identity, IRSA for workload identity, and zero public ingress until Phase 12.**
+
+> **Superseded in part.** The Cognito choice below held for one day and was replaced pre-apply by **Keycloak on EKS** — see [ADR-0017](./0017-identity-keycloak-on-eks.md), which also records why the "Keycloak self-hosted" rejection under *Alternatives considered* was reversed. The scope strings here are Cognito's slash form; the live convention is the logical colon form (`cases:read`). Everything about **IRSA**, per-service JWT validation and **no public ingress until Phase 12** remains in force and is retained here as the record.
 
 - **Cognito** user pool `colx-dev` with a hosted domain; resource server `colx-api` with fine-grained scopes (`ingestion/read`, `ingestion/write`, `webhook/write`, `cases/read`, `cases/write`, `decisions/read`, `decisions/write`, `strategy/author`, `payments/admin`, …); groups `strategy-author`, `business-approver`, `risk-approver`, `admin`, `collector`, `ops-admin`, `analyst`; **minimal M2M clients** (`platform-services`, `simulator`, ~$6/mo each); the SPA client (PKCE) is added in Phase 12 when callback URLs exist.
 - **Every service validates JWTs itself from day 1** (`platform/authn`, JWKS cached, deny-by-default `RequireScope`). The gateway is not the authorization boundary — services stay safe if it is bypassed or removed.

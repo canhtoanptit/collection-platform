@@ -1,8 +1,8 @@
 # ADR-0014: Collector UI — React 18 + TS strict + Vite, generated API clients, S3 + CloudFront
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-08-23: the OIDC provider is Keycloak, not Cognito — [ADR-0017](./0017-identity-keycloak-on-eks.md))
 - **Date:** 2026-08-22
-- **Related:** [ADR-0011](./0011-identity-cognito-irsa-no-ingress.md), [ADR-0009](./0009-decisioning-layered-pipeline.md), [ADR-0013](./0013-llm-agent-delegation-model.md), [ADR-0002](./0002-go-hexagonal-monorepo.md)
+- **Related:** [ADR-0017](./0017-identity-keycloak-on-eks.md), [ADR-0011](./0011-identity-cognito-irsa-no-ingress.md), [ADR-0009](./0009-decisioning-layered-pipeline.md), [ADR-0013](./0013-llm-agent-delegation-model.md), [ADR-0002](./0002-go-hexagonal-monorepo.md)
 
 ## Context
 
@@ -12,7 +12,7 @@ A minimal collector workbench is in scope: case queue, case detail with a unifie
 
 A **React 18 + TypeScript (strict) + Vite single-page application**, hosted statically.
 
-- **Stack:** react-router; **TanStack Query** for all server state (no bespoke cache); `oidc-client-ts` **PKCE** against the Cognito SPA client ([ADR-0011](./0011-identity-cognito-irsa-no-ingress.md)), configuration entirely env-driven.
+- **Stack:** react-router; **TanStack Query** for all server state (no bespoke cache); `oidc-client-ts` **PKCE** against the Keycloak SPA client ([ADR-0017](./0017-identity-keycloak-on-eks.md)), issuer and client id entirely env-driven.
 - **One fetch wrapper** injects the bearer token and an `Idempotency-Key` (ULID) on every POST, and parses A§20 error bodies into a typed `ApiError` — so `details[]` can render as inline field errors.
 - **API client types are generated from the OpenAPI specs and committed**, with a CI drift check: a contract change the UI has not absorbed is a **compile error**, not a runtime surprise. Same rule as the services ([ADR-0002](./0002-go-hexagonal-monorepo.md)).
 - **Tests:** MSW handlers built from the contract examples for unit/component tests; Playwright `@smoke` against the deployed environment (login → queue → detail → record contact → PTP → explanation), with trace artefacts on failure.
@@ -41,6 +41,6 @@ A **React 18 + TypeScript (strict) + Vite single-page application**, hosted stat
 - A generated client is only as good as its spec: a vague schema produces awkward types, and regeneration churn lands in review diffs that reviewers must skim rather than read.
 - TanStack Query caching plus a merged timeline makes invalidation subtle — recording a PTP has to invalidate several queries, and getting it wrong shows stale data rather than an error.
 - CloudFront invalidations are eventually consistent, so a deploy is not instant and a smoke test can race it.
-- Playwright smoke needs a **real deployed environment, a domain and a test user**, tying UI CI to Phase 12 infrastructure; until then the UI is only verified against MSW fixtures.
+- Playwright smoke needs a **real deployed environment, a domain, a publicly reachable Keycloak and a test user**, tying UI CI to Phase 12 infrastructure; until then the UI is only verified against MSW fixtures.
 - Accessibility is asserted by a Lighthouse ≥90 gate on two pages plus zero console errors — a floor, not a guarantee, and no keyboard/screen-reader testing is in scope.
 - The UI is single-purpose: no ops console, no strategy authoring screens. Strategy governance stays API-only in the MVP, which is a real gap for the humans who must approve strategies.

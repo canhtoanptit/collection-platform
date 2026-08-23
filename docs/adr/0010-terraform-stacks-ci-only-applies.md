@@ -1,12 +1,12 @@
 # ADR-0010: Infrastructure — Terraform ≥1.11, five stacks, S3-native locking, CI-only applies
 
-- **Status:** Accepted
+- **Status:** Accepted (cost model amended 2026-08-23: the Cognito line is gone and Keycloak runs on existing nodes — see [ADR-0017](./0017-identity-keycloak-on-eks.md))
 - **Date:** 2026-08-22
-- **Related:** [ADR-0003](./0003-postgres-per-service-shared-rds.md), [ADR-0004](./0004-kafka-eventing-envelope-outbox.md), [ADR-0011](./0011-identity-cognito-irsa-no-ingress.md), [ADR-0013](./0013-llm-agent-delegation-model.md), [ADR-0015](./0015-observability-otel-grafana-stack.md)
+- **Related:** [ADR-0003](./0003-postgres-per-service-shared-rds.md), [ADR-0004](./0004-kafka-eventing-envelope-outbox.md), [ADR-0011](./0011-identity-cognito-irsa-no-ingress.md), [ADR-0017](./0017-identity-keycloak-on-eks.md), [ADR-0013](./0013-llm-agent-delegation-model.md), [ADR-0015](./0015-observability-otel-grafana-stack.md)
 
 ## Context
 
-The substrate is real, metered AWS (EKS, MSK, RDS, S3, KMS/Secrets Manager, Cognito) plus a real Snowflake account. It is built, torn down and rebuilt repeatedly by agent sessions, so it must be entirely declarative — nothing may depend on a human clicking in a console. Two risks dominate: an agent corrupting or destroying infrastructure state (plan risk 2), and cost creep on always-on components (plan risk 10).
+The substrate is real, metered AWS (EKS, MSK, RDS, S3, KMS/Secrets Manager) plus a real Snowflake account. It is built, torn down and rebuilt repeatedly by agent sessions, so it must be entirely declarative — nothing may depend on a human clicking in a console. Two risks dominate: an agent corrupting or destroying infrastructure state (plan risk 2), and cost creep on always-on components (plan risk 10).
 
 Resource prefix `colx`, env `dev`, region `eu-west-1` (variable), tags `project=colx, env=dev, stack=<stack>, managed-by=terraform`.
 
@@ -20,7 +20,7 @@ Resource prefix `colx`, env `dev`, region `eu-west-1` (variable), tags `project=
 
 | Lever | Monthly cost | Rebuild |
 |---|---|---|
-| everything running | **$540–575** (EKS $273, MSK $80, RDS $50, NAT $40, Cognito $12, KMS+Secrets $12, misc $15, Snowflake $60–90 active) | — |
+| everything running | **$530–565** (EKS $273, MSK $80, RDS $50, NAT $40, KMS+Secrets $12, misc $15, Snowflake $60–90 active; Keycloak ≈ $0 on existing nodes) | — |
 | `stop` | ≈ $230 | minutes |
 | `destroy-heavy` | ≈ $60 | ~60 min |
 | full destroy | < $5 | ~60 min |

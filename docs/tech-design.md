@@ -1,8 +1,8 @@
 # Technical Design — Enterprise Collections & Debt Management Platform
 
-- **Status:** Accepted (2026-08-22 — implementation in progress; Phase 0 complete, Phase 1 contracts freeze underway)
+- **Status:** Accepted (2026-08-22 — implementation in progress; Phase 0 complete, Phase 1 contracts freeze underway; amended 2026-08-23: identity provider is Keycloak per [ADR-0017](./adr/0017-identity-keycloak-on-eks.md))
 - **Date:** 2026-08-22
-- **Related:** ADRs [0001](./adr/0001-build-vendor-neutral-platform.md)–[0016](./adr/0016-data-conventions-money-ids-time.md) · [Implementation plan](./implementation-plan.md) · [CLAUDE.md](../CLAUDE.md) · [conventions](./conventions.md)
+- **Related:** ADRs [0001](./adr/0001-build-vendor-neutral-platform.md)–[0016](./adr/0016-data-conventions-money-ids-time.md) + [0017](./adr/0017-identity-keycloak-on-eks.md) · [Implementation plan](./implementation-plan.md) · [CLAUDE.md](../CLAUDE.md) · [conventions](./conventions.md)
 - **Normative deep sources:** [`collections_debt_management_platform_design.md`](../collections_debt_management_platform_design.md) (cited **D§n**) and [`collections_debt_management_platform_design_artefacts_1-12.md`](../collections_debt_management_platform_design_artefacts_1-12.md) (cited **A§n**). Where this document and the plan disagree with the design pack, the plan wins and the divergence is recorded in the relevant ADR.
 
 ---
@@ -45,7 +45,7 @@ Secondary, and specific to this repository: the platform is built by a **single 
 | **Strategy author** | Drafts a strategy version, runs a simulation, requests approval | Strategy API, group `strategy-author` |
 | **Business / risk approver** | Approves (never authors) a strategy version; distinct identities enforced | Strategy API, groups `business-approver`, `risk-approver` |
 | **Analyst** | Reads marts and dashboards; sees PII masked unless explicitly authorized | Snowflake `COLX_REPORTER`, group `analyst` |
-| **Machine clients** | `platform-services` (inter-service), `simulator` (acts as the source bank) | Cognito M2M clients ([ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md)) |
+| **Machine clients** | `platform-services` (inter-service), `simulator` (acts as the source bank) | Keycloak client-credentials clients ([ADR-0017](./adr/0017-identity-keycloak-on-eks.md)) |
 
 **Build reality.** One developer plus LLM agent sessions execute 113 work packages across 15 phases. Every session is stateless, so the repository carries the shared understanding: frozen contracts, an exemplar service, path ownership, per-WP verify scripts and phase gates ([ADR-0013](./adr/0013-llm-agent-delegation-model.md)). Adversarial review is mandatory wherever money or audit is involved. Infrastructure is real and metered, so `make stop` is part of the daily workflow.
 
@@ -167,7 +167,7 @@ Each service follows A§92 exactly: `cmd/` · `internal/{domain,application,port
 | Analytics | Snowflake Enterprise + dbt; Airflow-triggered `COPY INTO` (`FORCE=FALSE`) | [0008](./adr/0008-snowflake-dbt-analytics.md) |
 | Decisioning | Layered pipeline, versioned strategy documents, non-Turing-complete rule DSL, immutable audit | [0009](./adr/0009-decisioning-layered-pipeline.md) |
 | Infrastructure | Terraform ≥1.11, 5 stacks, S3-native locking, GitHub OIDC, CI-only applies, budgets + teardown | [0010](./adr/0010-terraform-stacks-ci-only-applies.md) |
-| Identity & exposure | Cognito (scopes, groups, minimal M2M) + IRSA; no public ingress until Phase 12 | [0011](./adr/0011-identity-cognito-irsa-no-ingress.md) |
+| Identity & exposure | Keycloak on EKS (realm as code, colon-form scopes, groups, minimal M2M clients) + IRSA; no public ingress until Phase 12 | [0017](./adr/0017-identity-keycloak-on-eks.md), [0011](./adr/0011-identity-cognito-irsa-no-ingress.md) |
 | Source system | Deterministic corebank simulator, hard-isolated from platform code | [0012](./adr/0012-source-system-simulator.md) |
 | Delivery model | Contracts-first freeze, exemplar-first, path ownership, per-WP verify, adversarial review | [0013](./adr/0013-llm-agent-delegation-model.md) |
 | Collector UI | React 18 + TS strict + Vite, TanStack Query, PKCE, generated clients, S3 + CloudFront | [0014](./adr/0014-collector-ui-react-vite.md) |
@@ -253,7 +253,7 @@ REST + OpenAPI is the contract for every capability (D§3.3, A§12.1). Specs liv
 - **`Idempotency-Key` on every POST command** (A§21): same key + same request hash replays the stored response; same key + different hash → `422`; concurrent in-flight → `409`.
 - **`If-Match` row versions on PATCH** → `412` on mismatch; pagination is `limit` + opaque `cursor`.
 - **Path ownership:** the data-owning service owns the URL path — `GET /v1/customers/{id}/accounts` lives in the account spec, `/v1/accounts/{id}/delinquency` in the delinquency spec (A§13/§14 catalogue preserved, A§7.3 ownership kept).
-- **Auth per service**, deny-by-default `RequireScope`; no endpoint ships without a scope ([ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md)).
+- **Auth per service**, deny-by-default `RequireScope`; no endpoint ships without a scope. Scope strings are the colon-form names above, carried verbatim in the token ([ADR-0017](./adr/0017-identity-keycloak-on-eks.md)).
 - **Schema hygiene:** `additionalProperties:false`, explicit `required`, `$id` per file, money as `{amountMinor, currency}`, RFC3339 UTC. Released files are immutable; a change is a new `vN` file.
 - Gates: vacuum lint (operationId, error responses, Idempotency-Key on POSTs) and `oasdiff breaking` against `contracts-v1.0`.
 
@@ -299,7 +299,7 @@ Normative topic and key map (consolidating A§23 and A§25):
 
 1. **CDC** — Debezium on Kafka Connect against the corebank Postgres, snapshot then stream, offsets and slot lag checkpointed every 5 minutes ([ADR-0006](./adr/0006-cdc-debezium-on-eks.md)).
 2. **SFTP/CSV** — the full A§31 flow: connect with a pinned host key (fail closed) → discover → download to landing while computing SHA-256 → register → validate → canonicalize to RAW → archive after reconciliation → checkpoint. Workers keep no state of their own.
-3. **API/webhook** — `POST /v1/webhooks/payments` with Cognito JWT **and** HMAC (A§34 defence in depth), schema validation, and idempotency by `webhook_event(event_id)`; a duplicate returns `200 {status:"duplicate"}`.
+3. **API/webhook** — `POST /v1/webhooks/payments` with an OIDC JWT (`webhook:write`) **and** HMAC (A§34 defence in depth), schema validation, and idempotency by `webhook_event(event_id)`; a duplicate returns `200 {status:"duplicate"}`.
 4. **Events** — the canonical bridge below.
 
 **File states (A§36):** `DISCOVERED → RECEIVED → VALIDATING → VALIDATED → PROCESSING → PROCESSED → RECONCILING → RECONCILED → ARCHIVED`, with `FAILED`, `QUARANTINED` and `DUPLICATE` as the exception paths. Every transition is an append-only audit row with actor and reason. Dedup: checksum repeat → `DUPLICATE`; filename reuse with different content → `QUARANTINED FILENAME_REUSED` (A§33). Validation follows D§21 order and any ERROR row quarantines the whole file with a `rejects.jsonl` alongside the original.
@@ -355,10 +355,10 @@ Policy precedence is structural — constraints can only narrow — plus the run
 
 Layered per A§61: identity, API, service identity, network, data, application, audit, governance.
 
-- **Identity (A§62).** Cognito user pool with resource-server scopes and groups; short-lived tokens; no long-lived shared credentials. Minimal M2M clients; SPA client (PKCE) from Phase 12 ([ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md)).
+- **Identity (A§62).** **Keycloak on EKS**, realm `colx` imported as code, backed by a `keycloak` database on the platform RDS. Client scopes are named exactly the logical colon-form scopes (so `platform/authn` needs no mapping); groups arrive as a plain `groups` claim; short-lived tokens; no long-lived shared credentials. Machine clients `platform-services` and `simulator` use client credentials with secrets set post-start from ESO — never in git or the realm JSON. SPA client (PKCE) from Phase 12, when Keycloak is publicly exposed for login redirects ([ADR-0017](./adr/0017-identity-keycloak-on-eks.md), superseding Cognito in [ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md)).
 - **Service identity (A§63).** Workloads reach AWS through **IRSA** — no node-role permissions, no static keys in pods. Inter-service calls carry a scoped machine token.
 - **API (A§64).** Every service validates the JWT itself with deny-by-default scope checks; the gateway (Phase 12) adds rate limiting and correlation injection and contains **no business rules**.
-- **Network (A§65).** Private subnets; data subnets have no NAT route; RDS accepts only the EKS security group; **no public ingress before Phase 12**, then ALB + ACM + WAF basics in front of the API and CloudFront for the SPA. Default-deny NetworkPolicies in the ingestion and services namespaces with explicit allows.
+- **Network (A§65).** Private subnets; data subnets have no NAT route; RDS accepts only the EKS security group; **no public ingress before Phase 12** (`make keycloak` and other port-forwards until then), then ALB + ACM + WAF basics in front of the API, CloudFront for the SPA, and Keycloak exposed for browser login redirects — which makes WAF rules and admin-console lockdown mandatory at that point. Default-deny NetworkPolicies in the ingestion and services namespaces with explicit allows.
 - **Secrets (A§66).** Every Kubernetes secret is an `ExternalSecret` referencing `colx/dev/*` via External Secrets Operator; **zero secret values in git, values files, DAGs, images or logs**. Terraform creates placeholders only; values arrive out of band. CI runs gitleaks over full history, blocking.
 - **Encryption (A§68).** TLS in transit everywhere; SSE-KMS with per-purpose CMKs (`data`, `db`, `msk`, `secrets`) for S3, RDS, MSK and backups; key-pair auth for Snowflake service users.
 - **Data classification and PII (A§67, A§69, D§45).** Native Snowflake `MASKING POLICY` on `dim_customer.{full_name, phone, email, dob}` — `COLX_REPORTER` sees `***MASKED***`, `COLX_PII_READER` (granted to nobody by default) sees values, and REPORTER has no grants on RAW at all. The mapping lives in `security/masking-matrix.md`; v1 events carry minimal PII and payload tokenization is deferred with a written note.
@@ -425,7 +425,7 @@ Architectural risks from A§100 remain live and are managed rather than closed: 
 - An **AWS account** with permission to create the bootstrap stack by hand once (state bucket, GitHub OIDC provider and roles, SNS, budgets), then nothing manual again ([ADR-0010](./adr/0010-terraform-stacks-ci-only-applies.md)).
 - A **Snowflake account** — Enterprise trial first, converted before Phase 6; `ACCOUNTADMIN` creates the Terraform service key-pair ([ADR-0008](./adr/0008-snowflake-dbt-analytics.md)).
 - A **public GitHub repository** (`canhtoanptit/collection-platform`) with a `dev` environment requiring a human reviewer, for OIDC-federated CI.
-- A **domain name** (~$12/yr) before Phase 12 for HTTPS, the Cognito SPA client and the Playwright smoke suite ([ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md)).
+- A **domain name** (~$12/yr) before Phase 12 for HTTPS, the Keycloak SPA client (and Keycloak's own public exposure for login redirects) and the Playwright smoke suite ([ADR-0017](./adr/0017-identity-keycloak-on-eks.md), [ADR-0011](./adr/0011-identity-cognito-irsa-no-ingress.md)).
 - Local toolchain via `mise` (Terraform ≥1.11, Go, Python 3.12, helmfile, kubectl, snowflake-cli) plus Docker for testcontainers.
 - Out-of-band secret values (SFTP host and user keys, webhook HMAC, Snowflake key-pairs) loaded into Secrets Manager — never into Terraform.
 
@@ -440,4 +440,4 @@ Architectural risks from A§100 remain live and are managed rather than closed: 
 7. **PII minimization in events** — v1 events carry minimal PII and masking covers the marts; payload tokenization is deferred with a note in `security/masking-matrix.md`.
 8. **Agency inbound file semantics** — outbound placements plus a DRAFT inbound schema ship; real remittance formats need real agency specifications.
 
-Resolved by decision rather than left open: no schema registry ([ADR-0004](./adr/0004-kafka-eventing-envelope-outbox.md), a deliberate divergence from A§1.2), MSK Provisioned over Serverless, containerized SFTP over Transfer Family, Debezium on EKS over MSK Connect, self-hosted Airflow over MWAA, `COPY INTO` over Snowpipe, and no public ingress before Phase 12.
+Resolved by decision rather than left open: no schema registry ([ADR-0004](./adr/0004-kafka-eventing-envelope-outbox.md), a deliberate divergence from A§1.2), MSK Provisioned over Serverless, containerized SFTP over Transfer Family, Debezium on EKS over MSK Connect, self-hosted Airflow over MWAA, `COPY INTO` over Snowpipe, no public ingress before Phase 12, and — since 2026-08-23, pre-apply — **Keycloak on EKS as the identity provider instead of Cognito** ([ADR-0017](./adr/0017-identity-keycloak-on-eks.md)).
