@@ -88,10 +88,13 @@ for pkg in events ids clock apierror httpkit health config otelkit authn authn/a
 		bash -c "ls platform/$pkg/*.go >/dev/null 2>&1"
 done
 
-# LIB-B and LIB-C own these; creating them here would put two agents in one
-# module (CLAUDE.md §7).
-for pkg in postgres kafka outbox inbox idempotency ruledsl allocation modelclient testkit; do
-	check "not built yet (LIB-B/LIB-C owns it): platform/$pkg" \
+# HISTORICAL GUARD (retired 2026-08-24): during the LIB-A run these packages
+# had to be absent — two agents must never share the module. LIB-B has since
+# landed postgres/kafka legitimately, so the guard now only covers the batches
+# that are still unbuilt. LIB-C's landing retires the rest (its own verify
+# script asserts LIB-A/LIB-B stayed intact instead).
+for pkg in outbox inbox idempotency ruledsl allocation modelclient testkit; do
+	check "not built yet (LIB-C owns it): platform/$pkg" \
 		bash -c "test ! -d platform/$pkg"
 done
 
@@ -240,16 +243,13 @@ check "the contracts module is required with a replace so platform builds alone"
 
 echo
 echo "=== 8. dependency guard ==="
-# LIB-B and LIB-C own these. A dependency appearing here means a package was
-# built out of order, in a module two agents would then be sharing.
+# HISTORICAL GUARD (amended 2026-08-24): pgx/franz-go/goose/testcontainers are
+# legitimate since LIB-B landed. Only LIB-C's dependencies remain forbidden
+# until that batch runs.
 for dep in \
-	github.com/jackc/pgx \
-	github.com/twmb/franz-go \
-	github.com/pressly/goose \
-	github.com/testcontainers/testcontainers-go \
 	github.com/shopspring/decimal \
 	github.com/getkin/kin-openapi; do
-	check "forbidden dependency absent (LIB-B/LIB-C): $dep" \
+	check "forbidden dependency absent (LIB-C): $dep" \
 		bash -c "! grep -q '$dep' platform/go.mod"
 done
 # Required dependencies, each pinned to an explicit semantic version. -F keeps
