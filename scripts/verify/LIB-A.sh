@@ -327,7 +327,12 @@ go_test_named ./health '^TestReadiness$' \
 
 echo
 echo "=== 10. coverage floor (>= ${COVERAGE_FLOOR}%) ==="
-if go -C platform test ./... -count=1 -covermode=atomic \
+# Scoped to LIB-A's own packages (amended 2026-08-24): later batches keep their
+# real coverage behind the `integration` build tag, so an unscoped ./... sweep
+# here would judge them by their unit slice. Each batch's verify script owns
+# its packages' floors (LIB-B.sh runs tagged; same for LIB-C).
+LIB_A_PKGS="./events ./ids ./clock ./apierror ./httpkit ./health ./config ./otelkit ./authn ./authn/authtest"
+if go -C platform test $LIB_A_PKGS -count=1 -covermode=atomic \
 	-coverprofile="$TMP/coverage.out" >"$TMP/coverage.log" 2>&1; then
 	total="$(go -C platform tool cover -func="$TMP/coverage.out" |
 		awk '$1 == "total:" { gsub("%", "", $NF); print $NF }')"
